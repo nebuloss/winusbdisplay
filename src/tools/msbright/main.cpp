@@ -34,6 +34,7 @@ constexpr UINT kCmdBrightnessBase = 1000;  /* + percent */
 constexpr UINT kCmdContrastBase = 2000;    /* + percent */
 constexpr UINT kCmdExit = 3000;
 constexpr UINT kCmdReset = 3001;
+constexpr UINT kCmdAutostart = 3002;
 
 const int kBrightnessSteps[] = {100, 90, 75, 60, 50, 40, 30, 20, 10};
 const int kContrastSteps[] = {70, 60, 50, 40, 30};
@@ -45,6 +46,46 @@ NOTIFYICONDATAW g_tray = {};
 HWND g_window = nullptr;
 int g_brightness = kDefaultBrightness;
 int g_contrast = kDefaultContrast;
+
+constexpr wchar_t kRunKey[] =
+    L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run";
+constexpr wchar_t kRunValue[] = L"msbright";
+
+/* Autostart lives in HKCU so toggling it never needs elevation. */
+bool IsAutostartEnabled() {
+  HKEY key = nullptr;
+  if (RegOpenKeyExW(HKEY_CURRENT_USER, kRunKey, 0, KEY_QUERY_VALUE, &key) !=
+      ERROR_SUCCESS) {
+    return false;
+  }
+  const bool present =
+      RegQueryValueExW(key, kRunValue, nullptr, nullptr, nullptr, nullptr) ==
+      ERROR_SUCCESS;
+  RegCloseKey(key);
+  return present;
+}
+
+void SetAutostart(bool enable) {
+  HKEY key = nullptr;
+  if (RegCreateKeyExW(HKEY_CURRENT_USER, kRunKey, 0, nullptr,
+                      REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, nullptr, &key,
+                      nullptr) != ERROR_SUCCESS) {
+    return;
+  }
+  if (enable) {
+    wchar_t path[MAX_PATH] = {0};
+    if (GetModuleFileNameW(nullptr, path, MAX_PATH)) {
+      wchar_t quoted[MAX_PATH + 2];
+      _snwprintf_s(quoted, _TRUNCATE, L"\"%s\"", path);
+      RegSetValueExW(key, kRunValue, 0, REG_SZ,
+                     reinterpret_cast<const BYTE*>(quoted),
+                     static_cast<DWORD>((wcslen(quoted) + 1) * sizeof(wchar_t)));
+    }
+  } else {
+    RegDeleteValueW(key, kRunValue);
+  }
+  RegCloseKey(key);
+}
 
 int Clamp(int value, int low, int high) {
   if (value < low) {
@@ -168,6 +209,8 @@ void ShowMenu() {
               L"Contrast");
   AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(menu, MF_STRING, kCmdReset, L"Reset to default");
+  AppendMenuW(menu, MF_STRING | (IsAutostartEnabled() ? MF_CHECKED : 0),
+              kCmdAutostart, L"Start with Windows");
   AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(menu, MF_STRING, kCmdExit, L"Exit");
 
@@ -197,6 +240,8 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam,
       } else if (id == kCmdReset) {
         ApplyBrightness(kDefaultBrightness);
         ApplyContrast(kDefaultContrast);
+      } else if (id == kCmdAutostart) {
+        SetAutostart(!IsAutostartEnabled());
       } else if (id >= kCmdContrastBase) {
         ApplyContrast(static_cast<int>(id - kCmdContrastBase));
       } else if (id >= kCmdBrightnessBase) {
