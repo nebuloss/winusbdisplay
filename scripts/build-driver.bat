@@ -17,6 +17,20 @@ if not exist "%MSBUILD%" (
   exit /b 1
 )
 
+rem The compute shader is compiled offline into a header, so the driver does
+rem not need d3dcompiler at runtime. Only rebuilt when the source is newer.
+set FXC=
+for /f "usebackq tokens=*" %%i in (`dir /b /s "%ProgramFiles(x86)%\Windows Kits\10\bin\*\x64\fxc.exe" 2^>nul`) do set FXC=%%i
+if defined FXC (
+  "%FXC%" /nologo /T cs_5_0 /E main /O3 ^
+    /Fh "%ROOT%\src\driver\convert_cs.h" /Vn kConvertComputeShader ^
+    "%ROOT%\src\driver\convert_cs.hlsl" >nul
+  if errorlevel 1 (
+    echo shader compilation failed
+    exit /b 1
+  )
+)
+
 set CONFIG=%1
 if "%CONFIG%"=="" set CONFIG=Release
 set PLATFORM=%2
