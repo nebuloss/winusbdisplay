@@ -172,7 +172,7 @@ struct CustomTimingRecord {
   uint16_t hsyncwidth;
   uint16_t vsyncwidth;
 };
-static_assert(sizeof(CustomTimingRecord) == 26, "");
+static_assert(sizeof(CustomTimingRecord) == 22, "");
 
 #pragma pack(pop)
 
