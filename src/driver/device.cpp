@@ -792,6 +792,7 @@ bool SwapChainProcessor::ProcessFrame(
   Rect damage = EmptyRect();
 
   if (force_full_frame_) {
+    Log("damage: first frame, repainting everything");
     damage.x1 = 0;
     damage.y1 = 0;
     damage.x2 = fb_width;
@@ -853,10 +854,20 @@ bool SwapChainProcessor::ProcessFrame(
     if (query_failed) {
       /* Only fall back to a full repaint when the OS would not tell us what
        * actually changed. */
+      Log("damage: dirty rect query failed, repainting everything");
       damage.x1 = 0;
       damage.y1 = 0;
       damage.x2 = fb_width;
       damage.y2 = fb_height;
+    } else if (damage.width() >= fb_width && damage.height() >= fb_height) {
+      static ULONGLONG last_full_log = 0;
+      const ULONGLONG now_full = GetTickCount64();
+      if (now_full - last_full_log >= 2000) {
+        last_full_log = now_full;
+        Log("damage: OS reported whole screen, rects=%u moves=%u frame=%u",
+            meta.DirtyRectCount, meta.MoveRegionCount,
+            meta.PresentationFrameNumber);
+      }
     }
     have_new_damage = !damage.empty();
   }
