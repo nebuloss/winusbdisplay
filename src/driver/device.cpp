@@ -302,7 +302,7 @@ std::vector<uint8_t>* FrameSender::AcquireBuffer(DWORD wait_ms,
 }
 
 void FrameSender::Submit(std::vector<uint8_t>* buffer, size_t length,
-                         const Rect& damage) {
+                         const Rect& damage, bool twice) {
   {
     std::lock_guard<std::mutex> lock(mutex_);
     for (Slot& slot : slots_) {
@@ -310,6 +310,7 @@ void FrameSender::Submit(std::vector<uint8_t>* buffer, size_t length,
         slot.length = length;
         slot.damage = damage;
         slot.queued = true;
+        slot.twice = twice;
         slot.queued_at = GetTickCount64();
         break;
       }
@@ -358,6 +359,10 @@ void FrameSender::WorkerMain() {
     ULONGLONG start = GetTickCount64();
     const ULONGLONG waited = start - slot->queued_at;
     bool ok = device_->SendFrame(slot->data.data(), slot->length);
+    if (ok && slot->twice) {
+      /* Same bytes again so the chip's other frame buffer matches. */
+      ok = device_->SendFrame(slot->data.data(), slot->length);
+    }
     ULONGLONG cost = GetTickCount64() - start;
     {
       /* Split the delay a frame sees into time spent waiting behind the
@@ -856,13 +861,16 @@ bool SwapChainProcessor::ProcessFrame(
     have_new_damage = !damage.empty();
   }
 
-  if (have_new_damage) {
-    pending_damage_[0] = MergeRects(pending_damage_[0], damage);
-    pending_damage_[1] = MergeRects(pending_damage_[1], damage);
+  Rect to_send;
+  {
+    std::lock_guard<std::mutex> damage_lock(damage_mutex_);
+    if (have_new_damage) {
+      pending_damage_[0] = MergeRects(pending_damage_[0], damage);
+      pending_damage_[1] = MergeRects(pending_damage_[1], damage);
+    }
+    to_send =
+        AlignDamageRect(pending_damage_[frame_index_], fb_width, fb_height);
   }
-
-  Rect to_send =
-      AlignDamageRect(pending_damage_[frame_index_], fb_width, fb_height);
   if (to_send.empty()) {
     return true;
   }
@@ -887,6 +895,7 @@ bool SwapChainProcessor::ProcessFrame(
      * And the damage it carried was cleared from that buffer's pending set at
      * the same time, so restore it, otherwise the region stays stale there
      * forever. */
+    std::lock_guard<std::mutex> damage_lock(damage_mutex_);
     frame_index_ = 1 - frame_index_;
     pending_damage_[frame_index_] =
         MergeRects(pending_damage_[frame_index_], superseded);
@@ -1055,9 +1064,12 @@ bool SwapChainProcessor::ProcessFrame(
 
   sender_->Submit(transfer, length, to_send);
 
-  /* This buffer is now up to date; the other one still owes the same damage. */
-  pending_damage_[frame_index_] = EmptyRect();
-  frame_index_ = 1 - frame_index_;
+  {
+    /* This buffer is now up to date; the other still owes the same damage. */
+    std::lock_guard<std::mutex> damage_lock(damage_mutex_);
+    pending_damage_[frame_index_] = EmptyRect();
+    frame_index_ = 1 - frame_index_;
+  }
   last_send_ms_ = now_ms;
 
   /* Report how much of the screen each transfer actually covers: if damage
@@ -1317,6 +1329,7 @@ bool SwapChainProcessor::DrawCursor() {
     return false;
   }
   if (!superseded.empty()) {
+    std::lock_guard<std::mutex> damage_lock(damage_mutex_);
     frame_index_ = 1 - frame_index_;
     pending_damage_[frame_index_] =
         MergeRects(pending_damage_[frame_index_], superseded);
@@ -1355,13 +1368,10 @@ bool SwapChainProcessor::DrawCursor() {
               (static_cast<uint32_t>(region.height()) & 0xFFF));
   memcpy(transfer->data(), &header, sizeof(header));
 
-  /* The other chip buffer still owes this region. */
-  pending_damage_[1 - frame_index_] =
-      MergeRects(pending_damage_[1 - frame_index_], region);
-  pending_damage_[frame_index_] = EmptyRect();
-  frame_index_ = 1 - frame_index_;
-
-  sender_->Submit(transfer, length, region);
+  /* Sent twice, so both chip buffers receive it and neither is left owing
+   * this region. The parity is unchanged by an even number of transfers, so
+   * the frame path's tracking stays correct. */
+  sender_->Submit(transfer, length, region, true);
   last_send_ms_ = GetTickCount64();
   return true;
 }

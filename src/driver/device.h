@@ -54,7 +54,12 @@ class FrameSender {
 
   /* Hands the buffer previously returned by AcquireBuffer to the worker,
    * along with the damage it covers. */
-  void Submit(std::vector<uint8_t>* buffer, size_t length, const Rect& damage);
+  /* `twice` transmits the same bytes back to back. The chip alternates
+   * between two frame buffers on every transfer, so a standalone partial
+   * update otherwise lands in one of them and the other keeps older content,
+   * which alternates visibly on screen. Sending it twice puts it in both. */
+  void Submit(std::vector<uint8_t>* buffer, size_t length, const Rect& damage,
+              bool twice = false);
 
   /* Returns a buffer to the pool without sending it. */
   void Cancel(std::vector<uint8_t>* buffer);
@@ -76,6 +81,7 @@ class FrameSender {
     /* What this frame repaints, so it can be recovered if superseded. */
     Rect damage;
     unsigned long long queued_at = 0;
+    bool twice = false;
   };
 
   Device* device_;
@@ -195,6 +201,10 @@ class SwapChainProcessor {
    * the buffer actually written is cleared. Tracking a single rectangle makes
    * each buffer miss half the updates, which shows up as ghosting and as the
    * picture flickering between two different images. */
+  /* Damage owed by each chip buffer, and which buffer the next transfer will
+   * land in. Touched by both the swapchain thread and the cursor thread, so
+   * everything that reads or writes them holds damage_mutex_. */
+  std::mutex damage_mutex_;
   Rect pending_damage_[2];
   int frame_index_ = 0;
   bool force_full_frame_ = true;
