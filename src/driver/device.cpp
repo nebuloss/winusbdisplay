@@ -494,6 +494,9 @@ IndirectDevice::IndirectDevice(WDFDEVICE wdf_device)
     : wdf_device_(wdf_device) {}
 
 IndirectDevice::~IndirectDevice() {
+  if (monitor_thread_.joinable()) {
+    monitor_thread_.join();
+  }
   processor_.reset();
   sender_.reset();
   ms_device_.reset();
@@ -559,6 +562,9 @@ NTSTATUS IndirectDevice::PrepareHardware() {
 }
 
 void IndirectDevice::ReleaseHardware() {
+  if (monitor_thread_.joinable()) {
+    monitor_thread_.join();
+  }
   processor_.reset();
   if (sender_) {
     sender_->Stop();
@@ -660,7 +666,18 @@ void IndirectDevice::CreateMonitor() {
 
 void IndirectDevice::OnAdapterInitFinished(IDDCX_ADAPTER adapter) {
   adapter_ = adapter;
-  CreateMonitor();
+
+  /* Do not create the monitor from inside this callback. The adapter is not
+   * fully ready until it returns, and IddCxMonitorArrival then fails with
+   * STATUS_DEVICE_NOT_READY. Arrival may only be attempted once per monitor,
+   * so there is no retrying out of it: the work has to be deferred instead. */
+  if (monitor_thread_.joinable()) {
+    monitor_thread_.join();
+  }
+  monitor_thread_ = std::thread([this] {
+    Sleep(250);
+    CreateMonitor();
+  });
 }
 
 NTSTATUS IndirectDevice::CommitModes(const IDARG_IN_COMMITMODES* args) {
