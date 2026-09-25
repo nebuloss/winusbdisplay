@@ -676,7 +676,7 @@ void SwapChainProcessor::VerifyGpuAgainstCpu(ID3D11Texture2D* source,
   }
 }
 
-bool SwapChainProcessor::ProcessFrame(bool SwapChainProcessor::ProcessFrame(
+bool SwapChainProcessor::ProcessFrame(
     const IDARG_OUT_RELEASEANDACQUIREBUFFER& buffer) {
   const IDDCX_METADATA& meta = buffer.MetaData;
   if (!meta.pSurface) {
