@@ -83,11 +83,33 @@ std::vector<DeviceLocation> HidTransport::Enumerate() {
       continue;
     }
     loc.instance = loc.path;
+    loc.has_container_id =
+        GetContainerIdForInterface(loc.path, hid_guid, &loc.container_id);
     found.push_back(loc);
   }
 
   SetupDiDestroyDeviceInfoList(info);
   return found;
+}
+
+std::unique_ptr<HidTransport> HidTransport::OpenForContainer(
+    const GUID& container, std::string* error) {
+  std::vector<DeviceLocation> devices = Enumerate();
+  std::string last = "no MacroSilicon HID interface matched the device";
+  for (const DeviceLocation& loc : devices) {
+    if (!loc.has_container_id ||
+        !IsEqualGUID(loc.container_id, container)) {
+      continue;
+    }
+    std::unique_ptr<HidTransport> transport = OpenPath(loc.path, &last);
+    if (transport) {
+      return transport;
+    }
+  }
+  if (error) {
+    *error = last;
+  }
+  return nullptr;
 }
 
 std::unique_ptr<HidTransport> HidTransport::Open(std::string* error) {
