@@ -4,6 +4,8 @@
 
 #include <emmintrin.h>
 
+#include <vector>
+
 #include <climits>
 #include <cstring>
 
