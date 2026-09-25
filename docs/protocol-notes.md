@@ -476,3 +476,47 @@ left at 1, `SetDisplayConfig` returns 0 and the display comes up. Set the
 divider to 2 or more and it returns 31 again, so Windows is refusing the
 divider itself rather than reacting to malformed timings. It is left behind
 the `SyncDivider` registry switch, default off.
+
+## GPU conversion
+
+The remaining CPU cost after the SIMD and threading work was the readback:
+about 4.5 ms of the 7 ms per full frame went on `Map`, waiting for and then
+reading the acquired surface. A compute shader removes both halves of that
+problem. It converts on the GPU and writes UYVY straight into a buffer, so the
+only thing crossing the bus is the 4.1 MB actually transmitted rather than the
+8.3 MB of source RGBA, and the CPU does no conversion at all.
+
+`src/driver/convert_cs.hlsl`, compiled offline by `scripts/build-driver.bat`
+into `convert_cs.h`, so the driver needs no runtime shader compiler. Each
+thread produces one UYVY quad, and the integer coefficients are identical to
+the scalar reference.
+
+Correctness is checked at runtime, not assumed: the first frame after the
+swapchain is assigned is converted both ways and compared. On the test machine
+the largest difference over all 4,147,200 bytes is **0**, exactly matching the
+CPU path. If it ever exceeded two the driver logs it and falls back
+permanently.
+
+Measured, driving the same animation on the USB display:
+
+| Path | Full frame | Typical damage | CPU used |
+|---|---|---|---|
+| CPU, threaded SIMD | ~7.0 ms | ~1.6 ms | 3.3% of a core |
+| GPU compute | ~6.8 ms | ~1.0 ms | **1.5% of a core** |
+
+Wall clock is close to break even, which is worth being clear about. The win is
+that the processor is left alone: half the CPU for the same work. On this
+machine the GPU is an integrated Intel part sharing system memory, so reading
+back from it was never especially slow. On a discrete GPU the CPU path would
+have to drag 8.3 MB per frame across PCIe while the GPU path drags 4.1 MB, and
+the gap should be considerably wider.
+
+The remaining cost is that `Map` on the readback buffer still blocks until the
+GPU finishes. Removing that needs either a second readback buffer, which costs
+a frame of latency, or D3D12 async copy queues with fences. Looking Glass does
+the latter, but it streams at full refresh rate to a VM; here USB caps the
+frame rate at 7.5 fps and the conversion is already about 5% of the transfer
+time, so neither is currently worth the complexity.
+
+Set `UseComputeShader` to 0 under `HKLM\SOFTWARE\winusbdisplay` to force the
+CPU path, which is also used automatically if the GPU path cannot initialise.

@@ -30,6 +30,7 @@ desktop.
 | Pixels on the panel | working |
 | IddCx driver: monitor appears and shows the desktop | **working** |
 | Damage tracking, move regions, idle refresh | working |
+| GPU compute conversion (bit exact, CPU fallback) | working |
 | Brightness control | working, but not via DDC/CI (see below) |
 
 The test unit reports USB id `345F:9133` but carries an **MS912C** die running

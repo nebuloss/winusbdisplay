@@ -167,10 +167,14 @@ Each of these cost real investigation; the evidence is in
   `totalSize.cx * totalSize.cy * vSyncFreq` and `hSyncFreq` equals
   `pixelRate / totalSize.cx`, with `totalSize` including blanking. Setting
   `totalSize` equal to `activeSize` breaks those identities.
-- **Conversion reads mapped GPU memory, which is slow.** Most of the cost is
-  memory, not arithmetic, which is why it is threaded. Re-measure with the
-  phase timers in `ProcessFrame` before changing it, and check correctness
-  with `msdisp selftest`.
+- **Conversion runs on the GPU by default** (`src/driver/convert_cs.hlsl`,
+  compiled offline into `convert_cs.h` by the driver build). It is bit exact
+  with the scalar reference and the driver verifies that on the first frame.
+  The threaded SIMD CPU path remains as an automatic fallback and is selected
+  by `UseComputeShader=0`. Wall clock is near break even on integrated
+  graphics; the win is halved CPU use. Re-measure with the phase timers in
+  `ProcessFrame` and `scripts/compare-paths.ps1`, and check the CPU paths
+  against each other with `msdisp selftest`.
 - **Windows never calls the IddCx I2C callbacks**, so DDC/CI cannot work for
   an indirect display. Microsoft documents this, and it was measured: the
   callbacks never fire and `dxva2` returns `ERROR_NOT_SUPPORTED`.
