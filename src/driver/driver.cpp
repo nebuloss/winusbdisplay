@@ -88,7 +88,7 @@ NTSTATUS EvtDeviceD0Entry(WDFDEVICE wdf_device, WDF_POWER_DEVICE_STATE) {
   caps.EndPointDiagnostics.Size = sizeof(caps.EndPointDiagnostics);
   caps.EndPointDiagnostics.GammaSupport = IDDCX_FEATURE_IMPLEMENTATION_NONE;
   caps.EndPointDiagnostics.TransmissionType =
-      IDDCX_TRANSMISSION_TYPE_OTHER_EXTERNAL;
+      IDDCX_TRANSMISSION_TYPE_WIRED_USB;
   caps.EndPointDiagnostics.pEndPointFriendlyName = L"MacroSilicon USB Display";
   caps.EndPointDiagnostics.pEndPointManufacturerName = L"MacroSilicon";
   caps.EndPointDiagnostics.pEndPointModelName = L"MS912x/MS913x";
