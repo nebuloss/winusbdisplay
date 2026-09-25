@@ -408,23 +408,61 @@ bool SwapChainProcessor::ProcessFrame(
     damage.y2 = fb_height;
     have_new_damage = true;
   } else if (meta.DirtyRectCount > 0 || meta.MoveRegionCount > 0) {
-    std::vector<RECT> rects(meta.DirtyRectCount);
-    IDARG_IN_GETDIRTYRECTS in = {};
-    in.DirtyRectInCount = meta.DirtyRectCount;
-    in.pDirtyRects = rects.data();
-    IDARG_OUT_GETDIRTYRECTS out = {};
-    if (meta.MoveRegionCount > 0 ||
-        !NT_SUCCESS(IddCxSwapChainGetDirtyRects(swapchain_, &in, &out))) {
-      /* Move regions relocate content, so the source area needs repainting
-       * too. Rather than track both ends, repaint everything. */
+    bool query_failed = false;
+
+    if (meta.DirtyRectCount > 0) {
+      std::vector<RECT> rects(meta.DirtyRectCount);
+      IDARG_IN_GETDIRTYRECTS in = {};
+      in.DirtyRectInCount = meta.DirtyRectCount;
+      in.pDirtyRects = rects.data();
+      IDARG_OUT_GETDIRTYRECTS out = {};
+      if (NT_SUCCESS(IddCxSwapChainGetDirtyRects(swapchain_, &in, &out))) {
+        for (UINT i = 0; i < out.DirtyRectOutCount; ++i) {
+          damage = MergeRects(damage, FromRECT(rects[i]));
+        }
+      } else {
+        query_failed = true;
+      }
+    }
+
+    if (meta.MoveRegionCount > 0) {
+      /* A move region says "this block of pixels moved from here to there".
+       * Both ends change: the destination gains the content and the source
+       * is repainted with whatever was behind it. Blasting the whole screen
+       * instead, which is the obvious shortcut, turns every window drag into
+       * a full 4 MB transfer and is the main cause of drag lag on USB 2. */
+      std::vector<IDDCX_MOVEREGION> moves(meta.MoveRegionCount);
+      for (auto& move : moves) {
+        move.Size = sizeof(move);
+      }
+      IDARG_IN_GETMOVEREGIONS in = {};
+      in.MoveRegionInCount = meta.MoveRegionCount;
+      in.pMoveRegions = moves.data();
+      IDARG_OUT_GETMOVEREGIONS out = {};
+      if (NT_SUCCESS(IddCxSwapChainGetMoveRegions(swapchain_, &in, &out))) {
+        for (UINT i = 0; i < out.MoveRegionOutCount; ++i) {
+          const RECT& dest = moves[i].DestRect;
+          damage = MergeRects(damage, FromRECT(dest));
+
+          Rect source;
+          source.x1 = moves[i].SourcePoint.x;
+          source.y1 = moves[i].SourcePoint.y;
+          source.x2 = source.x1 + (dest.right - dest.left);
+          source.y2 = source.y1 + (dest.bottom - dest.top);
+          damage = MergeRects(damage, source);
+        }
+      } else {
+        query_failed = true;
+      }
+    }
+
+    if (query_failed) {
+      /* Only fall back to a full repaint when the OS would not tell us what
+       * actually changed. */
       damage.x1 = 0;
       damage.y1 = 0;
       damage.x2 = fb_width;
       damage.y2 = fb_height;
-    } else {
-      for (UINT i = 0; i < out.DirtyRectOutCount; ++i) {
-        damage = MergeRects(damage, FromRECT(rects[i]));
-      }
     }
     have_new_damage = !damage.empty();
   }
