@@ -10,7 +10,6 @@
 namespace ms912x {
 namespace {
 
-constexpr ULONG kControlTimeoutMs = 1000;
 constexpr ULONG kBulkTimeoutMs = 5000;
 
 }  // namespace
@@ -48,7 +47,8 @@ std::unique_ptr<WdfUsbBackend> WdfUsbBackend::Create(WDFDEVICE device,
     }
     return nullptr;
   }
-  backend->usb_interface_ = config_params.Types.SingleInterface.ConfiguredUsbInterface;
+  backend->usb_interface_ =
+      config_params.Types.SingleInterface.ConfiguredUsbInterface;
 
   const BYTE pipe_count =
       config_params.Types.SingleInterface.NumberConfiguredPipes;
@@ -60,9 +60,6 @@ std::unique_ptr<WdfUsbBackend> WdfUsbBackend::Create(WDFDEVICE device,
     if (!pipe) {
       continue;
     }
-    if (!WdfUsbPipeTypeBulk == info.PipeType) {
-      /* keep looking */
-    }
     if (info.PipeType != WdfUsbPipeTypeBulk ||
         !WdfUsbTargetPipeIsOutEndpoint(pipe)) {
       continue;
@@ -72,8 +69,8 @@ std::unique_ptr<WdfUsbBackend> WdfUsbBackend::Create(WDFDEVICE device,
     }
     backend->bulk_pipe_ = pipe;
     backend->bulk_endpoint_ = info.EndpointAddress;
-    /* Large frames are split by the framework; do not require the device to
-     * see a short packet at the end of every transfer. */
+    /* Frames are far larger than the maximum packet size and the framework
+     * splits them; do not demand a short packet at the end of each one. */
     WdfUsbTargetPipeSetNoMaximumPacketSizeCheck(pipe);
     break;
   }
@@ -98,56 +95,14 @@ std::string WdfUsbBackend::Describe() const {
   return buf;
 }
 
-bool WdfUsbBackend::ControlTransfer(bool device_to_host, uint8_t request,
-                                    uint8_t* data, size_t len) {
-  WDF_USB_CONTROL_SETUP_PACKET setup;
-  WDF_USB_CONTROL_SETUP_PACKET_INIT_CLASS(
-      &setup,
-      device_to_host ? BmRequestDeviceToHost : BmRequestHostToDevice,
-      BmRequestToInterface, request, kHidReportValue, kHidReportIndex);
-
-  WDF_MEMORY_DESCRIPTOR descriptor;
-  WDF_MEMORY_DESCRIPTOR_INIT_BUFFER(&descriptor, data,
-                                    static_cast<ULONG>(len));
-
-  WDF_REQUEST_SEND_OPTIONS options;
-  WDF_REQUEST_SEND_OPTIONS_INIT(&options, WDF_REQUEST_SEND_OPTION_TIMEOUT);
-  WDF_REQUEST_SEND_OPTIONS_SET_TIMEOUT(
-      &options, WDF_REL_TIMEOUT_IN_MS(kControlTimeoutMs));
-
-  ULONG transferred = 0;
-  NTSTATUS status = WdfUsbTargetDeviceSendControlTransferSynchronously(
-      usb_device_, WDF_NO_HANDLE, &options, &setup, &descriptor, &transferred);
-  if (!NT_SUCCESS(status)) {
-    char buf[96];
-    _snprintf_s(buf, sizeof(buf), _TRUNCATE, "control transfer 0x%02X: 0x%08X",
-                request, status);
-    SetError(buf);
-    return false;
-  }
-  if (transferred != len) {
-    SetError("short control transfer");
-    return false;
-  }
-  return true;
+bool WdfUsbBackend::ControlSetReport(const uint8_t*, size_t) {
+  SetError("this backend has no control plane; pair it with a HidTransport");
+  return false;
 }
 
-bool WdfUsbBackend::ControlSetReport(const uint8_t* data, size_t len) {
-  if (len != kControlPayloadSize) {
-    SetError("control payload must be 8 bytes");
-    return false;
-  }
-  uint8_t scratch[kControlPayloadSize];
-  memcpy(scratch, data, len);
-  return ControlTransfer(false, kHidReqSetReport, scratch, len);
-}
-
-bool WdfUsbBackend::ControlGetReport(uint8_t* data, size_t len) {
-  if (len != kControlPayloadSize) {
-    SetError("control payload must be 8 bytes");
-    return false;
-  }
-  return ControlTransfer(true, kHidReqGetReport, data, len);
+bool WdfUsbBackend::ControlGetReport(uint8_t*, size_t) {
+  SetError("this backend has no control plane; pair it with a HidTransport");
+  return false;
 }
 
 bool WdfUsbBackend::BulkWrite(const uint8_t* data, size_t len) {
@@ -156,18 +111,27 @@ bool WdfUsbBackend::BulkWrite(const uint8_t* data, size_t len) {
     return false;
   }
 
-  WDF_MEMORY_DESCRIPTOR descriptor;
-  WDF_MEMORY_DESCRIPTOR_INIT_BUFFER(&descriptor, const_cast<uint8_t*>(data),
-                                    static_cast<ULONG>(len));
-
   WDF_REQUEST_SEND_OPTIONS options;
   WDF_REQUEST_SEND_OPTIONS_INIT(&options, WDF_REQUEST_SEND_OPTION_TIMEOUT);
   WDF_REQUEST_SEND_OPTIONS_SET_TIMEOUT(
       &options, WDF_REL_TIMEOUT_IN_MS(kBulkTimeoutMs));
 
   ULONG transferred = 0;
-  NTSTATUS status = WdfUsbTargetPipeWriteSynchronously(
-      bulk_pipe_, WDF_NO_HANDLE, &options, &descriptor, &transferred);
+  NTSTATUS status;
+
+  if (len == 0) {
+    /* Zero length terminating packet. A null memory descriptor is how WDF
+     * expresses that. */
+    status = WdfUsbTargetPipeWriteSynchronously(
+        bulk_pipe_, WDF_NO_HANDLE, &options, nullptr, &transferred);
+  } else {
+    WDF_MEMORY_DESCRIPTOR descriptor;
+    WDF_MEMORY_DESCRIPTOR_INIT_BUFFER(&descriptor, const_cast<uint8_t*>(data),
+                                      static_cast<ULONG>(len));
+    status = WdfUsbTargetPipeWriteSynchronously(
+        bulk_pipe_, WDF_NO_HANDLE, &options, &descriptor, &transferred);
+  }
+
   if (!NT_SUCCESS(status)) {
     char buf[96];
     _snprintf_s(buf, sizeof(buf), _TRUNCATE, "bulk write: 0x%08X", status);
