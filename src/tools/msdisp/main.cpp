@@ -154,17 +154,6 @@ const Mode* ResolveMode(const char* spec) {
   return mode;
 }
 
-const char* ChipFamilyName(ChipFamily family) {
-  switch (family) {
-    case ChipFamily::kMs912x:
-      return "MS912x family (chip id at 0xF000)";
-    case ChipFamily::kMs913x:
-      return "MS913x family (chip id at 0xFF00)";
-    default:
-      return "unrecognised";
-  }
-}
-
 int CmdList() {
   std::vector<DeviceLocation> hid = HidTransport::Enumerate();
   printf("HID control interfaces:\n");
