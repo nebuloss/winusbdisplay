@@ -18,28 +18,67 @@ and MacroSilicon's own GPL-2.0 Linux sources.
 
 ## Status
 
+Working: the dongle appears as a second monitor in Windows and shows the
+desktop.
+
 | Phase | State |
 |---|---|
-| Enumerate the device | done |
-| Control plane: chip id, connector, display status | **verified on hardware** |
-| EDID read and checksum | **verified on hardware** |
-| Flash read / custom timings | works (none programmed on the test unit) |
-| Modeset sequence | **verified on hardware** |
-| Colour conversion and frame framing | **verified byte for byte** |
-| Pixels on the panel | **working: colour bars and solid colours at 1080p and 720p** |
-| IddCx driver: installs, starts, reads EDID, builds mode list | working |
-| IddCx driver: monitor appears in Windows | **not yet** (see below) |
+| Control plane: chip id, connector, hotplug | verified on hardware |
+| EDID read and checksum | verified on hardware |
+| Modeset sequence | verified on hardware |
+| Colour conversion and framing | verified byte for byte |
+| Pixels on the panel | working |
+| IddCx driver: monitor appears and shows the desktop | **working** |
+| Damage tracking, move regions, idle refresh | working |
+| Brightness control | working, but not via DDC/CI (see below) |
 
-The protocol half of this project is finished and proven. `msdisp` drives the
-panel end to end.
+The test unit reports USB id `345F:9133` but carries an **MS912C** die running
+at USB 2.0 high speed. See `docs/protocol-notes.md`.
 
-The indirect display driver installs and starts cleanly, opens both transports,
-reads the monitor's EDID and builds its mode list, but `IddCxMonitorArrival`
-returns `STATUS_DEVICE_NOT_READY`, so no extra monitor appears in Settings yet.
-Investigation so far is written up in `docs/troubleshooting.md`.
+## Performance
 
-The test hardware is a dongle with USB id `345F:9133` that turns out to carry
-an **MS912C** die running at USB 2.0 high speed. See `docs/protocol-notes.md`.
+Measured, not estimated:
+
+| Mode | Full-frame rate |
+|---|---|
+| 1920x1080 | 7.5 fps |
+| 1280x720 | 15.0 fps |
+| 1024x768 | 19.2 fps |
+
+This is a hardware ceiling, confirmed three ways: the chip id says MS912C,
+there is no BOS descriptor (so the silicon is not USB 3 capable), and
+pipelining up to eight overlapped transfers changes throughput by less than
+1%. The device saturates at 29.6 MB/s while USB 2.0 itself can carry 40 to 45.
+
+Full-frame rate only matters for full-screen video. Ordinary desktop use is
+driven by damage tracking, which sends what actually changed:
+
+```
+damage: 20x22   at (268,332)  ->    896 bytes
+damage: 24x22   at (1172,624) ->  1,072 bytes
+damage: 604x52  at (180,398)  -> 62,832 bytes
+```
+
+Roughly 1 KB per update rather than 4 MB. For smoother full-screen content,
+pick a lower resolution: 1280x720 doubles the frame rate, and 1920x1080@30 is
+offered as a native chip mode.
+
+## Brightness
+
+Windows does not route DDC/CI to indirect displays, so Twinkle Tray and
+similar tools report this monitor as unsupported. That is an OS limitation,
+not a gap in this driver: Microsoft's own DDI documentation states the OS does
+not call an indirect display driver's I2C callbacks, and probing confirms they
+are never invoked. The driver implements a full DDC/CI slave regardless, in
+case that changes.
+
+Brightness works through a registry value instead, applied during colour
+conversion so it genuinely dims the panel:
+
+```
+powershell -File scripts\brightness.ps1 -Brightness 60
+powershell -File scripts\brightness.ps1              :: show current
+```
 
 ## Quick start
 

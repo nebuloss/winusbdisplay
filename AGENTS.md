@@ -146,6 +146,23 @@ Returning a **distinct** `NTSTATUS` per failure point is also worth keeping:
 `PrepareHardware`'s return value is one of the few things that surfaces
 verbatim in the UMDF event log.
 
+## Settled questions, do not re-litigate
+
+Each of these cost real investigation; the evidence is in
+`docs/protocol-notes.md`.
+
+- **~30 MB/s is a hardware ceiling.** The chip is USB 2 silicon (MS912C, no
+  BOS descriptor) and saturates at 29.6 MB/s. Pipelined overlapped transfers
+  at depth 2, 4 and 8 all measure within 1% of synchronous. Do not go looking
+  for host-side throughput wins; there are none. `msdisp bench` re-measures.
+- **There is no cheaper pixel format.** The chip offers RGB565, RGB888,
+  YUV422 and YUV444. We already send the cheapest at 16 bpp.
+- **`vSyncFreqDivider` above 1 breaks the topology.** Windows rejects the
+  path with `ERROR_GEN_FAILURE`. Pacing is done by dropping frames.
+- **Windows never calls the IddCx I2C callbacks**, so DDC/CI cannot work for
+  an indirect display. Microsoft documents this. Brightness goes through the
+  registry value instead.
+
 ## Rules that are easy to violate
 
 - **Serialize the control plane.** `SET_REPORT` then `GET_REPORT` is one
