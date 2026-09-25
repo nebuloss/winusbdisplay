@@ -175,7 +175,9 @@ void FrameSender::Stop() {
   work_cv_.notify_all();
   free_cv_.notify_all();
   if (worker_.joinable()) {
+    Log("FrameSender: stopping");
     worker_.join();
+    Log("FrameSender: stopped");
   }
 }
 
@@ -247,7 +249,15 @@ void FrameSender::WorkerMain() {
       continue;
     }
 
-    device_->SendFrame(slot->data.data(), slot->length);
+    ULONGLONG start = GetTickCount64();
+    bool ok = device_->SendFrame(slot->data.data(), slot->length);
+    ULONGLONG cost = GetTickCount64() - start;
+    if (!ok) {
+      Log("FrameSender: send failed after %llums: %s", cost,
+          device_->last_error().c_str());
+    } else if (cost > 400 || frames_sent_ < 3) {
+      Log("FrameSender: sent %zu bytes in %llums", slot->length, cost);
+    }
     ++frames_sent_;
 
     {
