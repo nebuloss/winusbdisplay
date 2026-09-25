@@ -2,6 +2,8 @@
 
 #include "device.h"
 
+#include "log.h"
+
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -509,14 +511,18 @@ NTSTATUS IndirectDevice::PrepareHardware() {
 
   std::unique_ptr<HidTransport> control = HidTransport::Open(&error);
   if (!control) {
+    Log("PrepareHardware: HID open failed: %s", error.c_str());
     return STATUS_ACCESS_DENIED; /* 0xC0000022: no HID control interface */
   }
+  Log("PrepareHardware: control = %s", control->Describe().c_str());
 
   std::unique_ptr<WinUsbTransport> data = WinUsbTransport::Open(&error);
   if (!data) {
+    Log("PrepareHardware: WinUSB open failed: %s", error.c_str());
     /* 0xC0000225: the WinUSB package is probably not installed. */
     return STATUS_NOT_FOUND;
   }
+  Log("PrepareHardware: data = %s", data->Describe().c_str());
 
   ms_device_.reset(new Device(std::unique_ptr<Transport>(
       new CompositeTransport(std::move(control), std::move(data)))));
@@ -541,6 +547,9 @@ NTSTATUS IndirectDevice::PrepareHardware() {
   }
 
   BuildModeList();
+  Log("PrepareHardware: port=%s edid_valid=%d modes=%u",
+      VideoPortName(port_), edid_valid_ ? 1 : 0,
+      static_cast<unsigned>(modes_.size()));
 
   sender_.reset(new FrameSender(ms_device_.get()));
   sender_->Start();
@@ -627,13 +636,16 @@ void IndirectDevice::CreateMonitor() {
   create.pMonitorInfo = &info;
 
   IDARG_OUT_MONITORCREATE created = {};
-  if (!NT_SUCCESS(IddCxMonitorCreate(adapter_, &create, &created))) {
+  NTSTATUS status = IddCxMonitorCreate(adapter_, &create, &created);
+  Log("CreateMonitor: IddCxMonitorCreate -> 0x%08X", status);
+  if (!NT_SUCCESS(status)) {
     return;
   }
   monitor_ = created.MonitorObject;
 
   IDARG_OUT_MONITORARRIVAL arrival = {};
-  IddCxMonitorArrival(monitor_, &arrival);
+  status = IddCxMonitorArrival(monitor_, &arrival);
+  Log("CreateMonitor: IddCxMonitorArrival -> 0x%08X", status);
 }
 
 void IndirectDevice::OnAdapterInitFinished(IDDCX_ADAPTER adapter) {

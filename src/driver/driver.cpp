@@ -10,6 +10,7 @@
 #include <iddcx.h>
 
 #include "device.h"
+#include "log.h"
 
 using namespace ms912x;
 
@@ -55,11 +56,15 @@ void EvtDeviceContextCleanup(WDFOBJECT object) {
 
 NTSTATUS EvtDevicePrepareHardware(WDFDEVICE wdf_device, WDFCMRESLIST,
                                   WDFCMRESLIST) {
+  Log("PrepareHardware: enter");
   IndirectDevice* device = DeviceFrom(wdf_device);
   if (!device) {
+    Log("PrepareHardware: no device context");
     return STATUS_DEVICE_CONFIGURATION_ERROR;
   }
-  return device->PrepareHardware();
+  NTSTATUS status = device->PrepareHardware();
+  Log("PrepareHardware: -> 0x%08X", status);
+  return status;
 }
 
 NTSTATUS EvtDeviceReleaseHardware(WDFDEVICE wdf_device, WDFCMRESLIST) {
@@ -71,8 +76,10 @@ NTSTATUS EvtDeviceReleaseHardware(WDFDEVICE wdf_device, WDFCMRESLIST) {
 }
 
 NTSTATUS EvtDeviceD0Entry(WDFDEVICE wdf_device, WDF_POWER_DEVICE_STATE) {
+  Log("D0Entry: enter");
   IndirectDevice* device = DeviceFrom(wdf_device);
   if (!device) {
+    Log("D0Entry: no device context");
     return STATUS_DEVICE_CONFIGURATION_ERROR;
   }
 
@@ -107,6 +114,7 @@ NTSTATUS EvtDeviceD0Entry(WDFDEVICE wdf_device, WDF_POWER_DEVICE_STATE) {
 
   IDARG_OUT_ADAPTER_INIT out = {};
   NTSTATUS status = IddCxAdapterInitAsync(&init, &out);
+  Log("D0Entry: IddCxAdapterInitAsync -> 0x%08X", status);
   if (!NT_SUCCESS(status)) {
     return status;
   }
@@ -116,11 +124,13 @@ NTSTATUS EvtDeviceD0Entry(WDFDEVICE wdf_device, WDF_POWER_DEVICE_STATE) {
    * their way back. */
   auto* wrapper = GetIndirectDeviceContext(out.AdapterObject);
   wrapper->device = device;
+  Log("D0Entry: success");
   return STATUS_SUCCESS;
 }
 
 NTSTATUS EvtIddCxAdapterInitFinished(
     IDDCX_ADAPTER adapter, const IDARG_IN_ADAPTER_INIT_FINISHED* args) {
+  Log("AdapterInitFinished: status 0x%08X", args->AdapterInitStatus);
   if (!NT_SUCCESS(args->AdapterInitStatus)) {
     return STATUS_SUCCESS;
   }
@@ -281,6 +291,7 @@ NTSTATUS EvtDriverDeviceAdd(WDFDRIVER, PWDFDEVICE_INIT device_init) {
   }
 
   status = IddCxDeviceInitialize(wdf_device);
+  Log("DeviceAdd: IddCxDeviceInitialize -> 0x%08X", status);
   if (!NT_SUCCESS(status)) {
     return status;
   }
@@ -296,6 +307,8 @@ extern "C" DRIVER_INITIALIZE DriverEntry;
 
 extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT driver_object,
                                 PUNICODE_STRING registry_path) {
+  LogReset();
+  Log("DriverEntry");
   WDF_DRIVER_CONFIG config;
   WDF_DRIVER_CONFIG_INIT(&config, EvtDriverDeviceAdd);
   config.DriverPoolTag = 'x219';
