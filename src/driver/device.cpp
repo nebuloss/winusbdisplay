@@ -254,28 +254,57 @@ void FrameSender::Stop() {
 
 std::vector<uint8_t>* FrameSender::AcquireBuffer(DWORD wait_ms) {
   std::unique_lock<std::mutex> lock(mutex_);
-  Slot& slot = slots_[next_slot_];
 
-  if (slot.in_flight || slot.queued) {
-    /* Wait briefly, then give up. Queueing would build unbounded latency and
-     * eventually stall the compositor's acquire loop. */
-    if (!free_cv_.wait_for(lock, std::chrono::milliseconds(wait_ms),
-                           [&] { return !slot.in_flight && !slot.queued; })) {
-      ++frames_dropped_;
-      return nullptr;
+  /* Prefer a slot that is completely free. */
+  for (Slot& slot : slots_) {
+    if (!slot.in_flight && !slot.queued) {
+      return &slot.data;
     }
   }
-  return &slot.data;
+
+  /* Otherwise take back a slot that is queued but has not started yet. Its
+   * contents are already out of date, and the caller is about to write
+   * something newer over them.
+   *
+   * This is what keeps the cursor feeling attached to the mouse. The chip
+   * completes a transfer on its own 60 Hz boundary, so allowing a second
+   * frame to sit in the queue behind the one on the wire puts two whole
+   * periods, about 33 ms, between a movement and it appearing. Replacing the
+   * waiting frame instead keeps that to a single period and means what is
+   * sent is always the most recent picture rather than a stale one. */
+  for (Slot& slot : slots_) {
+    if (slot.queued && !slot.in_flight) {
+      slot.queued = false;
+      ++frames_superseded_;
+      return &slot.data;
+    }
+  }
+
+  /* Everything is genuinely on the wire. Wait briefly for one to land, then
+   * give up: queueing without limit would stall the compositor's acquire
+   * loop, which Windows treats as a hung display. */
+  if (!free_cv_.wait_for(lock, std::chrono::milliseconds(wait_ms), [&] {
+        return !slots_[0].in_flight || !slots_[1].in_flight;
+      })) {
+    ++frames_dropped_;
+    return nullptr;
+  }
+  for (Slot& slot : slots_) {
+    if (!slot.in_flight && !slot.queued) {
+      return &slot.data;
+    }
+  }
+  ++frames_dropped_;
+  return nullptr;
 }
 
 void FrameSender::Submit(std::vector<uint8_t>* buffer, size_t length) {
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    for (size_t i = 0; i < 2; ++i) {
-      if (&slots_[i].data == buffer) {
-        slots_[i].length = length;
-        slots_[i].queued = true;
-        next_slot_ = 1 - i;
+    for (Slot& slot : slots_) {
+      if (&slot.data == buffer) {
+        slot.length = length;
+        slot.queued = true;
         break;
       }
     }

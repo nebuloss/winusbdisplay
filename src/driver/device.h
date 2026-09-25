@@ -55,6 +55,9 @@ class FrameSender {
 
   uint64_t frames_sent() const { return frames_sent_; }
   uint64_t frames_dropped() const { return frames_dropped_; }
+  /* Frames replaced before they reached the wire. Not a loss: it means a
+   * newer picture went out in place of a stale one. */
+  uint64_t frames_superseded() const { return frames_superseded_; }
 
  private:
   void WorkerMain();
@@ -68,7 +71,6 @@ class FrameSender {
 
   Device* device_;
   Slot slots_[2];
-  size_t next_slot_ = 0;
 
   std::mutex mutex_;
   std::condition_variable free_cv_;
@@ -78,6 +80,7 @@ class FrameSender {
 
   std::atomic<uint64_t> frames_sent_{0};
   std::atomic<uint64_t> frames_dropped_{0};
+  std::atomic<uint64_t> frames_superseded_{0};
 };
 
 /* Drives one IddCx swapchain on its own thread. */
