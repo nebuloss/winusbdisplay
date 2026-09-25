@@ -57,6 +57,7 @@ void PrintUsage() {
       "  testpattern --mode WxH@Hz [--bars | --solid R,G,B] [--no-modeset]\n"
       "                          modeset then push one full frame\n"
       "  bench [--mode WxH@Hz] [--frames N] [--rawio]\n"
+      "        [--depth N] [--chunk KB]\n"
       "                          measure sustained bulk throughput\n"
       "  image --mode WxH@Hz --bmp FILE [--no-modeset]\n"
       "                          push a 24 or 32 bit BMP, letterboxed\n"
@@ -605,12 +606,20 @@ int CmdBench(int argc, char** argv) {
   const char* spec = "1920x1080@60";
   int frames = 20;
   bool raw_io = false;
+  unsigned pipeline_depth = 4;
+  size_t chunk = 256u * 1024u;
   for (int i = 0; i < argc; ++i) {
     if (strcmp(argv[i], "--mode") == 0 && i + 1 < argc) {
       spec = argv[++i];
     } else if (strcmp(argv[i], "--frames") == 0 && i + 1 < argc) {
       frames = atoi(argv[++i]);
     } else if (strcmp(argv[i], "--rawio") == 0) {
+      raw_io = true;
+    } else if (strcmp(argv[i], "--depth") == 0 && i + 1 < argc) {
+      pipeline_depth = static_cast<unsigned>(atoi(argv[++i]));
+      raw_io = true;
+    } else if (strcmp(argv[i], "--chunk") == 0 && i + 1 < argc) {
+      chunk = static_cast<size_t>(atoi(argv[++i])) * 1024u;
       raw_io = true;
     } else {
       fprintf(stderr, "error: unknown option %s\n", argv[i]);
@@ -635,11 +644,9 @@ int CmdBench(int argc, char** argv) {
   printf("transport: %s\n", data->Describe().c_str());
 
   if (raw_io) {
-    /* Transfers must be a multiple of the packet size under RAW_IO. */
-    const size_t packet = data->max_packet_size() ? data->max_packet_size() : 512;
-    const size_t chunk = (1u << 20) / packet * packet;
-    printf("raw io:    %s (max transfer %zu)\n",
-           data->EnableRawIo(chunk) ? "enabled" : "refused", chunk);
+    printf("pipelined: %s (depth %u, chunk %zu)\n",
+           data->EnablePipelining(pipeline_depth, chunk) ? "yes" : "refused",
+           pipeline_depth, chunk);
   }
 
   WinUsbTransport* raw_data = data.get();
