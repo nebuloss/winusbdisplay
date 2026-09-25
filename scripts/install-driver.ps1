@@ -87,7 +87,9 @@ if ($testSigning) {
 }
 
 Write-Host '==> generating catalog'
-$osTarget = if ($Platform -eq 'ARM64') { '10_ARM64' } else { '10_x64' }
+# Inf2Cat OS names are case sensitive and there is no plain "10_ARM64";
+# ARM64 only exists from RS3 onwards. Run Inf2Cat /? for the full list.
+$osTarget = if ($Platform -eq 'ARM64') { '10_RS3_ARM64' } else { '10_X64' }
 & (Get-KitTool 'Inf2Cat.exe') /driver:$stage /os:$osTarget /verbose
 if ($LASTEXITCODE -ne 0) { throw 'Inf2Cat failed' }
 
