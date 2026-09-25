@@ -25,8 +25,12 @@
     <DriverTargetPlatform>Universal</DriverTargetPlatform>
     <MinimumVisualStudioVersion>17.0</MinimumVisualStudioVersion>
     <DriverType>UMDF</DriverType>
-    <UmdfVersionMajor>2</UmdfVersionMajor>
-    <UmdfVersionMinor>33</UmdfVersionMinor>
+    <!-- The WDK reads UmdfVersion, not the UmdfVersionMajor/Minor pair that
+         older templates use. Getting this wrong fails with a confusing
+         "unsupported property value '.'" error. -->
+    <UmdfVersion>2.33</UmdfVersion>
+    <UMDF_VERSION_MAJOR>2</UMDF_VERSION_MAJOR>
+    <UMDF_VERSION_MINOR>33</UMDF_VERSION_MINOR>
     <!-- The IddCx client stub is what makes this an indirect display driver. -->
     <IddCxVersion>1.4</IddCxVersion>
   </PropertyGroup>
