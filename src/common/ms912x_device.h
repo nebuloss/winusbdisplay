@@ -81,6 +81,10 @@ class Device {
    * zero length packet the chip expects, and enables output on first use. */
   bool SendFrame(const uint8_t* data, size_t len);
 
+  /* Re-runs power on and the modeset. Used to recover a chip that has stopped
+   * accepting transfers, which otherwise leaves the panel dark for good. */
+  bool Reinitialise();
+
   /* Aborts a transfer in flight so teardown does not block on the bus. */
   void CancelTransfers() { transport_->CancelTransfers(); }
 
@@ -94,6 +98,9 @@ class Device {
   std::mutex ctrl_mutex_;
   std::string last_error_;
   bool output_enabled_ = false;
+  Mode last_mode_ = {};
+  bool have_last_mode_ = false;
+  unsigned consecutive_failures_ = 0;
 };
 
 bool EdidBlockChecksumOk(const uint8_t* block);

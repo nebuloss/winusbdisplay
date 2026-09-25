@@ -309,10 +309,16 @@ bool WinUsbTransport::BulkWrite(const uint8_t* data, size_t len) {
                         const_cast<uint8_t*>(data), static_cast<ULONG>(len),
                         &transferred, nullptr)) {
     SetWin32Error("WinUsb_WritePipe", GetLastError());
+    /* A timed out or stalled pipe stays that way until it is reset, so
+     * without this every subsequent write fails too and the display never
+     * comes back. */
+    WinUsb_AbortPipe(handle, bulk_out_pipe_id_);
+    WinUsb_ResetPipe(handle, bulk_out_pipe_id_);
     return false;
   }
   if (transferred != len) {
     SetError("short bulk write");
+    WinUsb_ResetPipe(handle, bulk_out_pipe_id_);
     return false;
   }
   return true;

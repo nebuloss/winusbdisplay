@@ -160,7 +160,23 @@ bool Device::SetResolution(const Mode& mode) {
 
   memset(data, 0, sizeof(data));
   data[0] = 1;
-  return WriteCommand(kCmdTransferEnable, data);
+  if (!WriteCommand(kCmdTransferEnable, data)) {
+    return false;
+  }
+  last_mode_ = mode;
+  have_last_mode_ = true;
+  return true;
+}
+
+bool Device::Reinitialise() {
+  if (!have_last_mode_) {
+    return false;
+  }
+  output_enabled_ = false;
+  if (!PowerOn()) {
+    return false;
+  }
+  return SetResolution(last_mode_);
 }
 
 bool Device::EnableOutput(bool enable) {
@@ -361,8 +377,16 @@ bool Device::SendFrame(const uint8_t* data, size_t len) {
     return Fail("current transport has no data plane");
   }
   if (!transport_->BulkWrite(data, len)) {
+    /* A few failures in a row means the chip has stopped accepting data, not
+     * that one transfer was unlucky. Reprogramming it is the only way back;
+     * without this the panel stays dark until the device is replugged. */
+    if (++consecutive_failures_ >= 3) {
+      consecutive_failures_ = 0;
+      Reinitialise();
+    }
     return FailTransport("bulk write");
   }
+  consecutive_failures_ = 0;
   /* The vendor driver terminates every frame with a zero length bulk packet.
    * Without it the chip can sit waiting for more data and the panel stays
    * dark even though every transfer reported success. */
