@@ -134,6 +134,7 @@ class SwapChainProcessor {
   /* The panel drops its signal if left idle, so refresh it periodically even
    * when the desktop has not changed. */
   unsigned long long last_send_ms_ = 0;
+  unsigned long long last_settings_poll_ms_ = 0;
 
   std::thread thread_;
   HANDLE terminate_event_ = nullptr;

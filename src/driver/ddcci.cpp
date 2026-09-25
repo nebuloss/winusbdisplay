@@ -2,6 +2,8 @@
 
 #include "ddcci.h"
 
+#include <windows.h>
+
 #include <cstring>
 
 #include "log.h"
@@ -146,6 +148,51 @@ void DdcCiSlave::HandleMessage(const uint8_t* message, size_t len) {
       pending_.clear();
       break;
   }
+}
+
+namespace {
+
+/* Reads a DWORD, clamped to 0..100. Returns the fallback when absent. */
+int ReadRegistryValue(const wchar_t* name, int fallback) {
+  HKEY key = nullptr;
+  if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\winusbdisplay", 0,
+                    KEY_QUERY_VALUE | KEY_WOW64_64KEY, &key) != ERROR_SUCCESS) {
+    return fallback;
+  }
+  DWORD value = 0;
+  DWORD size = sizeof(value);
+  DWORD type = 0;
+  int result = fallback;
+  if (RegQueryValueExW(key, name, nullptr, &type,
+                       reinterpret_cast<LPBYTE>(&value),
+                       &size) == ERROR_SUCCESS &&
+      type == REG_DWORD) {
+    result = static_cast<int>(value);
+    if (result < 0) {
+      result = 0;
+    }
+    if (result > 100) {
+      result = 100;
+    }
+  }
+  RegCloseKey(key);
+  return result;
+}
+
+}  // namespace
+
+bool DdcCiSlave::RefreshFromRegistry() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  const int brightness = ReadRegistryValue(L"Brightness", brightness_);
+  const int contrast = ReadRegistryValue(L"Contrast", contrast_);
+  if (brightness == brightness_ && contrast == contrast_) {
+    return false;
+  }
+  Log("ddcci: registry brightness %d -> %d, contrast %d -> %d", brightness_,
+      brightness, contrast_, contrast);
+  brightness_ = brightness;
+  contrast_ = contrast;
+  return true;
 }
 
 bool DdcCiSlave::Transmit(uint32_t address, const uint8_t* data, size_t len) {

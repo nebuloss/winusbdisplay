@@ -55,6 +55,15 @@ class DdcCiSlave {
   int brightness() const;
   int contrast() const;
 
+  /* Windows does not route DDC/CI to indirect displays: Microsoft's own DDI
+   * documentation states the OS does not call the I2C callbacks. The slave
+   * above is therefore correct but never exercised, so brightness is also
+   * exposed through a registry value that any user-mode tool can set.
+   *
+   * Polls HKLM\SOFTWARE\winusbdisplay for Brightness and Contrast and
+   * returns true if either changed. Cheap enough to call once a second. */
+  bool RefreshFromRegistry();
+
  private:
   void QueueReply(const uint8_t* message, size_t len);
   void HandleMessage(const uint8_t* message, size_t len);

@@ -614,9 +614,20 @@ void SwapChainProcessor::Run() {
         IddCxSwapChainReleaseAndAcquireBuffer(swapchain_, &buffer);
 
     if (status == E_PENDING) {
+      const ULONGLONG idle_now = GetTickCount64();
+
+      /* Picking up a brightness change needs a repaint even though the
+       * desktop itself has not changed. */
+      if (ddc_ && idle_now - last_settings_poll_ms_ >= 500) {
+        last_settings_poll_ms_ = idle_now;
+        if (ddc_->RefreshFromRegistry()) {
+          SendRefresh();
+        }
+      }
+
       /* Nothing new to draw. Keep the panel awake anyway. */
       if (last_send_ms_ != 0 &&
-          GetTickCount64() - last_send_ms_ >= kIdleRefreshMs) {
+          idle_now - last_send_ms_ >= kIdleRefreshMs) {
         SendRefresh();
       }
       DWORD wait = WaitForMultipleObjects(2, waits, FALSE, 17);
