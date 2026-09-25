@@ -410,8 +410,8 @@ bool LoadBmp(const char* path, std::vector<uint8_t>* pixels, int* width,
     fprintf(stderr, "error: could not open %s\n", path);
     return false;
   }
-  BITMAPFILEHEADER file_header;
-  BITMAPINFOHEADER info_header;
+  BITMAPFILEHEADER file_header = {};
+  BITMAPINFOHEADER info_header = {};
   bool ok = fread(&file_header, sizeof(file_header), 1, file) == 1 &&
             fread(&info_header, sizeof(info_header), 1, file) == 1;
   if (!ok || file_header.bfType != 0x4D42 ||
