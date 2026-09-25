@@ -498,11 +498,15 @@ IndirectDevice::~IndirectDevice() {
 NTSTATUS IndirectDevice::PrepareHardware() {
   std::string error;
 
+  /* Distinct failure codes per step: PrepareHardware's return value shows up
+   * verbatim in the DriverFrameworks-UserMode event log, so making each exit
+   * unique turns "problem code 10" into an exact diagnosis. */
+
   /* Data plane: the bulk pixel pipe on the interface we are bound to. */
   std::unique_ptr<WdfUsbBackend> data =
       WdfUsbBackend::Create(wdf_device_, &error);
   if (!data) {
-    return STATUS_DEVICE_CONFIGURATION_ERROR;
+    return STATUS_DEVICE_CONFIGURATION_ERROR; /* 0xC0000182 */
   }
 
   /* Control plane: the sibling HID interface of the same physical dongle.
@@ -514,14 +518,17 @@ NTSTATUS IndirectDevice::PrepareHardware() {
   DEVPROPTYPE type = 0;
   NTSTATUS status = WdfDeviceQueryPropertyEx(
       wdf_device_, &property, sizeof(container), &container, &required, &type);
-  if (!NT_SUCCESS(status) || type != DEVPROP_TYPE_GUID) {
-    return STATUS_DEVICE_CONFIGURATION_ERROR;
+  if (!NT_SUCCESS(status)) {
+    return STATUS_OBJECT_NAME_NOT_FOUND; /* 0xC0000034: container id query */
+  }
+  if (type != DEVPROP_TYPE_GUID) {
+    return STATUS_OBJECT_TYPE_MISMATCH; /* 0xC0000024: unexpected prop type */
   }
 
   std::unique_ptr<HidTransport> control =
       HidTransport::OpenForContainer(container, &error);
   if (!control) {
-    return STATUS_DEVICE_CONFIGURATION_ERROR;
+    return STATUS_ACCESS_DENIED; /* 0xC0000022: cannot open HID sibling */
   }
 
   ms_device_.reset(new Device(std::unique_ptr<Transport>(
