@@ -845,14 +845,22 @@ bool SwapChainProcessor::ProcessFrame(
   }
 
   if (!superseded.empty()) {
-    /* A queued frame was taken back before it reached the chip, so the region
-     * it covered is still stale there. Fold it into this frame, and do not
-     * advance the buffer parity for it: the chip only alternates buffers on a
-     * transfer it actually receives. */
+    /* A queued frame was taken back before it reached the chip. Two things
+     * follow, and missing either shows up as the picture alternating between
+     * two versions of itself.
+     *
+     * The parity was advanced when that frame was submitted, on the
+     * assumption it would be transmitted. It never was, so the chip's next
+     * buffer is still the one that frame was meant to fill: step back.
+     *
+     * And the damage it carried was cleared from that buffer's pending set at
+     * the same time, so restore it, otherwise the region stays stale there
+     * forever. */
+    frame_index_ = 1 - frame_index_;
     pending_damage_[frame_index_] =
         MergeRects(pending_damage_[frame_index_], superseded);
-    to_send = AlignDamageRect(
-        MergeRects(to_send, superseded), fb_width, fb_height);
+    to_send =
+        AlignDamageRect(pending_damage_[frame_index_], fb_width, fb_height);
     if (to_send.empty()) {
       sender_->Cancel(transfer);
       return true;
@@ -1027,8 +1035,11 @@ bool SwapChainProcessor::SendRefresh(bool whole_screen) {
   if (!transfer) {
     return false;
   }
-  /* A refresh repaints everything, so anything it displaced is covered. */
-  (void)superseded;
+  if (!superseded.empty()) {
+    /* The displaced frame's content is covered by a full repaint, but its
+     * transfer never happened, so the chip's buffer parity did not advance. */
+    frame_index_ = 1 - frame_index_;
+  }
 
   PictureAdjust adjust;
   if (ddc_) {
