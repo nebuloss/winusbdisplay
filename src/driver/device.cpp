@@ -494,9 +494,6 @@ IndirectDevice::IndirectDevice(WDFDEVICE wdf_device)
     : wdf_device_(wdf_device) {}
 
 IndirectDevice::~IndirectDevice() {
-  if (monitor_thread_.joinable()) {
-    monitor_thread_.join();
-  }
   processor_.reset();
   sender_.reset();
   ms_device_.reset();
@@ -562,9 +559,6 @@ NTSTATUS IndirectDevice::PrepareHardware() {
 }
 
 void IndirectDevice::ReleaseHardware() {
-  if (monitor_thread_.joinable()) {
-    monitor_thread_.join();
-  }
   processor_.reset();
   if (sender_) {
     sender_->Stop();
@@ -630,75 +624,54 @@ void IndirectDevice::BuildModeList() {
 }
 
 void IndirectDevice::CreateMonitor() {
-  /* Arrival may only be attempted once per monitor object, so each retry uses
-   * a freshly created one. The delays establish whether the OS side simply
-   * needs more time to be ready to accept a monitor. */
-  const DWORD delays_ms[] = {0, 250, 500, 1000, 2000, 4000, 8000};
-
-  for (DWORD delay : delays_ms) {
-    if (delay) {
-      Sleep(delay);
-    }
-
-    IDDCX_MONITOR_INFO info = {};
-    info.Size = sizeof(info);
-    info.MonitorType = DISPLAYCONFIG_OUTPUT_TECHNOLOGY_HDMI;
-    info.ConnectorIndex = 0;
-    info.MonitorDescription.Size = sizeof(info.MonitorDescription);
-    info.MonitorDescription.Type = IDDCX_MONITOR_DESCRIPTION_TYPE_EDID;
-    info.MonitorDescription.DataSize = static_cast<UINT>(edid_.size());
-    info.MonitorDescription.pData = edid_.data();
-    if (FAILED(CoCreateGuid(&info.MonitorContainerId))) {
-      Log("CreateMonitor: CoCreateGuid failed");
-      return;
-    }
-
-    WDF_OBJECT_ATTRIBUTES attributes;
-    WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&attributes, MonitorContextWrapper);
-
-    IDARG_IN_MONITORCREATE create = {};
-    create.ObjectAttributes = &attributes;
-    create.pMonitorInfo = &info;
-
-    IDARG_OUT_MONITORCREATE created = {};
-    NTSTATUS status = IddCxMonitorCreate(adapter_, &create, &created);
-    if (!NT_SUCCESS(status)) {
-      Log("attempt +%lums: create -> 0x%08X", delay, status);
-      continue;
-    }
-
-    auto* wrapper = GetMonitorContext(created.MonitorObject);
-    if (wrapper) {
-      wrapper->device = this;
-    }
-
-    IDARG_OUT_MONITORARRIVAL arrival = {};
-    status = IddCxMonitorArrival(created.MonitorObject, &arrival);
-    Log("attempt +%lums: arrival -> 0x%08X", delay, status);
-    if (NT_SUCCESS(status)) {
-      monitor_ = created.MonitorObject;
-      Log("MONITOR ARRIVED after %lums", delay);
-      return;
-    }
-    IddCxMonitorDeparture(created.MonitorObject);
+  IDDCX_MONITOR_INFO info = {};
+  info.Size = sizeof(info);
+  /* An indirect monitor is reported as an externally connected target. */
+  info.MonitorType = DISPLAYCONFIG_OUTPUT_TECHNOLOGY_HDMI;
+  info.ConnectorIndex = 0;
+  info.MonitorDescription.Size = sizeof(info.MonitorDescription);
+  info.MonitorDescription.Type = IDDCX_MONITOR_DESCRIPTION_TYPE_EDID;
+  info.MonitorDescription.DataSize = static_cast<UINT>(edid_.size());
+  info.MonitorDescription.pData = edid_.data();
+  /* Mandatory: an all-zero container id is rejected. */
+  if (FAILED(CoCreateGuid(&info.MonitorContainerId))) {
+    Log("CreateMonitor: CoCreateGuid failed");
+    return;
   }
-  Log("CreateMonitor: arrival never succeeded");
+
+  /* Mandatory: real object attributes with a context type. */
+  WDF_OBJECT_ATTRIBUTES attributes;
+  WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&attributes, MonitorContextWrapper);
+
+  IDARG_IN_MONITORCREATE create = {};
+  create.ObjectAttributes = &attributes;
+  create.pMonitorInfo = &info;
+
+  IDARG_OUT_MONITORCREATE created = {};
+  NTSTATUS status = IddCxMonitorCreate(adapter_, &create, &created);
+  Log("CreateMonitor: IddCxMonitorCreate -> 0x%08X", status);
+  if (!NT_SUCCESS(status)) {
+    return;
+  }
+
+  auto* wrapper = GetMonitorContext(created.MonitorObject);
+  if (wrapper) {
+    wrapper->device = this;
+  }
+  monitor_ = created.MonitorObject;
+
+  IDARG_OUT_MONITORARRIVAL arrival = {};
+  status = IddCxMonitorArrival(monitor_, &arrival);
+  Log("CreateMonitor: IddCxMonitorArrival -> 0x%08X", status);
 }
 
 void IndirectDevice::OnAdapterInitFinished(IDDCX_ADAPTER adapter) {
   adapter_ = adapter;
 
-  /* Do not create the monitor from inside this callback. The adapter is not
-   * fully ready until it returns, and IddCxMonitorArrival then fails with
-   * STATUS_DEVICE_NOT_READY. Arrival may only be attempted once per monitor,
-   * so there is no retrying out of it: the work has to be deferred instead. */
-  if (monitor_thread_.joinable()) {
-    monitor_thread_.join();
-  }
-  monitor_thread_ = std::thread([this] {
-    Sleep(250);
-    CreateMonitor();
-  });
+  /* Create the monitor inline, exactly as the in-box drivers do. Deferring it
+   * to a worker thread means the PnP stop path has to join a sleeping thread,
+   * and WDF then reports the driver as hung and takes the device offline. */
+  CreateMonitor();
 }
 
 NTSTATUS IndirectDevice::CommitModes(const IDARG_IN_COMMITMODES* args) {

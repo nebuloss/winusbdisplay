@@ -151,8 +151,6 @@ class IndirectDevice {
   std::unique_ptr<Device> ms_device_;
   std::unique_ptr<FrameSender> sender_;
   std::unique_ptr<SwapChainProcessor> processor_;
-  /* Monitor creation is deferred off the adapter-init-finished callback. */
-  std::thread monitor_thread_;
 
   VideoPort port_ = VideoPort::kUnknown;
   std::vector<uint8_t> edid_;

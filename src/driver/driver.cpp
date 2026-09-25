@@ -26,8 +26,12 @@ IndirectDevice* DeviceFrom(IDDCX_ADAPTER adapter) {
   return wrapper ? wrapper->device : nullptr;
 }
 
+/* Monitor objects are created with MonitorContextWrapper. Asking for the
+ * wrong context type is not a soft failure in WDF: it raises a fatal error
+ * that kills the UMDF host, which Windows then reports as a user-mode driver
+ * hang and takes the device offline. */
 IndirectDevice* DeviceFrom(IDDCX_MONITOR monitor) {
-  auto* wrapper = GetIndirectDeviceContext(monitor);
+  auto* wrapper = GetMonitorContext(monitor);
   return wrapper ? wrapper->device : nullptr;
 }
 
@@ -149,15 +153,9 @@ NTSTATUS EvtIddCxAdapterInitFinished(
   }
   IndirectDevice* device = DeviceFrom(adapter);
   if (device) {
+    /* CreateMonitor sets the monitor's own context; do not reach for it with
+     * the device context type here. */
     device->OnAdapterInitFinished(adapter);
-
-    /* Give the monitor object the same back pointer. */
-    if (device->monitor()) {
-      auto* wrapper = GetIndirectDeviceContext(device->monitor());
-      if (wrapper) {
-        wrapper->device = device;
-      }
-    }
   }
   return STATUS_SUCCESS;
 }
@@ -177,9 +175,9 @@ NTSTATUS EvtIddCxParseMonitorDescription(
   /* This callback has no handle to get back to the device, so answer from the
    * static mode table. The commit path validates against the device anyway. */
   std::vector<Mode> modes;
-  /* BISECT: single mode only, to test whether arrival rejects the list. */
-  const Mode* one = FindMode(1920, 1080, 60);
-  modes.push_back(*one);
+  for (size_t i = 0; i < kModeListLen; ++i) {
+    modes.push_back(kModeList[i]);
+  }
 
   Log("ParseMonitorDescription: in=%u buf=%p descType=%u dataSize=%u",
       args->MonitorModeBufferInputCount, (void*)args->pMonitorModes,
