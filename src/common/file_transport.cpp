@@ -42,6 +42,9 @@ bool FileTransport::ControlGetReport(uint8_t* data, size_t len) {
 }
 
 bool FileTransport::BulkWrite(const uint8_t* data, size_t len) {
+  if (len == 0) {
+    return true; /* end of frame marker, nothing to record */
+  }
   if (len < kFrameOverhead) {
     SetError("transfer shorter than the frame overhead");
     return false;
