@@ -85,8 +85,7 @@ class SwapChainProcessor {
  public:
   SwapChainProcessor(IDDCX_SWAPCHAIN swapchain, LUID render_adapter,
                      HANDLE new_frame_event, Device* device,
-                     FrameSender* sender, const Mode& mode, DdcCiSlave* ddc,
-                     IDDCX_MONITOR monitor);
+                     FrameSender* sender, const Mode& mode, DdcCiSlave* ddc);
   ~SwapChainProcessor();
 
   /* D3D is initialised on the calling thread, so a failure can be reported
