@@ -491,6 +491,10 @@ bool SwapChainProcessor::ProcessFrame(
     return true;
   }
 
+  LARGE_INTEGER t_begin, t_copied, t_mapped, t_converted, qpc_freq;
+  QueryPerformanceFrequency(&qpc_freq);
+  QueryPerformanceCounter(&t_begin);
+
   /* Copy only the damaged region out of the GPU. */
   D3D11_BOX box = {};
   box.left = static_cast<UINT>(to_send.x1);
@@ -502,12 +506,15 @@ bool SwapChainProcessor::ProcessFrame(
   d3d_context_->CopySubresourceRegion(staging_.Get(), 0, box.left, box.top, 0,
                                       source.Get(), 0, &box);
 
+  QueryPerformanceCounter(&t_copied);
+
   D3D11_MAPPED_SUBRESOURCE mapped = {};
   if (FAILED(d3d_context_->Map(staging_.Get(), 0, D3D11_MAP_READ, 0,
                                &mapped))) {
     sender_->Cancel(transfer);
     return false;
   }
+  QueryPerformanceCounter(&t_mapped);
 
   PictureAdjust adjust;
   if (ddc_) {
@@ -518,7 +525,24 @@ bool SwapChainProcessor::ProcessFrame(
       FrameRect(transfer->data(), transfer->size(),
                 static_cast<const uint8_t*>(mapped.pData), mapped.RowPitch,
                 fb_width, fb_height, to_send, adjust);
+  QueryPerformanceCounter(&t_converted);
   d3d_context_->Unmap(staging_.Get(), 0);
+
+  {
+    /* Break the per-frame cost down: a fixed overhead that does not scale
+     * with the damage area points at the GPU readback, not the conversion. */
+    static ULONGLONG last_phase_log = 0;
+    const ULONGLONG phase_now = GetTickCount64();
+    if (phase_now - last_phase_log >= 2000) {
+      last_phase_log = phase_now;
+      const double to_us = 1000000.0 / qpc_freq.QuadPart;
+      Log("phases: copy=%.0fus map=%.0fus convert=%.0fus  %dx%d (%zu bytes)",
+          (t_copied.QuadPart - t_begin.QuadPart) * to_us,
+          (t_mapped.QuadPart - t_copied.QuadPart) * to_us,
+          (t_converted.QuadPart - t_mapped.QuadPart) * to_us,
+          to_send.width(), to_send.height(), length);
+    }
+  }
 
   if (length == 0) {
     sender_->Cancel(transfer);
