@@ -24,6 +24,12 @@ inline unsigned RgbToV(unsigned r, unsigned g, unsigned b) {
   return ((128u << 16) + 28672u * r - 24009u * g - 4663u * b) >> 16;
 }
 
+/* The chip wants the horizontal extent on a multiple of four pixels and the
+ * vertical extent on a multiple of two. UYVY pixel pairs alone would only
+ * demand two horizontally, but the vendor driver masks with 0xFFC and getting
+ * this wrong shows up as torn or shifted blocks. */
+inline int AlignDown4(int value) { return value & ~3; }
+inline int AlignUp4(int value) { return (value + 3) & ~3; }
 inline int AlignDown2(int value) { return value & ~1; }
 inline int AlignUp2(int value) { return (value + 1) & ~1; }
 
@@ -71,12 +77,17 @@ Rect AlignDamageRect(const Rect& rect, int fb_width, int fb_height) {
     out.x1 = out.y1 = out.x2 = out.y2 = 0;
     return out;
   }
-  out.x1 = AlignDown2(out.x1);
-  out.x2 = AlignUp2(out.x2);
+  out.x1 = AlignDown4(out.x1);
+  out.x2 = AlignUp4(out.x2);
   if (out.x2 > fb_width) {
-    out.x2 = AlignDown2(fb_width);
+    out.x2 = AlignDown4(fb_width);
   }
-  if (out.x2 <= out.x1) {
+  out.y1 = AlignDown2(out.y1);
+  out.y2 = AlignUp2(out.y2);
+  if (out.y2 > fb_height) {
+    out.y2 = AlignDown2(fb_height);
+  }
+  if (out.x2 <= out.x1 || out.y2 <= out.y1) {
     out.x1 = out.y1 = out.x2 = out.y2 = 0;
   }
   return out;

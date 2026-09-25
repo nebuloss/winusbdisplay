@@ -115,10 +115,18 @@ class SwapChainProcessor {
   UINT staging_width_ = 0;
   UINT staging_height_ = 0;
 
-  /* The panel latches the previous update too, so each transfer must cover the
-   * union of this frame's damage and the last frame's damage. */
-  Rect previous_damage_;
+  /* The chip holds two frame buffers and alternates between them, so damage
+   * has to be tracked per buffer: new damage accumulates into both, and only
+   * the buffer actually written is cleared. Tracking a single rectangle makes
+   * each buffer miss half the updates, which shows up as ghosting and as the
+   * picture flickering between two different images. */
+  Rect pending_damage_[2];
+  int frame_index_ = 0;
   bool force_full_frame_ = true;
+
+  /* The panel drops its signal if left idle, so refresh it periodically even
+   * when the desktop has not changed. */
+  unsigned long long last_send_ms_ = 0;
 
   std::thread thread_;
   HANDLE terminate_event_ = nullptr;
