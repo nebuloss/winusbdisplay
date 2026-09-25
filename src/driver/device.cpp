@@ -651,9 +651,23 @@ void IndirectDevice::CreateMonitor() {
   }
   monitor_ = created.MonitorObject;
 
+  /* Arrival can legitimately come back STATUS_DEVICE_NOT_READY while the
+   * graphics stack is still bringing the adapter up, so retry briefly rather
+   * than giving up and leaving the user with no monitor. */
   IDARG_OUT_MONITORARRIVAL arrival = {};
-  status = IddCxMonitorArrival(monitor_, &arrival);
-  Log("CreateMonitor: IddCxMonitorArrival -> 0x%08X", status);
+  for (int attempt = 0; attempt < 30; ++attempt) {
+    status = IddCxMonitorArrival(monitor_, &arrival);
+    if (NT_SUCCESS(status)) {
+      Log("CreateMonitor: IddCxMonitorArrival -> 0x%08X after %d attempt(s)",
+          status, attempt + 1);
+      return;
+    }
+    if (status != STATUS_DEVICE_NOT_READY) {
+      break;
+    }
+    Sleep(100);
+  }
+  Log("CreateMonitor: IddCxMonitorArrival gave up -> 0x%08X", status);
 }
 
 void IndirectDevice::OnAdapterInitFinished(IDDCX_ADAPTER adapter) {
