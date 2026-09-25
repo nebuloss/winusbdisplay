@@ -1050,14 +1050,14 @@ void SwapChainProcessor::Run() {
       if (ddc_ && idle_now - last_settings_poll_ms_ >= 500) {
         last_settings_poll_ms_ = idle_now;
         if (ddc_->RefreshFromRegistry()) {
-          SendRefresh();
+          SendRefresh(true);
         }
       }
 
       /* Nothing new to draw. Keep the panel awake anyway. */
       if (last_send_ms_ != 0 &&
           idle_now - last_send_ms_ >= kIdleRefreshMs) {
-        SendRefresh();
+        SendRefresh(false);
       }
       DWORD wait = WaitForMultipleObjects(2, waits, FALSE, 17);
       if (wait == WAIT_OBJECT_0 + 1) {
