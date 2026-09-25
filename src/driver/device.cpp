@@ -362,13 +362,11 @@ SwapChainProcessor::~SwapChainProcessor() {
 }
 
 void SwapChainProcessor::Terminate() {
-  const ULONGLONG start = GetTickCount64();
   if (terminate_event_) {
     SetEvent(terminate_event_);
   }
   if (thread_.joinable()) {
     thread_.join();
-    Log("SwapChain: thread joined after %llums", GetTickCount64() - start);
   }
 }
 
@@ -1178,14 +1176,10 @@ void IndirectDevice::ReleaseHardware() {
    * round means waiting on a multi-megabyte USB transfer while WDF is trying
    * to stop the device, which it reports as a driver hang. */
   processor_.reset();
-  Log("ReleaseHardware: processor stopped at +%llums",
-      GetTickCount64() - release_start);
   if (sender_) {
     sender_->Stop();
     sender_.reset();
   }
-  Log("ReleaseHardware: sender stopped at +%llums",
-      GetTickCount64() - release_start);
   if (ms_device_) {
     ms_device_->PowerOff();
     ms_device_.reset();

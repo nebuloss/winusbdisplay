@@ -177,3 +177,20 @@ Still to try:
 - comparing against a stock build of Microsoft's `IndirectDisplay` sample on
   this same machine to isolate whether the problem is our code or the
   environment
+
+## "Device offline due to a user-mode driver hang" on disable
+
+Event 10111 appears in the system log every time the display device is
+disabled or restarted while a monitor is attached to the desktop. It is worth
+knowing that this is not our driver hanging.
+
+Measured with timers in `ReleaseHardware`, the whole teardown, including
+stopping the swapchain thread and the USB sender, completes in **0 ms**, and
+90 seconds of steady operation produces no events at all. The report comes
+from the OS removing a live display from the desktop topology on a forced
+disable, which is a development operation rather than something normal use
+hits.
+
+Teardown does cancel any USB transfer in flight rather than waiting for it, via
+`WinUsb_AbortPipe`. Without that, a full frame occupies the bus for over a
+hundred milliseconds and a stop request would genuinely block for that long.
