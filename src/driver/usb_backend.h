@@ -9,6 +9,12 @@
 
 #include <windows.h>
 
+/* wdfusb.h needs the USB type definitions (URB, USBD_STATUS, the standard
+ * request codes) but does not pull them in itself. Including these in the
+ * wrong order produces a wall of syntax errors inside wdfusb.h. */
+#include <usb.h>
+#include <usbspec.h>
+
 #include <wdf.h>
 #include <wdfusb.h>
 
