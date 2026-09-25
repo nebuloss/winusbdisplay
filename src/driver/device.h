@@ -159,15 +159,6 @@ class IndirectDevice {
   Mode active_mode_{1920, 1080, 60, 0x81};
 };
 
-struct IndirectDeviceContextWrapper {
-  IndirectDevice* device;
-
-  void Cleanup() {
-    delete device;
-    device = nullptr;
-  }
-};
-
 /* Synthesized when the panel has no readable EDID, so the monitor still
  * appears and the user has something to diagnose with. */
 void BuildFallbackEdid(std::vector<uint8_t>* edid, uint16_t width,
@@ -184,5 +175,16 @@ UINT FillTargetModes(const std::vector<Mode>& modes, UINT capacity,
 
 }  // namespace ms912x
 
-WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(ms912x::IndirectDeviceContextWrapper,
+/* This lives outside the namespace on purpose: the WDF context macros paste
+ * the type name into new identifiers, so a qualified name does not compile. */
+struct IndirectDeviceContextWrapper {
+  ms912x::IndirectDevice* device;
+
+  void Cleanup() {
+    delete device;
+    device = nullptr;
+  }
+};
+
+WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(IndirectDeviceContextWrapper,
                                    GetIndirectDeviceContext)
