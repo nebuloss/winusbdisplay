@@ -3,8 +3,11 @@
 # Signs and installs the WinUSB INF, then displaces the vendor driver so that
 # Windows binds ours to the display interface.
 #
-# Requires an elevated shell and test signing:
-#     bcdedit /set testsigning on      (then reboot; Secure Boot must be off)
+# Requires an elevated shell. It does NOT require test signing or a reboot:
+# this package loads only WinUSB.sys, which is Microsoft signed and in-box, so
+# kernel driver signature enforcement never comes into play. All that PnP
+# needs is a catalog chaining to a certificate in the Trusted Publisher store,
+# which this script creates. Works with Secure Boot enabled.
 #
 # Reverse with scripts\uninstall-winusb.ps1.
 
@@ -47,9 +50,8 @@ $infPath = Join-Path $infDir 'ms912x_winusb.inf'
 if (-not (Test-Path $infPath)) { throw "missing $infPath" }
 
 $testSigning = (bcdedit /enum '{current}' | Select-String 'testsigning\s+Yes')
-if (-not $testSigning) {
-    Write-Warning 'Test signing does not appear to be enabled. Installation will likely fail.'
-    Write-Warning 'Run: bcdedit /set testsigning on   then reboot (Secure Boot must be off).'
+if ($testSigning) {
+    Write-Host 'note: test signing is on. Not required, but harmless.'
 }
 
 Write-Host '==> generating catalog'
@@ -64,6 +66,9 @@ $cert = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.Subject -eq $sub
 if (-not $cert) {
     $cert = New-SelfSignedCertificate -Subject $subject -Type CodeSigningCert `
         -CertStoreLocation Cert:\LocalMachine\My -NotAfter (Get-Date).AddYears(5)
+    # Root makes the chain valid; TrustedPublisher is what lets PnP install the
+    # package without prompting. Both are required, and both take effect
+    # immediately, with no reboot.
     foreach ($store in 'Root', 'TrustedPublisher') {
         $target = New-Object System.Security.Cryptography.X509Certificates.X509Store($store, 'LocalMachine')
         $target.Open('ReadWrite')
@@ -78,7 +83,6 @@ if (-not $cert) {
 Write-Host '==> signing catalog'
 $signtool = Get-KitTool 'signtool.exe'
 & $signtool sign /v /fd sha256 /sha1 $cert.Thumbprint `
-    /tr http://timestamp.digicert.com /td sha256 `
     (Join-Path $infDir 'ms912x_winusb.cat')
 if ($LASTEXITCODE -ne 0) { throw 'signtool failed' }
 
