@@ -35,7 +35,27 @@ const uint16_t kYPbPrModes[][3] = {
 constexpr UINT32 kHorizontalBlanking = 160;
 constexpr UINT32 kVerticalBlanking = 45;
 
-DWORD ReadPolicyDword(const wchar_t* name, DWORD fallback);
+/* Small settings read shared by the driver. Kept next to the brightness
+ * values so there is one place to look for runtime configuration. */
+DWORD ReadPolicyDword(const wchar_t* name, DWORD fallback) {
+  HKEY key = nullptr;
+  if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\winusbdisplay", 0,
+                    KEY_QUERY_VALUE | KEY_WOW64_64KEY, &key) != ERROR_SUCCESS) {
+    return fallback;
+  }
+  DWORD value = 0;
+  DWORD size = sizeof(value);
+  DWORD type = 0;
+  DWORD result = fallback;
+  if (RegQueryValueExW(key, name, nullptr, &type,
+                       reinterpret_cast<LPBYTE>(&value), &size) ==
+          ERROR_SUCCESS &&
+      type == REG_DWORD) {
+    result = value;
+  }
+  RegCloseKey(key);
+  return result;
+}
 
 DISPLAYCONFIG_VIDEO_SIGNAL_INFO MakeSignalInfo(uint16_t width, uint16_t height,
                                                uint16_t hz) {
@@ -855,28 +875,6 @@ void IndirectDevice::BuildModeList() {
     modes_.push_back(*FindMode(1024, 768, 60));
   }
   active_mode_ = modes_.front();
-}
-
-/* Small settings read shared by the driver. Kept next to the brightness
- * values so there is one place to look for runtime configuration. */
-DWORD ReadPolicyDword(const wchar_t* name, DWORD fallback) {
-  HKEY key = nullptr;
-  if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\winusbdisplay", 0,
-                    KEY_QUERY_VALUE | KEY_WOW64_64KEY, &key) != ERROR_SUCCESS) {
-    return fallback;
-  }
-  DWORD value = 0;
-  DWORD size = sizeof(value);
-  DWORD type = 0;
-  DWORD result = fallback;
-  if (RegQueryValueExW(key, name, nullptr, &type,
-                       reinterpret_cast<LPBYTE>(&value), &size) ==
-          ERROR_SUCCESS &&
-      type == REG_DWORD) {
-    result = value;
-  }
-  RegCloseKey(key);
-  return result;
 }
 
 void IndirectDevice::CreateMonitor() {
