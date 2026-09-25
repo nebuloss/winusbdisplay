@@ -653,9 +653,10 @@ void SwapChainProcessor::VerifyGpuAgainstCpu(ID3D11Texture2D* source,
     }
   }
 
-  Log("verify: %dx%d at (%d,%d) %s worst=%d at byte %zu", rect.width(),
-      rect.height(), rect.x1, rect.y1, uniform ? "[uniform]" : "[content]",
-      worst, worst_at);
+  if (!uniform && worst > 2) {
+    Log("verify: %dx%d at (%d,%d) worst=%d at byte %zu", rect.width(),
+        rect.height(), rect.x1, rect.y1, worst, worst_at);
+  }
 
   if (!uniform) {
     ++verify_content_frames_;
@@ -669,7 +670,7 @@ void SwapChainProcessor::VerifyGpuAgainstCpu(ID3D11Texture2D* source,
     /* Only trust the GPU path once several frames with real content, at
      * different offsets and sizes, have matched. */
     if (verify_content_frames_ >= 8) {
-      Log("verify: GPU path agrees over %u content frames, verification done",
+      Log("verify: GPU path matches the CPU reference over %u frames",
           verify_content_frames_);
       compute_verified_ = true;
     }

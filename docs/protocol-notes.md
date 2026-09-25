@@ -520,3 +520,24 @@ time, so neither is currently worth the complexity.
 
 Set `UseComputeShader` to 0 under `HKLM\SOFTWARE\winusbdisplay` to force the
 CPU path, which is also used automatically if the GPU path cannot initialise.
+
+### Two bugs the GPU path exposed
+
+Both were found by making the verification honest rather than by inspection,
+and are worth recording because neither is obvious.
+
+**The first verification was meaningless.** It ran once, on the first frame
+after the swapchain was assigned. That frame is a full-screen update of a
+desktop that has not been drawn yet, so it is uniformly black. Comparing black
+to black reports a perfect match no matter how broken the conversion is. The
+check now runs over the first several frames, skips any frame whose pixels are
+all identical, and only declares the GPU path trustworthy after eight frames
+with real content at differing sizes and offsets have matched.
+
+**The idle refresh resent stale pixels.** `SendRefresh` re-read the staging
+texture, which on the CPU path always held the most recent frame. On the GPU
+path nothing writes to that texture during normal operation, so after two and
+a half seconds of an unchanged desktop the panel was sent whatever happened to
+be left in it. It now keeps the last acquired surface, which IddCx guarantees
+stays valid until the next acquire, and re-converts from that through whichever
+path is active.
