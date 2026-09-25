@@ -454,8 +454,13 @@ void SwapChainProcessor::Run() {
   SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
 
   if (!EnsureD3D()) {
+    Log("SwapChain: D3D init failed");
     return;
   }
+  Log("SwapChain: processing started");
+
+  unsigned logged = 0;
+  ULONGLONG last_report = GetTickCount64();
 
   HANDLE waits[] = {new_frame_event_, terminate_event_};
   for (;;) {
@@ -477,8 +482,17 @@ void SwapChainProcessor::Run() {
       break;
     }
 
-    ProcessFrame(buffer);
+    bool ok = ProcessFrame(buffer);
     IddCxSwapChainFinishedProcessingFrame(swapchain_);
+
+    /* First few frames, then once a second, so the log stays readable. */
+    ULONGLONG now = GetTickCount64();
+    if (logged < 3 || now - last_report >= 1000) {
+      Log("SwapChain: frame ok=%d sent=%llu dropped=%llu", ok ? 1 : 0,
+          sender_->frames_sent(), sender_->frames_dropped());
+      ++logged;
+      last_report = now;
+    }
 
     if (WaitForSingleObject(terminate_event_, 0) == WAIT_OBJECT_0) {
       break;
@@ -695,19 +709,26 @@ NTSTATUS IndirectDevice::CommitModes(const IDARG_IN_COMMITMODES* args) {
 
     const Mode* mode = FindMode(width, height, hz);
     if (!mode) {
+      Log("CommitModes: %ux%u@%u not in the chip mode table", width, height, hz);
       return STATUS_INVALID_PARAMETER;
     }
     if (!ms_device_->PowerOn() || !ms_device_->SetResolution(*mode)) {
+      Log("CommitModes: modeset failed: %s", ms_device_->last_error().c_str());
       return STATUS_DEVICE_DATA_ERROR;
     }
+    Log("CommitModes: %ux%u@%u -> chip mode 0x%02X", width, height, hz,
+        mode->mode_id);
     active_mode_ = *mode;
   }
   return STATUS_SUCCESS;
 }
 
 NTSTATUS IndirectDevice::AssignSwapChain(const IDARG_IN_SETSWAPCHAIN* args) {
+  Log("AssignSwapChain: mode %ux%u@%u", active_mode_.width, active_mode_.height,
+      active_mode_.hz);
   processor_.reset();
   if (!ms_device_ || !sender_) {
+    Log("AssignSwapChain: device not ready");
     return STATUS_DEVICE_NOT_READY;
   }
   processor_.reset(new SwapChainProcessor(args->hSwapChain,
@@ -718,7 +739,12 @@ NTSTATUS IndirectDevice::AssignSwapChain(const IDARG_IN_SETSWAPCHAIN* args) {
   return STATUS_SUCCESS;
 }
 
-void IndirectDevice::UnassignSwapChain() { processor_.reset(); }
+void IndirectDevice::UnassignSwapChain() {
+  Log("UnassignSwapChain: sent=%llu dropped=%llu",
+      sender_ ? sender_->frames_sent() : 0,
+      sender_ ? sender_->frames_dropped() : 0);
+  processor_.reset();
+}
 
 /* Helpers used by the callbacks in driver.cpp. */
 
