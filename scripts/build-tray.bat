@@ -27,7 +27,8 @@ rem /SUBSYSTEM:WINDOWS so no console window appears when it starts.
 cl /nologo /std:c++17 /EHsc /W4 /WX /O2 /MT /DUNICODE /D_UNICODE ^
   /Fo"%OUT%\msbright_" /Fe"%OUT%\msbright.exe" ^
   "%ROOT%\src\tools\msbright\main.cpp" ^
-  /link /SUBSYSTEM:WINDOWS user32.lib shell32.lib advapi32.lib
+  /link /SUBSYSTEM:WINDOWS user32.lib shell32.lib advapi32.lib ^
+  gdi32.lib gdiplus.lib dwmapi.lib shcore.lib
 
 if errorlevel 1 (
   echo build failed
