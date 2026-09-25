@@ -32,14 +32,21 @@ function Get-KitTool([string]$name) {
         "${env:ProgramFiles}\Windows Kits\10\bin"
     ) | Where-Object { Test-Path $_ }
 
+    $found = @()
     foreach ($root in $roots) {
-        $hit = Get-ChildItem -Path $root -Recurse -Filter $name -ErrorAction SilentlyContinue |
-            Where-Object { $_.FullName -match '\\x64\\' } |
-            Sort-Object FullName -Descending |
-            Select-Object -First 1
-        if ($hit) { return $hit.FullName }
+        $found += Get-ChildItem -Path $root -Recurse -Filter $name -ErrorAction SilentlyContinue
     }
-    throw "could not find $name in the Windows Kits; install the WDK"
+    if (-not $found) {
+        throw "could not find $name in the Windows Kits; install the WDK"
+    }
+    # Prefer x64, but Inf2Cat.exe only ever ships as x86, so fall back to any
+    # architecture rather than failing.
+    $hit = $found | Where-Object { $_.FullName -match '\\x64\\' } |
+        Sort-Object FullName -Descending | Select-Object -First 1
+    if (-not $hit) {
+        $hit = $found | Sort-Object FullName -Descending | Select-Object -First 1
+    }
+    return $hit.FullName
 }
 
 Assert-Elevated
