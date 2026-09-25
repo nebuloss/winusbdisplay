@@ -609,6 +609,10 @@ int main(int argc, char** argv) {
         g_options.transport = TransportKind::kWinUsb;
       } else if (strcmp(kind, "file") == 0) {
         g_options.transport = TransportKind::kFile;
+      } else if (strcmp(kind, "composite") == 0) {
+        g_options.transport = TransportKind::kComposite;
+      } else if (strcmp(kind, "auto") == 0) {
+        g_options.transport = TransportKind::kAuto;
       } else {
         fprintf(stderr, "error: unknown transport '%s'\n", kind);
         return 2;
