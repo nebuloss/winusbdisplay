@@ -78,7 +78,9 @@ UmdfHostProcessSharing     = ProcessSharingDisabled
 UmdfImpersonationLevel     = Impersonation
 
 [MS912xIdd_Install]
-UmdfLibraryVersion = 2.15.0
+; Must match the UmdfVersion the binary was built against
+; (src/driver/ms912xidd.vcxproj), not whatever the in-box INF happens to use.
+UmdfLibraryVersion = 2.33.0
 ServiceBinary      = %13%\ms912xidd.dll
 UmdfExtensions     = IddCx0102
 

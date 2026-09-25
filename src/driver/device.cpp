@@ -658,8 +658,9 @@ void IndirectDevice::CreateMonitor() {
       info.MonitorDescription.DataSize = static_cast<UINT>(edid_.size());
       info.MonitorDescription.pData = edid_.data();
     } else {
-      info.MonitorDescription.Type =
-          IDDCX_MONITOR_DESCRIPTION_TYPE_UNINITIALIZED;
+      /* IddCx represents an EDID-less monitor as an EDID description with no
+       * payload, not as an UNINITIALIZED type. */
+      info.MonitorDescription.Type = IDDCX_MONITOR_DESCRIPTION_TYPE_EDID;
       info.MonitorDescription.DataSize = 0;
       info.MonitorDescription.pData = nullptr;
     }
