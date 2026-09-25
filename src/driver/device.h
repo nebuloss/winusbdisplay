@@ -100,6 +100,20 @@ class SwapChainProcessor {
   void Run();
   bool EnsureD3D();
   bool EnsureStaging(UINT width, UINT height);
+
+  /* GPU conversion. Most of the CPU cost of a frame is reading the acquired
+   * surface back over the bus, so converting on the GPU and reading back UYVY
+   * instead of RGBA both removes the conversion and halves the readback.
+   * Returns false if the device cannot support it, in which case the CPU path
+   * is used and stays used. */
+  bool EnsureCompute();
+  bool ConvertOnGpu(ID3D11Texture2D* source, const Rect& rect,
+                    const PictureAdjust& adjust, uint8_t* dst,
+                    size_t dst_capacity);
+  /* Converts one frame both ways and logs the largest difference, so a silent
+   * mismatch between the two paths cannot go unnoticed. Runs once. */
+  void VerifyGpuAgainstCpu(ID3D11Texture2D* source, const Rect& rect,
+                           const PictureAdjust& adjust);
   bool ProcessFrame(const IDARG_OUT_RELEASEANDACQUIREBUFFER& buffer);
 
   /* Re-sends the whole picture from the staging copy. Needed because the
@@ -121,6 +135,19 @@ class SwapChainProcessor {
   Microsoft::WRL::ComPtr<ID3D11Texture2D> staging_;
   UINT staging_width_ = 0;
   UINT staging_height_ = 0;
+
+  Microsoft::WRL::ComPtr<ID3D11ComputeShader> compute_shader_;
+  Microsoft::WRL::ComPtr<ID3D11Buffer> compute_output_;
+  Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> compute_output_uav_;
+  Microsoft::WRL::ComPtr<ID3D11Buffer> compute_readback_;
+  Microsoft::WRL::ComPtr<ID3D11Buffer> compute_params_;
+  /* The acquired surface is a different texture most frames, so the view is
+   * cached against the texture it was made for. */
+  Microsoft::WRL::ComPtr<ID3D11Texture2D> compute_source_;
+  Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> compute_source_srv_;
+  bool compute_ready_ = false;
+  bool compute_failed_ = false;
+  bool compute_verified_ = false;
 
   /* The chip holds two frame buffers and alternates between them, so damage
    * has to be tracked per buffer: new damage accumulates into both, and only
