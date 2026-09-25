@@ -739,7 +739,7 @@ void SwapChainProcessor::VerifyGpuAgainstCpu(ID3D11Texture2D* source,
     }
   }
 
-  if (!uniform && worst > 2) {
+  if (!uniform) {
     Log("verify: %dx%d at (%d,%d) worst=%d at byte %zu", rect.width(),
         rect.height(), rect.x1, rect.y1, worst, worst_at);
   }
