@@ -38,31 +38,35 @@ at USB 2.0 high speed. See `docs/protocol-notes.md`.
 
 ## Performance
 
-Measured, not estimated:
+The chip completes transfers on its own 60 Hz vsync boundary, so cost is
+quantised rather than proportional to size:
 
-| Mode | Full-frame rate |
-|---|---|
-| 1920x1080 | 7.5 fps |
-| 1280x720 | 15.0 fps |
-| 1024x768 | 19.2 fps |
+| Update size | Cost | Rate |
+|---|---|---|
+| up to ~520 KB | 1 period | **60 /s** |
+| up to ~1.0 MB | 2 periods | 30 /s |
+| full 1080p frame, 4.1 MB | 8 periods | 7.5 /s |
 
-This is a hardware ceiling, confirmed three ways: the chip id says MS912C,
-there is no BOS descriptor (so the silicon is not USB 3 capable), and
-pipelining up to eight overlapped transfers changes throughput by less than
-1%. The device saturates at 29.6 MB/s while USB 2.0 itself can carry 40 to 45.
+Below ~520 KB, size is free: an 8 KB update and a 491 KB update both take
+16.7 ms. Ordinary desktop damage is far below that, so interactive use runs at
+the full 60 updates per second. Only a full screen repaint is slow.
 
-Full-frame rate only matters for full-screen video. Ordinary desktop use is
-driven by damage tracking, which sends what actually changed:
+Damage tracking keeps updates small, sending what actually changed:
 
 ```
 damage: 20x22   at (268,332)  ->    896 bytes
-damage: 24x22   at (1172,624) ->  1,072 bytes
 damage: 604x52  at (180,398)  -> 62,832 bytes
 ```
 
-Roughly 1 KB per update rather than 4 MB. For smoother full-screen content,
-pick a lower resolution: 1280x720 doubles the frame rate, and 1920x1080@30 is
-offered as a native chip mode.
+Conversion runs on the GPU by default, verified bit exact against the CPU
+reference at runtime, with a threaded SIMD CPU path as automatic fallback.
+That halves CPU use; it does not change the frame rate, because the transfer
+was never waiting on the conversion.
+
+Full screen throughput is a hardware limit at 29.6 MB/s, confirmed three ways:
+the chip identifies as an MS912C, it has no BOS descriptor so the silicon is
+not USB 3 capable, and pipelining up to eight overlapped transfers changes
+throughput by under 1%.
 
 ## Brightness
 

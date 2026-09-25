@@ -541,3 +541,60 @@ a half seconds of an unchanged desktop the panel was sent whatever happened to
 be left in it. It now keeps the last acquired surface, which IddCx guarantees
 stays valid until the next acquire, and re-converts from that through whichever
 path is active.
+
+## The chip is vsync locked, and that changes the whole performance picture
+
+Measured with `msdisp benchsizes`, which times transfers of increasing size:
+
+| Rect | Bytes | Time | Updates/s |
+|---|---|---|---|
+| 1920x128 | 491 KB | 16.7 ms | **60** |
+| 1920x136 | 522 KB | 17.9 ms | 56 |
+| 1920x144 | 553 KB | 33.2 ms | 30 |
+| 1920x256 | 983 KB | 33.4 ms | 30 |
+| 1920x320 | 1.2 MB | 49.5 ms | 20 |
+| 1920x540 | 2.1 MB | 67.0 ms | 15 |
+| 1920x1080 | 4.1 MB | 133.1 ms | 7.5 |
+
+Every figure is a multiple of 16.67 ms. The chip does not simply stream at
+some byte rate: it completes a bulk transfer on its own 60 Hz vsync boundary.
+The cost of an update is therefore quantised, and the only thing that matters
+is how many periods it spans:
+
+```
+  bytes <= ~520 KB   1 period    60 updates/s
+  bytes <= ~1.0 MB   2 periods   30 updates/s
+  bytes <= ~4.1 MB   8 periods   7.5 updates/s
+```
+
+Note the shape of it: a 8 KB update and a 491 KB update both cost exactly one
+period. Below the threshold, size is free.
+
+This reframes the earlier "7.5 fps" conclusion. That number is correct, but it
+only describes a full screen repaint. Ordinary desktop damage is a few
+kilobytes to a few hundred, comfortably inside one period, so interactive use
+runs at the full 60 updates per second. It also means coalescing several small
+dirty rectangles into one transfer is close to free, while splitting one update
+into two transfers doubles its cost.
+
+### What this rules out
+
+Sending less data per update stops helping once an update already fits in one
+period, which for normal desktop work it always does. That is why the SIMD,
+threading and GPU work changed CPU use but not frame rate: the transfer was
+never waiting on us.
+
+### Idle keepalive
+
+The panel blanks without traffic, so a static desktop still needs periodic
+updates. A full repaint costs eight periods, so sending only a band looks
+attractive. It does not work: the chip alternates between two frame buffers on
+every transfer, so a partial update lands in one and leaves the other holding
+older content, and the two alternate visibly on screen. Partial updates have to
+be tracked per buffer, which is what `pending_damage_` does; a refresh whose
+whole purpose is to resynchronise sends the whole screen.
+
+The same reasoning caught a real bug: the refresh was clearing the pending
+damage for *both* buffers while writing only one, so the unwritten buffer kept
+stale content and it reappeared on the next flip. It now clears only the buffer
+it wrote and alternates, so consecutive refreshes bring both current.

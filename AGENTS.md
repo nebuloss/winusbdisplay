@@ -154,6 +154,18 @@ verbatim in the UMDF event log.
 Each of these cost real investigation; the evidence is in
 `docs/protocol-notes.md`.
 
+- **The chip is vsync locked at 60 Hz.** Transfer cost is quantised into
+  16.67 ms periods: up to ~520 KB costs one period, the next byte costs a
+  whole extra one. So a small update and a 490 KB update cost the same, and
+  normal desktop damage runs at the full 60 updates/s. Only full screen
+  repaints are slow (8 periods, 7.5 fps). Re-measure with
+  `msdisp benchsizes`.
+- **Any partial update must be tracked per chip buffer.** The chip alternates
+  between two frame buffers on every transfer, so a partial write lands in one
+  and leaves the other stale, and they flicker alternately on screen. This is
+  what `pending_damage_[2]` is for. A refresh intended to resynchronise must
+  send the whole screen, and must clear the pending damage only for the buffer
+  it actually wrote.
 - **~30 MB/s is a hardware ceiling.** The chip is USB 2 silicon (MS912C, no
   BOS descriptor) and saturates at 29.6 MB/s. Pipelined overlapped transfers
   at depth 2, 4 and 8 all measure within 1% of synchronous. Do not go looking
