@@ -106,14 +106,17 @@ std::unique_ptr<Transport> MakeTransport(bool need_data_plane) {
    * WinUSB one. */
   if (g_options.transport == TransportKind::kComposite ||
       (g_options.transport == TransportKind::kAuto && need_data_plane)) {
-    std::unique_ptr<CompositeTransport> composite =
-        CompositeTransport::Open(&error);
-    if (composite) {
-      return composite;
+    std::string control_error, data_error;
+    std::unique_ptr<HidTransport> control = HidTransport::Open(&control_error);
+    std::unique_ptr<WinUsbTransport> data = WinUsbTransport::Open(&data_error);
+    if (control && data) {
+      return std::unique_ptr<Transport>(
+          new CompositeTransport(std::move(control), std::move(data)));
     }
     if (g_options.transport == TransportKind::kComposite ||
         need_data_plane) {
-      fprintf(stderr, "error: %s\n", error.c_str());
+      fprintf(stderr, "error: %s\n",
+              control ? data_error.c_str() : control_error.c_str());
       fprintf(stderr,
               "hint: sending pixels needs the WinUSB data plane; run\n"
               "      scripts\\install-winusb.ps1, or use --transport file\n");
