@@ -173,6 +173,15 @@ struct IndirectDeviceContextWrapper {
 void BuildFallbackEdid(std::vector<uint8_t>* edid, uint16_t width,
                        uint16_t height, uint16_t hz);
 
+/* Copy helpers for the IddCx mode enumeration callbacks. Passing a null or
+ * zero capacity buffer returns the number of entries the caller must allocate,
+ * which is the two-pass convention IddCx uses. */
+UINT FillMonitorModes(const std::vector<Mode>& modes, UINT capacity,
+                      IDDCX_MONITOR_MODE* out,
+                      IDDCX_MONITOR_MODE_ORIGIN origin);
+UINT FillTargetModes(const std::vector<Mode>& modes, UINT capacity,
+                     IDDCX_TARGET_MODE* out);
+
 }  // namespace ms912x
 
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(ms912x::IndirectDeviceContextWrapper,
