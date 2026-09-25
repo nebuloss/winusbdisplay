@@ -116,6 +116,8 @@ bool Device::SetResolution(const Mode& mode) {
   uint8_t data[6];
   uint8_t discard;
 
+  output_enabled_ = false;
+
   /* Stop any transfer in progress before reprogramming. */
   memset(data, 0, sizeof(data));
   if (!WriteCommand(kCmdTransferEnable, data)) {
