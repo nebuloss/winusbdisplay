@@ -34,6 +34,12 @@ class HidTransport : public Transport {
   static std::unique_ptr<HidTransport> OpenPath(const std::wstring& path,
                                                 std::string* error);
 
+  /* Opens the HID interface belonging to a specific physical dongle. Used by
+   * the driver, which already knows which device it is bound to and must not
+   * grab the control interface of a different adapter. */
+  static std::unique_ptr<HidTransport> OpenForContainer(const GUID& container,
+                                                        std::string* error);
+
   std::string Describe() const override;
   bool HasDataPlane() const override { return false; }
   bool ControlSetReport(const uint8_t* data, size_t len) override;
