@@ -342,6 +342,9 @@ bool SwapChainProcessor::EnsureD3D() {
   if (FAILED(d3d_device_.As(&dxgi_device))) {
     return false;
   }
+  /* Looking Glass does the same: the capture path is latency sensitive and
+   * loses frames if it is scheduled behind ordinary GPU work. */
+  dxgi_device->SetGPUThreadPriority(7);
   IDARG_IN_SWAPCHAINSETDEVICE set_device = {};
   set_device.pDevice = dxgi_device.Get();
   return NT_SUCCESS(IddCxSwapChainSetDevice(swapchain_, &set_device));
@@ -524,7 +527,7 @@ void SwapChainProcessor::Run() {
         IddCxSwapChainReleaseAndAcquireBuffer(swapchain_, &buffer);
 
     if (status == E_PENDING) {
-      DWORD wait = WaitForMultipleObjects(2, waits, FALSE, 16);
+      DWORD wait = WaitForMultipleObjects(2, waits, FALSE, 17);
       if (wait == WAIT_OBJECT_0 + 1) {
         Log("SwapChain: terminate signalled");
         break;
