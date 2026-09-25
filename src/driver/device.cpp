@@ -1517,6 +1517,17 @@ NTSTATUS IndirectDevice::PrepareHardware() {
     BuildFallbackEdid(&edid_, 1920, 1080, 60);
   }
 
+  /* Experimental: the chip's double buffering is the leading suspect for the
+   * text shimmer, and the bypass transfer modes may avoid it. Default stays
+   * on the mode the vendor driver uses. */
+  const uint8_t transfer_mode =
+      static_cast<uint8_t>(ReadPolicyDword(L"TransferMode",
+                                           kTransModeManualBlock));
+  ms_device_->SetTransferMode(transfer_mode);
+  if (transfer_mode != kTransModeManualBlock) {
+    Log("PrepareHardware: transfer mode %u", transfer_mode);
+  }
+
   BuildModeList();
   Log("PrepareHardware: port=%s edid_valid=%d modes=%u",
       VideoPortName(port_), edid_valid_ ? 1 : 0,

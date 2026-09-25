@@ -135,7 +135,7 @@ bool Device::SetResolution(const Mode& mode) {
   }
 
   memset(data, 0, sizeof(data));
-  data[0] = kTransModeManualBlock;
+  data[0] = transfer_mode_;
   if (!WriteCommand(kCmdSetTransMode, data)) {
     return false;
   }
@@ -177,6 +177,14 @@ bool Device::Reinitialise() {
     return false;
   }
   return SetResolution(last_mode_);
+}
+
+bool Device::TriggerFrame(uint8_t index, uint8_t delay) {
+  uint8_t data[6];
+  memset(data, 0, sizeof(data));
+  data[0] = index;
+  data[1] = delay;
+  return WriteCommand(kCmdTriggerFrame, data);
 }
 
 bool Device::EnableOutput(bool enable) {

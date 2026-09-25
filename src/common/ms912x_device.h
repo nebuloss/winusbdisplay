@@ -67,6 +67,19 @@ class Device {
   bool SetResolution(const Mode& mode);
   bool EnableOutput(bool enable);
 
+  /* Transfer mode the chip is put into during the modeset. Manual block is
+   * what the vendor driver uses and what makes damage rectangles possible.
+   * The bypass variants are undocumented beyond their names, but the name
+   * suggests they write through rather than into a frame buffer that is then
+   * swapped, which would avoid the chip's double buffering entirely. Exposed
+   * so the alternatives can be tried against real content. */
+  void SetTransferMode(uint8_t mode) { transfer_mode_ = mode; }
+
+  /* Tells the chip which of its frame buffers to display. The vendor driver
+   * tracks an alternating index and has a call for this, left commented out
+   * in the source they publish. */
+  bool TriggerFrame(uint8_t index, uint8_t delay);
+
   bool ReadVideoPort(VideoPort* port);
   bool ReadDisplayStatus(uint8_t* status);
 
@@ -101,6 +114,7 @@ class Device {
   Mode last_mode_ = {};
   bool have_last_mode_ = false;
   unsigned consecutive_failures_ = 0;
+  uint8_t transfer_mode_ = kTransModeManualBlock;
 };
 
 bool EdidBlockChecksumOk(const uint8_t* block);
