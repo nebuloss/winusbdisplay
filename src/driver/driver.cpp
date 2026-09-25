@@ -178,6 +178,11 @@ NTSTATUS EvtIddCxParseMonitorDescription(
     modes.push_back(kModeList[i]);
   }
 
+  Log("ParseMonitorDescription: in=%u buf=%p descType=%u dataSize=%u",
+      args->MonitorModeBufferInputCount, (void*)args->pMonitorModes,
+      (unsigned)args->MonitorDescription.Type,
+      args->MonitorDescription.DataSize);
+
   out->MonitorModeBufferOutputCount = FillMonitorModes(
       modes, args->MonitorModeBufferInputCount, args->pMonitorModes,
       IDDCX_MONITOR_MODE_ORIGIN_MONITORDESCRIPTOR);
@@ -208,6 +213,8 @@ NTSTATUS EvtIddCxMonitorGetDefaultModes(
   }
   const std::vector<Mode>& modes = device->modes();
 
+  Log("GetDefaultModes: in=%u modes=%u",
+      args->DefaultMonitorModeBufferInputCount, (unsigned)modes.size());
   out->DefaultMonitorModeBufferOutputCount = FillMonitorModes(
       modes, args->DefaultMonitorModeBufferInputCount,
       args->pDefaultMonitorModes, IDDCX_MONITOR_MODE_ORIGIN_DRIVER);
@@ -231,6 +238,8 @@ NTSTATUS EvtIddCxMonitorQueryModes(IDDCX_MONITOR monitor,
   }
   const std::vector<Mode>& modes = device->modes();
 
+  Log("QueryTargetModes: in=%u modes=%u",
+      args->TargetModeBufferInputCount, (unsigned)modes.size());
   out->TargetModeBufferOutputCount =
       FillTargetModes(modes, args->TargetModeBufferInputCount,
                       args->pTargetModes);
