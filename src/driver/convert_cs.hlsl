@@ -36,19 +36,28 @@ uint3 LoadPixel(uint x, uint y)
                  round(texel.r * 255.0f));  // b, g, r
 }
 
+// 15 bit fixed point, matching ms912x_convert.cpp exactly. The CPU SIMD path
+// cannot use the usual 16 bit constants because 32904 does not fit in a signed
+// 16 bit multiply lane, and every path has to agree bit for bit: a region
+// converted by different paths at different times would otherwise alternate
+// between two values, which shows up as shimmering text.
+static const int kYr = 8382, kYg = 16452, kYb = 3196;
+static const int kUr = -4838, kUg = -9498, kUb = 14336;
+static const int kVr = 14336, kVg = -12005, kVb = -2332;
+
 int RgbToY(uint3 bgr)
 {
-    return int((16 << 16) + 16763 * bgr.z + 32904 * bgr.y + 6391 * bgr.x) >> 16;
+    return 16 + ((kYr * int(bgr.z) + kYg * int(bgr.y) + kYb * int(bgr.x)) >> 15);
 }
 
 int RgbToU(uint3 bgr)
 {
-    return int((128 << 16) - 9676 * bgr.z - 18996 * bgr.y + 28672 * bgr.x) >> 16;
+    return 128 + ((kUr * int(bgr.z) + kUg * int(bgr.y) + kUb * int(bgr.x)) >> 15);
 }
 
 int RgbToV(uint3 bgr)
 {
-    return int((128 << 16) + 28672 * bgr.z - 24009 * bgr.y - 4663 * bgr.x) >> 16;
+    return 128 + ((kVr * int(bgr.z) + kVg * int(bgr.y) + kVb * int(bgr.x)) >> 15);
 }
 
 // Brightness scales luma above its black point, contrast scales chroma about
