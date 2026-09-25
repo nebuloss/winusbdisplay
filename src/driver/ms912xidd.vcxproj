@@ -32,7 +32,11 @@
     <UMDF_VERSION_MAJOR>2</UMDF_VERSION_MAJOR>
     <UMDF_VERSION_MINOR>33</UMDF_VERSION_MINOR>
     <!-- The IddCx client stub is what makes this an indirect display driver. -->
-    <IddCxVersion>1.4</IddCxVersion>
+    <!-- Must match UmdfExtensions in inf/ms912xidd.inf. IddCx0102 is
+         the extension name the in-box indirect display drivers use;
+         declaring 1.2 there while compiling against 1.4 makes the device
+         fail to start with problem code 10. -->
+    <IddCxVersion>1.2</IddCxVersion>
   </PropertyGroup>
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
@@ -74,7 +78,7 @@
       <RuntimeTypeInfo>true</RuntimeTypeInfo>
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
-      <PreprocessorDefinitions>_UNICODE;UNICODE;IDDCX_VERSION_MAJOR=1;IDDCX_VERSION_MINOR=4;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>_UNICODE;UNICODE;IDDCX_VERSION_MAJOR=1;IDDCX_VERSION_MINOR=2;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>$(SdkIddCxInc);$(SolutionDir)src\common;$(SolutionDir)src\driver;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
