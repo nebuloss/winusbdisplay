@@ -127,6 +127,16 @@ Set-Acl -Path $settingsKey -AclObject $acl
 Write-Host '    users may now set brightness without elevation'
 
 Write-Host ''
+Write-Host '=== 5. tray brightness control ==='
+$tray = Join-Path $root 'build\msbright.exe'
+if (Test-Path $tray) {
+    Write-Host ("    " + $tray)
+    Write-Host '    run it to get a tray icon; right-click it for Start with Windows'
+} else {
+    Write-Host '    not built yet, run scripts\build-tray.bat'
+}
+
+Write-Host ''
 Write-Host '=== result ==='
 Get-PnpDevice | Where-Object {
     $_.InstanceId -match 'ms912xidd' -or $_.InstanceId -match 'VID_345F.*MI_03'

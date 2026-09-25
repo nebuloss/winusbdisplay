@@ -72,13 +72,25 @@ not call an indirect display driver's I2C callbacks, and probing confirms they
 are never invoked. The driver implements a full DDC/CI slave regardless, in
 case that changes.
 
-Brightness works through a registry value instead, applied during colour
-conversion so it genuinely dims the panel:
+Brightness works through a tray app instead. It writes a registry value the
+driver polls and applies during colour conversion, so it genuinely dims the
+panel rather than just remembering a number.
 
 ```
-powershell -File scripts\brightness.ps1 -Brightness 60
-powershell -File scripts\brightness.ps1              :: show current
+scripts\build-tray.bat
+build\msbright.exe
 ```
+
+Left-click the tray icon for a slider flyout, right-click for Reset and
+"Start with Windows". The same binary is scriptable:
+
+```
+build\msbright.exe 60        :: brightness
+build\msbright.exe 60 40     :: brightness and contrast
+```
+
+It does not need elevation: the installer widens the ACL on the single
+settings key it writes.
 
 ## Quick start
 
@@ -130,7 +142,7 @@ Remove everything with `scripts\purge.ps1`.
 
 ```
 src/common/     protocol, transports and frame pipeline, shared by both binaries
-src/tools/      the msdisp console tool
+src/tools/      msdisp console tool, msbright tray brightness control
 src/driver/     the IddCx UMDF2 driver
 inf/            driver packages
 scripts/        build and install

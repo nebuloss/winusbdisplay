@@ -21,6 +21,7 @@ correction with evidence. When they conflict, the protocol notes win.
 ```
 scripts\build-tool.bat                    # msdisp console tool -> build\msdisp.exe
 scripts\build-driver.bat [Config] [Plat]  # IddCx driver -> build\driver\<plat>\<config>\
+scripts\build-tray.bat                    # msbright tray app -> build\msbright.exe
 
 scripts\elev.ps1 -Start                   # elevated worker, ONE UAC prompt per session
 scripts\elev.ps1 -Script <abs path>       # run a script elevated, no prompt
@@ -98,7 +99,9 @@ src/common/     transport-agnostic protocol + frame pipeline (shared by both bin
   file_transport.*  loopback: writes would-be transfers to disk
   ms912x_device.*   all device logic. Owns the control lock.
   ms912x_convert.*  XRGB8888 -> UYVY, damage rect alignment, frame framing
-src/tools/msdisp/ console tool
+src/tools/msdisp/   console tool
+src/tools/msbright/ tray brightness control (writes the registry value the
+                    driver polls; pure Win32 plus GDI+, no dependencies)
 src/driver/       IddCx UMDF2 driver (root-enumerated software device)
   device.*          IddCx adapter/monitor, swapchain thread, frame sender
   driver.*          DriverEntry and the IddCx callbacks
@@ -160,8 +163,15 @@ Each of these cost real investigation; the evidence is in
 - **`vSyncFreqDivider` above 1 breaks the topology.** Windows rejects the
   path with `ERROR_GEN_FAILURE`. Pacing is done by dropping frames.
 - **Windows never calls the IddCx I2C callbacks**, so DDC/CI cannot work for
-  an indirect display. Microsoft documents this. Brightness goes through the
-  registry value instead.
+  an indirect display. Microsoft documents this, and it was measured: the
+  callbacks never fire and `dxva2` returns `ERROR_NOT_SUPPORTED`.
+- **Twinkle Tray cannot reach this monitor.** Its two paths are DDC/CI (above)
+  and WMI, and WMI needs a `WmiMonitorBrightness` instance that only
+  `monitor.sys` creates after finding a brightness interface on the kernel
+  miniport. `IndirectKmd` has none. Reporting an INTERNAL connector gets the
+  monitor classified into the WMI path but there is still nothing behind it;
+  the switch is kept as `ReportAsInternal` for anyone who adds a kernel
+  filter later. Brightness is delivered by `msbright` instead.
 
 ## Rules that are easy to violate
 
