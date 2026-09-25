@@ -18,9 +18,13 @@ namespace {
 
 constexpr DWORD kBufferWaitMs = 10;
 
-/* The vendor driver repaints the whole screen if nothing has been sent for
- * this long, which is what stops the panel deciding there is no signal. */
-constexpr unsigned long long kIdleRefreshMs = 2500;
+/* How long the link may stay silent before the panel is repainted.
+ *
+ * The vendor driver uses 2500 ms, but measured here the panel drops its
+ * signal after roughly one to two seconds of silence, so at that interval it
+ * spends much of its time re-acquiring, which reads as the whole screen
+ * flickering. Overridable while the right value is established. */
+constexpr unsigned long long kDefaultIdleRefreshMs = 900;
 
 /* Where GPU conversion starts paying off, measured on this hardware by timing
  * both paths on the same rectangle:
@@ -1415,8 +1419,11 @@ void SwapChainProcessor::Run() {
        * and it repaints from a copy built up region by region, so anywhere
        * the copy never received shows stale content. Only refresh once the
        * link has genuinely been quiet. */
-      if (last_send_ms_ != 0 && idle_now - last_send_ms_ >= kIdleRefreshMs &&
-          ReadPolicyDword(L"IdleRefresh", 1) != 0) {
+      const unsigned long long idle_limit =
+          ReadPolicyDword(L"IdleRefreshMs",
+                          static_cast<DWORD>(kDefaultIdleRefreshMs));
+      if (idle_limit != 0 && last_send_ms_ != 0 &&
+          idle_now - last_send_ms_ >= idle_limit) {
         SendRefresh(false);
       }
       DWORD wait = WaitForMultipleObjects(2, waits, FALSE, 17);
