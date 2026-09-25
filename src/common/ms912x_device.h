@@ -18,9 +18,13 @@ namespace ms912x {
 
 enum class ChipFamily {
   kUnknown,
-  kMs912x,
-  kMs913x,
+  kMs9120,
+  kMs912A,
+  kMs912C,
+  kMs9132,
 };
+
+const char* ChipFamilyName(ChipFamily family);
 
 struct ChipInfo {
   ChipFamily family = ChipFamily::kUnknown;
@@ -48,15 +52,20 @@ class Device {
   /* Control plane. All of these serialize on ctrl_mutex_: the SET/GET pair is
    * a stateful sequence and interleaving two of them returns garbage. */
   bool ReadByte(uint16_t address, uint8_t* value);
+  /* Reads up to kMaxRegisterReadCount consecutive bytes in one round trip. */
+  bool ReadRegisters(uint16_t address, uint8_t* data, size_t len);
   bool WriteCommand(uint8_t cmd, const void* six_bytes);
   bool ReadFlash(uint32_t address, void* data, size_t len);
 
   bool PowerOn();
   bool PowerOff();
 
-  /* The full section 4.3 sequence. Do not reorder; the discarded register
-   * reads are required handshakes. */
+  /* The full section 4.3 sequence. Do not reorder; see docs/protocol-notes.md
+   * for what each step actually is. Output stays disabled afterwards so the
+   * panel does not show garbage before the first frame lands: call
+   * EnableOutput() once a frame has been sent successfully. */
   bool SetResolution(const Mode& mode);
+  bool EnableOutput(bool enable);
 
   bool ReadVideoPort(VideoPort* port);
   bool ReadDisplayStatus(uint8_t* status);
