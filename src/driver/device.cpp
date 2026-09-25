@@ -812,15 +812,19 @@ bool SwapChainProcessor::ProcessFrame(
       IDARG_OUT_GETMOVEREGIONS out = {};
       if (NT_SUCCESS(IddCxSwapChainGetMoveRegions(swapchain_, &in, &out))) {
         for (UINT i = 0; i < out.MoveRegionOutCount; ++i) {
-          const RECT& dest = moves[i].DestRect;
-          damage = MergeRects(damage, FromRECT(dest));
-
-          Rect source;
-          source.x1 = moves[i].SourcePoint.x;
-          source.y1 = moves[i].SourcePoint.y;
-          source.x2 = source.x1 + (dest.right - dest.left);
-          source.y2 = source.y1 + (dest.bottom - dest.top);
-          damage = MergeRects(damage, source);
+          /* Only the destination. A move says content relocated from one
+           * place to another; a driver that can blit would copy it, and one
+           * that cannot, like this chip, repaints the destination instead.
+           * Anything the move uncovered arrives separately as a dirty rect.
+           *
+           * Merging the source as well looks safer but is badly wrong here,
+           * because everything is reduced to a single bounding rectangle:
+           * dragging a window across the screen puts the source and the
+           * destination far apart and the union swells to most of the
+           * display. Measured, that turned a 75 KB update into 3.2 MB, and
+           * 15 ms on the wire into 109 ms, which is precisely the lag that
+           * shows up while dragging. */
+          damage = MergeRects(damage, FromRECT(moves[i].DestRect));
         }
       } else {
         query_failed = true;
