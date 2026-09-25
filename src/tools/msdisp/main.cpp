@@ -706,6 +706,24 @@ int CmdBenchSizes() {
                         {640, 480},  {1024, 768}, {1280, 720}, {1920, 540},
                         {1920, 1080}};
 
+  /* Prime with a full frame: the chip appears to want one after a modeset
+   * before it will accept partial block updates. */
+  {
+    Rect full;
+    full.x1 = 0;
+    full.y1 = 0;
+    full.x2 = mode->width;
+    full.y2 = mode->height;
+    const size_t length =
+        FrameRect(transfer.data(), transfer.size(), framebuffer.data(), stride,
+                  mode->width, mode->height, full);
+    if (!device.SendFrame(transfer.data(), length)) {
+      fprintf(stderr, "priming frame failed: %s\n",
+              device.last_error().c_str());
+      return 1;
+    }
+  }
+
   printf("  %-12s %10s %9s %9s %10s\n", "rect", "bytes", "ms", "MB/s",
          "updates/s");
   for (const Size& size : sizes) {
