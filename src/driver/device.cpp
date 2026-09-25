@@ -694,7 +694,7 @@ void SwapChainProcessor::VerifyGpuAgainstCpu(ID3D11Texture2D* source,
     }
     /* Only trust the GPU path once several frames with real content, at
      * different offsets and sizes, have matched. */
-    if (verify_content_frames_ >= 8) {
+    if (verify_content_frames_ >= 40) {
       Log("verify: GPU path matches the CPU reference over %u frames",
           verify_content_frames_);
       compute_verified_ = true;
