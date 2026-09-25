@@ -470,15 +470,6 @@ bool SwapChainProcessor::ProcessFrame(
   if (have_new_damage) {
     pending_damage_[0] = MergeRects(pending_damage_[0], damage);
     pending_damage_[1] = MergeRects(pending_damage_[1], damage);
-  } else if (last_send_ms_ != 0 && now_ms - last_send_ms_ >= kIdleRefreshMs) {
-    /* Keep the link and the panel awake. */
-    Rect full;
-    full.x1 = 0;
-    full.y1 = 0;
-    full.x2 = fb_width;
-    full.y2 = fb_height;
-    pending_damage_[0] = full;
-    pending_damage_[1] = full;
   }
 
   Rect to_send =
@@ -548,6 +539,57 @@ bool SwapChainProcessor::ProcessFrame(
   return true;
 }
 
+bool SwapChainProcessor::SendRefresh() {
+  if (!staging_ || staging_width_ == 0 || staging_height_ == 0) {
+    return false;
+  }
+
+  Rect full;
+  full.x1 = 0;
+  full.y1 = 0;
+  full.x2 = static_cast<int>(staging_width_);
+  full.y2 = static_cast<int>(staging_height_);
+  full = AlignDamageRect(full, full.x2, full.y2);
+  if (full.empty()) {
+    return false;
+  }
+
+  std::vector<uint8_t>* transfer = sender_->AcquireBuffer(kBufferWaitMs);
+  if (!transfer) {
+    return false;
+  }
+
+  D3D11_MAPPED_SUBRESOURCE mapped = {};
+  if (FAILED(d3d_context_->Map(staging_.Get(), 0, D3D11_MAP_READ, 0,
+                               &mapped))) {
+    sender_->Cancel(transfer);
+    return false;
+  }
+
+  PictureAdjust adjust;
+  if (ddc_) {
+    adjust.brightness = ddc_->brightness();
+    adjust.contrast = ddc_->contrast();
+  }
+  const size_t length = FrameRect(
+      transfer->data(), transfer->size(),
+      static_cast<const uint8_t*>(mapped.pData), mapped.RowPitch, full.x2,
+      full.y2, full, adjust);
+  d3d_context_->Unmap(staging_.Get(), 0);
+
+  if (length == 0) {
+    sender_->Cancel(transfer);
+    return false;
+  }
+
+  sender_->Submit(transfer, length);
+  /* A refresh brings both chip buffers up to date. */
+  pending_damage_[0] = EmptyRect();
+  pending_damage_[1] = EmptyRect();
+  last_send_ms_ = GetTickCount64();
+  return true;
+}
+
 void SwapChainProcessor::Run() {
   /* Ask for a slightly raised priority: the compositor considers the monitor
    * hung if we fall too far behind on the acquire loop. */
@@ -565,6 +607,11 @@ void SwapChainProcessor::Run() {
         IddCxSwapChainReleaseAndAcquireBuffer(swapchain_, &buffer);
 
     if (status == E_PENDING) {
+      /* Nothing new to draw. Keep the panel awake anyway. */
+      if (last_send_ms_ != 0 &&
+          GetTickCount64() - last_send_ms_ >= kIdleRefreshMs) {
+        SendRefresh();
+      }
       DWORD wait = WaitForMultipleObjects(2, waits, FALSE, 17);
       if (wait == WAIT_OBJECT_0 + 1) {
         Log("SwapChain: terminate signalled");

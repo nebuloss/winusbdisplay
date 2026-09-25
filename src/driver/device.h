@@ -102,6 +102,12 @@ class SwapChainProcessor {
   bool EnsureStaging(UINT width, UINT height);
   bool ProcessFrame(const IDARG_OUT_RELEASEANDACQUIREBUFFER& buffer);
 
+  /* Re-sends the whole picture from the staging copy. Needed because the
+   * panel blanks if it stops receiving data, and when the desktop is static
+   * the OS stops presenting entirely, so no frame ever arrives to trigger a
+   * normal update. */
+  bool SendRefresh();
+
   IDDCX_SWAPCHAIN swapchain_;
   LUID render_adapter_;
   HANDLE new_frame_event_;
