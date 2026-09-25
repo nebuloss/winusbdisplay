@@ -301,8 +301,6 @@ void ConvertRowXrgbToUyvySimd(uint8_t* dst, const uint8_t* src, int width) {
   }
 }
 
-namespace {
-
 void ConvertRowXrgbToUyvy(uint8_t* dst, const uint8_t* src, int width) {
   /* SSE2 is part of the x64 baseline, so no runtime check is needed. */
   ConvertRowXrgbToUyvySimd(dst, src, width);
