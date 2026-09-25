@@ -118,6 +118,20 @@ foreach ($file in @((Join-Path $stage 'ms912xidd.cat'), (Join-Path $stage 'ms912
     if ($LASTEXITCODE -ne 0) { throw "signtool failed on $file" }
 }
 
+Write-Host '==> removing our own WinUSB package if present'
+# ms912x_winusb.inf matches exactly the same hardware ids as this package.
+# Windows will happily leave a working WinUSB binding in place, so the
+# competing package has to go or the monitor never appears.
+foreach ($block in ((pnputil /enum-drivers | Out-String) -split "`r?`n`r?`n")) {
+    if ($block -match 'ms912x_winusb\.inf') {
+        $oem = [regex]::Match($block, 'oem\d+\.inf').Value
+        if ($oem) {
+            Write-Host "    deleting $oem"
+            pnputil /delete-driver $oem /uninstall /force
+        }
+    }
+}
+
 Write-Host '==> installing driver package'
 pnputil /add-driver (Join-Path $stage 'ms912xidd.inf') /install
 if ($LASTEXITCODE -ne 0) { throw 'pnputil /add-driver failed' }
