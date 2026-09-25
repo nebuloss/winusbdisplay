@@ -351,8 +351,7 @@ SwapChainProcessor::SwapChainProcessor(IDDCX_SWAPCHAIN swapchain,
                                        LUID render_adapter,
                                        HANDLE new_frame_event, Device* device,
                                        FrameSender* sender, const Mode& mode,
-                                       DdcCiSlave* ddc,
-                                       IDDCX_MONITOR monitor)
+                                       DdcCiSlave* ddc)
     : swapchain_(swapchain),
       render_adapter_(render_adapter),
       new_frame_event_(new_frame_event),
@@ -360,7 +359,6 @@ SwapChainProcessor::SwapChainProcessor(IDDCX_SWAPCHAIN swapchain,
       sender_(sender),
       mode_(mode),
       ddc_(ddc),
-      monitor_(monitor),
       frame_index_(0) {
   pending_damage_[0] = EmptyRect();
   pending_damage_[1] = EmptyRect();
@@ -1060,7 +1058,7 @@ NTSTATUS IndirectDevice::AssignSwapChain(const IDARG_IN_SETSWAPCHAIN* args) {
   }
   std::unique_ptr<SwapChainProcessor> processor(new SwapChainProcessor(
       args->hSwapChain, args->RenderAdapterLuid, args->hNextSurfaceAvailable,
-      ms_device_.get(), sender_.get(), active_mode_, &ddc_, monitor_));
+      ms_device_.get(), sender_.get(), active_mode_, &ddc_));
 
   if (!processor->Start()) {
     /* Delete the swapchain so the OS builds a new one and tries again. This
