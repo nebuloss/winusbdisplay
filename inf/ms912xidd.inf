@@ -53,7 +53,14 @@ ms912xidd.dll
 AddReg = MS912xIdd_HwAddReg
 
 [MS912xIdd_HwAddReg]
+; IddCx requires the IndirectKmd upper filter.
 HKR,,"UpperFilters",0x00010000,"IndirectKmd"
+; UmdfDispatcher = WinUsb works by putting WinUSB.sys into the stack as a
+; LOWER filter, which the UMDF reflector then sends USB requests through.
+; Declaring the dispatcher alone is not enough: without this line the device
+; starts with an empty LowerFilters and WdfUsbTargetDeviceCreateWithParameters
+; fails, surfacing only as problem code 10.
+HKR,,"LowerFilters",0x00010008,"WinUsb"
 HKR,,"DeviceInterfaceGUIDs",0x10000,"{6C2C4F1E-3B7A-4D4F-9F2E-5A1B8C7D3E90}"
 
 [MS912xIdd_Install.Services]
