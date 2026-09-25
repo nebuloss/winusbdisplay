@@ -382,9 +382,18 @@ bool SwapChainProcessor::ProcessFrame(
   const int fb_width = static_cast<int>(source_desc.Width);
   const int fb_height = static_cast<int>(source_desc.Height);
 
+  /* A zero dirty rect count together with a zero move region count means the
+   * desktop did not change at all. Treating that as full-frame damage makes
+   * the driver blast a 4 MB frame every time the compositor ticks, which
+   * saturates the USB 2 link permanently and starves real updates. */
+  if (!force_full_frame_ && meta.DirtyRectCount == 0 &&
+      meta.MoveRegionCount == 0) {
+    return true;
+  }
+
   /* Work out the damage for this frame. */
   Rect damage;
-  if (force_full_frame_ || meta.DirtyRectCount == 0) {
+  if (force_full_frame_) {
     damage.x1 = 0;
     damage.y1 = 0;
     damage.x2 = fb_width;
