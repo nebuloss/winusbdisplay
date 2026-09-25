@@ -56,6 +56,10 @@
     <IntDir>$(SolutionDir)build\driver\obj\$(Platform)\$(Configuration)\</IntDir>
     <SdkIddCxInc>$(WindowsSdkDir)Include\$(WindowsTargetPlatformVersion)\um\iddcx\$(IddCxVersion)</SdkIddCxInc>
     <SdkIddCxLib>$(WindowsSdkDir)Lib\$(WindowsTargetPlatformVersion)\um\$(Platform)\iddcx\$(IddCxVersion)</SdkIddCxLib>
+    <!-- The standalone Build Tools install ships no x86 InfVerif.dll, so the
+         package verifier cannot run here. The INF is still validated by
+         pnputil at install time. -->
+    <SkipPackageVerification>true</SkipPackageVerification>
   </PropertyGroup>
 
   <ItemDefinitionGroup>
@@ -65,7 +69,7 @@
       <RuntimeTypeInfo>true</RuntimeTypeInfo>
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
-      <PreprocessorDefinitions>_UNICODE;UNICODE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>_UNICODE;UNICODE;IDDCX_VERSION_MAJOR=1;IDDCX_VERSION_MINOR=4;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>$(SdkIddCxInc);$(SolutionDir)src\common;$(SolutionDir)src\driver;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
