@@ -1199,8 +1199,22 @@ bool SwapChainProcessor::SetupCursor() {
   if (!monitor_) {
     return false;
   }
-  if (ReadPolicyDword(L"HardwareCursor", 1) == 0) {
-    Log("cursor: hardware cursor disabled by policy");
+  /* Off by default. Taking the hardware cursor path does make the pointer
+   * noticeably quicker, because mouse movement no longer has to wait for the
+   * compositor to produce a whole new desktop frame. But it cannot currently
+   * be made stable: a cursor update is a standalone partial write, and the
+   * chip alternates between two frame buffers on every transfer, so the two
+   * end up holding the pointer in different places and alternate visibly.
+   *
+   * Transmitting each update twice so both buffers receive it does not fix
+   * it either, which suggests the chip's buffer alternation is not simply one
+   * per transfer, or that the cursor and frame paths interleave in a way the
+   * parity tracking cannot follow. Working that out needs a USB capture of
+   * the vendor driver moving a pointer, which is the tool called for in
+   * AGENT_PROMPT section 9.
+   *
+   * Set HardwareCursor to 1 under HKLM\SOFTWARE\winusbdisplay to experiment. */
+  if (ReadPolicyDword(L"HardwareCursor", 0) == 0) {
     return false;
   }
 
