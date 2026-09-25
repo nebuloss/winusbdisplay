@@ -25,6 +25,9 @@ $codes = @{
     'C0000034' = 'WdfDeviceQueryPropertyEx(ContainerId) failed'
     'C0000024' = 'ContainerId property had unexpected type'
     'C0000022' = 'HidTransport::OpenForContainer failed (cannot open HID sibling)'
+    'C000000E' = 'WdfUsbTargetDeviceGetInterface returned null'
+    'C0000184' = 'interface reported zero configured pipes'
+    'C0000225' = 'no bulk OUT pipe on endpoint 4'
 }
 
 Write-Output ""
