@@ -56,6 +56,8 @@ void PrintUsage() {
       "  modeset --mode WxH@Hz   run the section 4.3 modeset sequence\n"
       "  testpattern --mode WxH@Hz [--bars | --solid R,G,B] [--no-modeset]\n"
       "                          modeset then push one full frame\n"
+      "  bench [--mode WxH@Hz] [--frames N] [--rawio]\n"
+      "                          measure sustained bulk throughput\n"
       "  image --mode WxH@Hz --bmp FILE [--no-modeset]\n"
       "                          push a 24 or 32 bit BMP, letterboxed\n"
       "\n"
@@ -599,6 +601,100 @@ int CmdImage(int argc, char** argv) {
   return PushFullFrame(device.get(), *mode, framebuffer);
 }
 
+int CmdBench(int argc, char** argv) {
+  const char* spec = "1920x1080@60";
+  int frames = 20;
+  bool raw_io = false;
+  for (int i = 0; i < argc; ++i) {
+    if (strcmp(argv[i], "--mode") == 0 && i + 1 < argc) {
+      spec = argv[++i];
+    } else if (strcmp(argv[i], "--frames") == 0 && i + 1 < argc) {
+      frames = atoi(argv[++i]);
+    } else if (strcmp(argv[i], "--rawio") == 0) {
+      raw_io = true;
+    } else {
+      fprintf(stderr, "error: unknown option %s\n", argv[i]);
+      return 2;
+    }
+  }
+  const Mode* mode = ResolveMode(spec);
+  if (!mode || frames < 1) {
+    return 2;
+  }
+
+  std::string control_error, data_error;
+  std::unique_ptr<HidTransport> control = HidTransport::Open(&control_error);
+  std::unique_ptr<WinUsbTransport> data = WinUsbTransport::Open(&data_error);
+  if (!control || !data) {
+    fprintf(stderr, "error: %s\n",
+            control ? data_error.c_str() : control_error.c_str());
+    fprintf(stderr,
+            "hint: the driver holds the pipe exclusively; disable it first\n");
+    return 1;
+  }
+  printf("transport: %s\n", data->Describe().c_str());
+
+  if (raw_io) {
+    /* Transfers must be a multiple of the packet size under RAW_IO. */
+    const size_t packet = data->max_packet_size() ? data->max_packet_size() : 512;
+    const size_t chunk = (1u << 20) / packet * packet;
+    printf("raw io:    %s (max transfer %zu)\n",
+           data->EnableRawIo(chunk) ? "enabled" : "refused", chunk);
+  }
+
+  WinUsbTransport* raw_data = data.get();
+  Device device(std::unique_ptr<Transport>(
+      new CompositeTransport(std::move(control), std::move(data))));
+  (void)raw_data;
+
+  if (!device.PowerOn() || !device.SetResolution(*mode)) {
+    fprintf(stderr, "error: %s\n", device.last_error().c_str());
+    return 1;
+  }
+
+  const size_t stride = static_cast<size_t>(mode->width) * 4;
+  std::vector<uint8_t> framebuffer(stride * mode->height);
+  FillColourBars(framebuffer.data(), stride, mode->width, mode->height);
+
+  Rect rect;
+  rect.x1 = 0;
+  rect.y1 = 0;
+  rect.x2 = mode->width;
+  rect.y2 = mode->height;
+  rect = AlignDamageRect(rect, mode->width, mode->height);
+
+  std::vector<uint8_t> transfer(TransferLength(rect));
+  const size_t length =
+      FrameRect(transfer.data(), transfer.size(), framebuffer.data(), stride,
+                mode->width, mode->height, rect);
+  if (length == 0) {
+    fprintf(stderr, "error: framing failed\n");
+    return 1;
+  }
+
+  printf("sending %d frames of %zu bytes...\n", frames, length);
+  LARGE_INTEGER freq, start, end;
+  QueryPerformanceFrequency(&freq);
+  QueryPerformanceCounter(&start);
+  for (int i = 0; i < frames; ++i) {
+    if (!device.SendFrame(transfer.data(), length)) {
+      fprintf(stderr, "error on frame %d: %s\n", i,
+              device.last_error().c_str());
+      return 1;
+    }
+  }
+  QueryPerformanceCounter(&end);
+
+  const double seconds =
+      static_cast<double>(end.QuadPart - start.QuadPart) / freq.QuadPart;
+  const double bytes = static_cast<double>(length) * frames;
+  printf("elapsed:   %.3f s\n", seconds);
+  printf("throughput:%.1f MB/s\n", bytes / (1024.0 * 1024.0) / seconds);
+  printf("full-frame:%.1f fps at %ux%u\n", frames / seconds, mode->width,
+         mode->height);
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -667,6 +763,9 @@ int main(int argc, char** argv) {
   }
   if (strcmp(command, "testpattern") == 0) {
     return CmdTestPattern(rest_argc, rest_argv);
+  }
+  if (strcmp(command, "bench") == 0) {
+    return CmdBench(rest_argc, rest_argv);
   }
   if (strcmp(command, "image") == 0) {
     return CmdImage(rest_argc, rest_argv);
