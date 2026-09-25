@@ -632,7 +632,10 @@ void IndirectDevice::BuildModeList() {
 void IndirectDevice::CreateMonitor() {
   IDDCX_MONITOR_INFO info = {};
   info.Size = sizeof(info);
-  info.MonitorType = DISPLAYCONFIG_OUTPUT_TECHNOLOGY_HDMI;
+  /* An IddCx monitor is not a real HDMI output as far as the OS is concerned;
+   * it must advertise one of the indirect connector types. Reporting HDMI here
+   * makes IddCxMonitorArrival fail with STATUS_DEVICE_NOT_READY. */
+  info.MonitorType = DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INDIRECT_WIRED;
   info.ConnectorIndex = 0;
   info.MonitorDescription.Size = sizeof(info.MonitorDescription);
   info.MonitorDescription.Type = IDDCX_MONITOR_DESCRIPTION_TYPE_EDID;
