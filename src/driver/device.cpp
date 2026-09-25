@@ -475,33 +475,41 @@ void SwapChainProcessor::Run() {
     if (status == E_PENDING) {
       DWORD wait = WaitForMultipleObjects(2, waits, FALSE, 16);
       if (wait == WAIT_OBJECT_0 + 1) {
+        Log("SwapChain: terminate signalled");
         break;
       }
       if (wait == WAIT_OBJECT_0 || wait == WAIT_TIMEOUT) {
         continue;
       }
+      Log("SwapChain: wait -> %lu, leaving loop", wait);
       break;
     }
     if (!NT_SUCCESS(status)) {
+      Log("SwapChain: acquire -> 0x%08X, leaving loop", status);
       break;
     }
 
+    ULONGLONG frame_start = GetTickCount64();
     bool ok = ProcessFrame(buffer);
+    ULONGLONG frame_ms = GetTickCount64() - frame_start;
     IddCxSwapChainFinishedProcessingFrame(swapchain_);
 
     /* First few frames, then once a second, so the log stays readable. */
     ULONGLONG now = GetTickCount64();
     if (logged < 3 || now - last_report >= 10000) {
-      Log("SwapChain: frame ok=%d sent=%llu dropped=%llu", ok ? 1 : 0,
-          sender_->frames_sent(), sender_->frames_dropped());
+      Log("SwapChain: frame ok=%d cost=%llums sent=%llu dropped=%llu",
+          ok ? 1 : 0, frame_ms, sender_->frames_sent(),
+          sender_->frames_dropped());
       ++logged;
       last_report = now;
     }
 
     if (WaitForSingleObject(terminate_event_, 0) == WAIT_OBJECT_0) {
+      Log("SwapChain: terminate requested");
       break;
     }
   }
+  Log("SwapChain: processing stopped");
 }
 
 /* -------------------------------------------------------------------------
@@ -577,6 +585,10 @@ NTSTATUS IndirectDevice::PrepareHardware() {
 }
 
 void IndirectDevice::ReleaseHardware() {
+  Log("ReleaseHardware: enter");
+  /* Stop producing frames first, then stop the sender. Doing it the other way
+   * round means waiting on a multi-megabyte USB transfer while WDF is trying
+   * to stop the device, which it reports as a driver hang. */
   processor_.reset();
   if (sender_) {
     sender_->Stop();
@@ -586,6 +598,7 @@ void IndirectDevice::ReleaseHardware() {
     ms_device_->PowerOff();
     ms_device_.reset();
   }
+  Log("ReleaseHardware: done");
 }
 
 void IndirectDevice::BuildModeList() {
