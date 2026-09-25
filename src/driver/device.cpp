@@ -849,7 +849,7 @@ bool SwapChainProcessor::ProcessFrame(
   {
     static ULONGLONG last_phase_log = 0;
     const ULONGLONG phase_now = GetTickCount64();
-    if (phase_now - last_phase_log >= 30000) {
+    if (phase_now - last_phase_log >= 1500) {
       last_phase_log = phase_now;
       const double to_us = 1000000.0 / qpc_freq.QuadPart;
       Log("phases: %s convert=%.0fus  %dx%d (%zu bytes)",
