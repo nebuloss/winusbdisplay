@@ -7,7 +7,7 @@ wevtutil sl $log /e:true /q:true | Out-Null
 wevtutil cl $log | Out-Null
 
 $dev = Get-PnpDevice | Where-Object {
-    $_.InstanceId -match 'VID_345F.*MI_03' -and $_.Status -ne 'Unknown'
+    $_.InstanceId -match 'ROOT\\DISPLAY' -and $_.FriendlyName -match 'MacroSilicon'
 } | Select-Object -First 1
 
 if ($dev) {
@@ -27,7 +27,7 @@ $codes = @{
     'C0000022' = 'HidTransport::OpenForContainer failed (cannot open HID sibling)'
     'C000000E' = 'WdfUsbTargetDeviceGetInterface returned null'
     'C0000184' = 'interface reported zero configured pipes'
-    'C0000225' = 'no bulk OUT pipe on endpoint 4'
+    'C0000225' = 'WinUsbTransport::Open failed (WinUSB package not installed?)'
 }
 
 Write-Output ""
@@ -46,7 +46,7 @@ Get-WinEvent -LogName $log -MaxEvents 120 -ErrorAction SilentlyContinue |
 
 Write-Output ""
 Write-Output "==> device status"
-Get-PnpDevice | Where-Object { $_.InstanceId -match 'VID_345F.*MI_03' } | ForEach-Object {
+Get-PnpDevice -Class Display | Where-Object { $_.FriendlyName -match 'MacroSilicon' } | ForEach-Object {
     $p = $_ | Get-PnpDeviceProperty -KeyName 'DEVPKEY_Device_ProblemCode'
     Write-Output ("  " + $_.Status + " problem=" +
                   ($p | Where-Object KeyName -eq 'DEVPKEY_Device_ProblemCode').Data +
