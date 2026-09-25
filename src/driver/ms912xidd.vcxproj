@@ -60,6 +60,11 @@
          package verifier cannot run here. The INF is still validated by
          pnputil at install time. -->
     <SkipPackageVerification>true</SkipPackageVerification>
+    <!-- The catalog is built and signed by scripts\install-driver.ps1, which
+         stages the INF and the DLL into one directory first. Doing it here
+         fails because the build does not copy the binary next to the INF. -->
+    <EnableInf2cat>false</EnableInf2cat>
+    <SignMode>Off</SignMode>
   </PropertyGroup>
 
   <ItemDefinitionGroup>
