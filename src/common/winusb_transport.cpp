@@ -62,6 +62,11 @@ const char* PipeTypeName(USBD_PIPE_TYPE type) {
 }  // namespace
 
 WinUsbTransport::~WinUsbTransport() {
+  for (auto& slot : slots_) {
+    if (slot.overlapped.hEvent) {
+      CloseHandle(slot.overlapped.hEvent);
+    }
+  }
   if (winusb_handle_) {
     WinUsb_Free(static_cast<WINUSB_INTERFACE_HANDLE>(winusb_handle_));
   }
@@ -294,6 +299,10 @@ bool WinUsbTransport::ControlGetReport(uint8_t* data, size_t len) {
 }
 
 bool WinUsbTransport::BulkWrite(const uint8_t* data, size_t len) {
+  if (pipeline_depth_ > 1 && len > chunk_bytes_) {
+    return BulkWritePipelined(data, len);
+  }
+
   auto handle = static_cast<WINUSB_INTERFACE_HANDLE>(winusb_handle_);
   ULONG transferred = 0;
   if (!WinUsb_WritePipe(handle, bulk_out_pipe_id_,
@@ -309,10 +318,17 @@ bool WinUsbTransport::BulkWrite(const uint8_t* data, size_t len) {
   return true;
 }
 
-bool WinUsbTransport::EnableRawIo(size_t max_transfer_bytes) {
+bool WinUsbTransport::EnablePipelining(unsigned depth, size_t chunk_bytes) {
   auto handle = static_cast<WINUSB_INTERFACE_HANDLE>(winusb_handle_);
 
-  ULONG transfer_size = static_cast<ULONG>(max_transfer_bytes);
+  const size_t packet = bulk_max_packet_ ? bulk_max_packet_ : 512;
+  /* RAW_IO demands whole packets. Round down so every chunk is legal. */
+  chunk_bytes = (chunk_bytes / packet) * packet;
+  if (depth < 1 || chunk_bytes == 0) {
+    return false;
+  }
+
+  ULONG transfer_size = static_cast<ULONG>(chunk_bytes);
   WinUsb_SetPipePolicy(handle, bulk_out_pipe_id_, MAXIMUM_TRANSFER_SIZE,
                        sizeof(transfer_size), &transfer_size);
 
@@ -322,7 +338,102 @@ bool WinUsbTransport::EnableRawIo(size_t max_transfer_bytes) {
     SetWin32Error("WinUsb_SetPipePolicy(RAW_IO)", GetLastError());
     return false;
   }
-  raw_io_ = true;
+
+  /* Under RAW_IO a timeout policy is not honoured, so clear it rather than
+   * leave a value that silently does nothing. */
+  ULONG timeout = 0;
+  WinUsb_SetPipePolicy(handle, bulk_out_pipe_id_, PIPE_TRANSFER_TIMEOUT,
+                       sizeof(timeout), &timeout);
+
+  for (auto& slot : slots_) {
+    if (slot.overlapped.hEvent) {
+      CloseHandle(slot.overlapped.hEvent);
+    }
+  }
+  slots_.assign(depth, PipelineSlot());
+  for (auto& slot : slots_) {
+    slot.overlapped.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!slot.overlapped.hEvent) {
+      SetWin32Error("CreateEvent", GetLastError());
+      return false;
+    }
+  }
+
+  pipeline_depth_ = depth;
+  chunk_bytes_ = chunk_bytes;
+  return true;
+}
+
+bool WinUsbTransport::BulkWritePipelined(const uint8_t* data, size_t len) {
+  auto handle = static_cast<WINUSB_INTERFACE_HANDLE>(winusb_handle_);
+  const size_t packet = bulk_max_packet_ ? bulk_max_packet_ : 512;
+
+  size_t offset = 0;
+  size_t next_slot = 0;
+  bool failed = false;
+
+  /* Submit chunks round robin, waiting on a slot only when it is needed
+   * again. That keeps `pipeline_depth_` transfers queued in the host
+   * controller at all times. */
+  while (offset < len && !failed) {
+    PipelineSlot& slot = slots_[next_slot];
+
+    if (slot.busy) {
+      ULONG done = 0;
+      if (!WinUsb_GetOverlappedResult(handle, &slot.overlapped, &done, TRUE)) {
+        SetWin32Error("WinUsb_GetOverlappedResult", GetLastError());
+        failed = true;
+        break;
+      }
+      slot.busy = false;
+    }
+
+    size_t chunk = len - offset;
+    if (chunk > chunk_bytes_) {
+      chunk = chunk_bytes_;
+    }
+    /* Every chunk but the final one must be whole packets. */
+    if (offset + chunk < len) {
+      chunk = (chunk / packet) * packet;
+    }
+
+    ResetEvent(slot.overlapped.hEvent);
+    ULONG transferred = 0;
+    if (!WinUsb_WritePipe(handle, bulk_out_pipe_id_,
+                          const_cast<uint8_t*>(data) + offset,
+                          static_cast<ULONG>(chunk), &transferred,
+                          &slot.overlapped)) {
+      if (GetLastError() != ERROR_IO_PENDING) {
+        SetWin32Error("WinUsb_WritePipe", GetLastError());
+        failed = true;
+        break;
+      }
+    }
+    slot.busy = true;
+    offset += chunk;
+    next_slot = (next_slot + 1) % slots_.size();
+  }
+
+  /* Always drain, even after a failure, so no transfer is left referencing
+   * the caller's buffer. */
+  for (auto& slot : slots_) {
+    if (!slot.busy) {
+      continue;
+    }
+    ULONG done = 0;
+    if (!WinUsb_GetOverlappedResult(handle, &slot.overlapped, &done, TRUE)) {
+      if (!failed) {
+        SetWin32Error("WinUsb_GetOverlappedResult (drain)", GetLastError());
+        failed = true;
+      }
+    }
+    slot.busy = false;
+  }
+
+  if (failed) {
+    WinUsb_ResetPipe(handle, bulk_out_pipe_id_);
+    return false;
+  }
   return true;
 }
 

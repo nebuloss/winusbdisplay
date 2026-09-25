@@ -36,21 +36,37 @@ class WinUsbTransport : public Transport {
    * the enumerate phase to record what the hardware actually exposes. */
   bool DumpDescriptors(std::string* out);
 
-  /* RAW_IO removes WinUSB's internal buffering and lets the host controller
-   * keep the bus busy, at the cost of requiring every transfer to be a
-   * multiple of the maximum packet size. Returns false if the device refused
-   * the policy, in which case the normal buffered path is still in effect. */
-  bool EnableRawIo(size_t max_transfer_bytes);
+  /* Turns on pipelined transfers: the frame is split into chunks and several
+   * are kept in flight at once, so the host controller always has data queued
+   * and the bus does not idle between transfers. A single synchronous write
+   * per frame leaves roughly a third of the bus unused.
+   *
+   * RAW_IO is enabled alongside, which removes WinUSB's own buffering. It
+   * requires every chunk except the last to be a multiple of the maximum
+   * packet size, which ChunkSize() guarantees. */
+  bool EnablePipelining(unsigned depth, size_t chunk_bytes);
 
   uint16_t max_packet_size() const { return bulk_max_packet_; }
+  bool pipelined() const { return pipeline_depth_ > 1; }
 
  private:
   bool FindBulkOutPipe(std::string* error);
 
   void* file_handle_ = nullptr;      /* HANDLE */
   void* winusb_handle_ = nullptr;    /* WINUSB_INTERFACE_HANDLE */
+  bool BulkWritePipelined(const uint8_t* data, size_t len);
+
   uint8_t bulk_out_pipe_id_ = 0;
-  bool raw_io_ = false;
+  unsigned pipeline_depth_ = 1;
+  size_t chunk_bytes_ = 0;
+
+  /* One reusable event per in-flight chunk. Creating these per frame would
+   * cost more than the pipelining saves. */
+  struct PipelineSlot {
+    OVERLAPPED overlapped = {};
+    bool busy = false;
+  };
+  std::vector<PipelineSlot> slots_;
   uint16_t bulk_max_packet_ = 0;
   DeviceLocation location_;
 };
