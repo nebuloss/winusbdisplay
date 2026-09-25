@@ -394,7 +394,8 @@ SwapChainProcessor::SwapChainProcessor(IDDCX_SWAPCHAIN swapchain,
                                        LUID render_adapter,
                                        HANDLE new_frame_event, Device* device,
                                        FrameSender* sender, const Mode& mode,
-                                       DdcCiSlave* ddc)
+                                       DdcCiSlave* ddc,
+                                       IDDCX_MONITOR monitor)
     : swapchain_(swapchain),
       render_adapter_(render_adapter),
       new_frame_event_(new_frame_event),
@@ -402,7 +403,9 @@ SwapChainProcessor::SwapChainProcessor(IDDCX_SWAPCHAIN swapchain,
       sender_(sender),
       mode_(mode),
       ddc_(ddc),
+      monitor_(monitor),
       frame_index_(0) {
+  cursor_previous_ = EmptyRect();
   pending_damage_[0] = EmptyRect();
   pending_damage_[1] = EmptyRect();
   terminate_event_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -428,8 +431,19 @@ void SwapChainProcessor::Terminate() {
   if (terminate_event_) {
     SetEvent(terminate_event_);
   }
+  if (cursor_event_) {
+    /* Wake the cursor thread so it notices the terminate event. */
+    SetEvent(cursor_event_);
+  }
+  if (cursor_thread_.joinable()) {
+    cursor_thread_.join();
+  }
   if (thread_.joinable()) {
     thread_.join();
+  }
+  if (cursor_event_) {
+    CloseHandle(cursor_event_);
+    cursor_event_ = nullptr;
   }
 }
 
@@ -1127,6 +1141,202 @@ bool SwapChainProcessor::SendRefresh(bool whole_screen) {
   return true;
 }
 
+bool SwapChainProcessor::SetupCursor() {
+  if (!monitor_) {
+    return false;
+  }
+  if (ReadPolicyDword(L"HardwareCursor", 1) == 0) {
+    Log("cursor: hardware cursor disabled by policy");
+    return false;
+  }
+
+  cursor_event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+  if (!cursor_event_) {
+    return false;
+  }
+
+  IDARG_IN_SETUP_HWCURSOR setup = {};
+  setup.CursorInfo.Size = sizeof(setup.CursorInfo);
+  setup.CursorInfo.AlphaCursorSupport = TRUE;
+  /* No XOR support: emulation asks the OS to resolve those shapes for us,
+   * which is what we want given there is no real cursor plane here. */
+  setup.CursorInfo.ColorXorCursorSupport = IDDCX_XOR_CURSOR_SUPPORT_EMULATION;
+  setup.CursorInfo.MaxX = 128;
+  setup.CursorInfo.MaxY = 128;
+  setup.hNewCursorDataAvailable = cursor_event_;
+
+  const NTSTATUS status = IddCxMonitorSetupHardwareCursor(monitor_, &setup);
+  if (!NT_SUCCESS(status)) {
+    Log("cursor: IddCxMonitorSetupHardwareCursor -> 0x%08X, leaving the "
+        "pointer to the compositor", status);
+    CloseHandle(cursor_event_);
+    cursor_event_ = nullptr;
+    return false;
+  }
+
+  cursor_shape_.resize(128 * 128 * 4);
+  cursor_active_ = true;
+  Log("cursor: hardware cursor active");
+  return true;
+}
+
+bool SwapChainProcessor::DrawCursor() {
+  IDARG_IN_QUERY_HWCURSOR in = {};
+  in.LastShapeId = cursor_shape_id_;
+  in.ShapeBufferSizeInBytes = static_cast<UINT>(cursor_shape_.size());
+  in.pShapeBuffer = cursor_shape_.data();
+
+  IDARG_OUT_QUERY_HWCURSOR out = {};
+  if (!NT_SUCCESS(IddCxMonitorQueryHardwareCursor(monitor_, &in, &out))) {
+    return false;
+  }
+
+  if (out.IsCursorShapeUpdated) {
+    cursor_shape_id_ = out.CursorShapeInfo.ShapeId;
+    cursor_width_ = static_cast<int>(out.CursorShapeInfo.Width);
+    cursor_height_ = static_cast<int>(out.CursorShapeInfo.Height);
+    cursor_is_alpha_ =
+        out.CursorShapeInfo.CursorType == IDDCX_CURSOR_SHAPE_TYPE_ALPHA;
+  }
+
+  std::lock_guard<std::mutex> lock(cursor_mutex_);
+  if (desktop_copy_.empty() || cursor_width_ <= 0 || cursor_height_ <= 0) {
+    return false;
+  }
+
+  /* Repaint where the pointer was, so it is erased, and where it now is. */
+  Rect now = EmptyRect();
+  if (out.IsCursorVisible) {
+    now.x1 = out.X;
+    now.y1 = out.Y;
+    now.x2 = out.X + cursor_width_;
+    now.y2 = out.Y + cursor_height_;
+  }
+
+  Rect region = MergeRects(cursor_previous_, now);
+  cursor_previous_ = now;
+  region = AlignDamageRect(region, desktop_width_, desktop_height_);
+  if (region.empty()) {
+    return false;
+  }
+
+  /* Start from the clean desktop, then lay the pointer over it. Working on a
+   * scratch copy keeps desktop_copy_ free of the cursor, so the next move can
+   * erase it simply by repainting from the copy. */
+  const size_t region_stride = static_cast<size_t>(region.width()) * 4;
+  cursor_scratch_.resize(region_stride * region.height());
+  for (int y = 0; y < region.height(); ++y) {
+    memcpy(cursor_scratch_.data() + static_cast<size_t>(y) * region_stride,
+           desktop_copy_.data() +
+               static_cast<size_t>(region.y1 + y) * desktop_stride_ +
+               static_cast<size_t>(region.x1) * 4,
+           region_stride);
+  }
+
+  if (out.IsCursorVisible) {
+    const uint8_t* shape = cursor_shape_.data();
+    for (int y = 0; y < cursor_height_; ++y) {
+      const int target_y = out.Y + y - region.y1;
+      if (target_y < 0 || target_y >= region.height()) {
+        continue;
+      }
+      for (int x = 0; x < cursor_width_; ++x) {
+        const int target_x = out.X + x - region.x1;
+        if (target_x < 0 || target_x >= region.width()) {
+          continue;
+        }
+        const uint8_t* src =
+            shape + (static_cast<size_t>(y) * cursor_width_ + x) * 4;
+        uint8_t* dst = cursor_scratch_.data() +
+                       static_cast<size_t>(target_y) * region_stride +
+                       static_cast<size_t>(target_x) * 4;
+        const unsigned alpha = cursor_is_alpha_ ? src[3] : 255u;
+        if (alpha == 0) {
+          continue;
+        }
+        if (alpha == 255) {
+          dst[0] = src[0];
+          dst[1] = src[1];
+          dst[2] = src[2];
+          continue;
+        }
+        /* Straight source-over blend; the shape is premultiplied. */
+        for (int c = 0; c < 3; ++c) {
+          dst[c] = static_cast<uint8_t>(src[c] + (dst[c] * (255 - alpha)) / 255);
+        }
+      }
+    }
+  }
+
+  Rect superseded = EmptyRect();
+  std::vector<uint8_t>* transfer =
+      sender_->AcquireBuffer(kBufferWaitMs, &superseded);
+  if (!transfer) {
+    /* Keep the region pending so the next move still erases the old pointer. */
+    cursor_previous_ = MergeRects(cursor_previous_, region);
+    return false;
+  }
+  if (!superseded.empty()) {
+    frame_index_ = 1 - frame_index_;
+    pending_damage_[frame_index_] =
+        MergeRects(pending_damage_[frame_index_], superseded);
+  }
+
+  PictureAdjust adjust;
+  if (ddc_) {
+    adjust.brightness = ddc_->brightness();
+    adjust.contrast = ddc_->contrast();
+  }
+
+  Rect local;
+  local.x1 = 0;
+  local.y1 = 0;
+  local.x2 = region.width();
+  local.y2 = region.height();
+
+  const size_t length = FrameRect(transfer->data(), transfer->size(),
+                                  cursor_scratch_.data(), region_stride,
+                                  region.width(), region.height(), local,
+                                  adjust);
+  if (length == 0) {
+    sender_->Cancel(transfer);
+    return false;
+  }
+
+  /* FrameRect writes a header for a rect at the origin, so patch in the real
+   * position on screen. */
+  FrameUpdateHeader header;
+  PutBe16(header.marker_be, kFrameMarker);
+  PutBe24(header.position,
+          ((static_cast<uint32_t>(region.x1) & 0xFFF) << 12) |
+              (static_cast<uint32_t>(region.y1) & 0xFFF));
+  PutBe24(header.dimensions,
+          ((static_cast<uint32_t>(region.width()) & 0xFFF) << 12) |
+              (static_cast<uint32_t>(region.height()) & 0xFFF));
+  memcpy(transfer->data(), &header, sizeof(header));
+
+  /* The other chip buffer still owes this region. */
+  pending_damage_[1 - frame_index_] =
+      MergeRects(pending_damage_[1 - frame_index_], region);
+  pending_damage_[frame_index_] = EmptyRect();
+  frame_index_ = 1 - frame_index_;
+
+  sender_->Submit(transfer, length, region);
+  last_send_ms_ = GetTickCount64();
+  return true;
+}
+
+void SwapChainProcessor::CursorLoop() {
+  HANDLE waits[] = {cursor_event_, terminate_event_};
+  for (;;) {
+    const DWORD wait = WaitForMultipleObjects(2, waits, FALSE, INFINITE);
+    if (wait != WAIT_OBJECT_0) {
+      break;
+    }
+    DrawCursor();
+  }
+}
+
 void SwapChainProcessor::Run() {
   /* Ask for a slightly raised priority: the compositor considers the monitor
    * hung if we fall too far behind on the acquire loop. */
@@ -1134,6 +1344,10 @@ void SwapChainProcessor::Run() {
 
   Log("SwapChain: processing started, %u conversion thread(s)",
       ConversionThreads());
+
+  if (SetupCursor()) {
+    cursor_thread_ = std::thread(&SwapChainProcessor::CursorLoop, this);
+  }
 
   unsigned logged = 0;
   ULONGLONG last_report = GetTickCount64();
@@ -1449,7 +1663,7 @@ NTSTATUS IndirectDevice::AssignSwapChain(const IDARG_IN_SETSWAPCHAIN* args) {
   }
   std::unique_ptr<SwapChainProcessor> processor(new SwapChainProcessor(
       args->hSwapChain, args->RenderAdapterLuid, args->hNextSurfaceAvailable,
-      ms_device_.get(), sender_.get(), active_mode_, &ddc_));
+      ms_device_.get(), sender_.get(), active_mode_, &ddc_, monitor_));
 
   if (!processor->Start()) {
     /* Delete the swapchain so the OS builds a new one and tries again. This
