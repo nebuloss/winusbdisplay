@@ -17,6 +17,10 @@ namespace {
 
 constexpr DWORD kBufferWaitMs = 10;
 
+/* The vendor driver repaints the whole screen if nothing has been sent for
+ * this long, which is what stops the panel deciding there is no signal. */
+constexpr unsigned long long kIdleRefreshMs = 2500;
+
 /* Modes offered per connector type, mirroring the Linux driver's choices. */
 const uint16_t kCvbsModes[][3] = {{720, 480, 60}, {720, 576, 50}};
 const uint16_t kYPbPrModes[][3] = {
@@ -282,7 +286,9 @@ SwapChainProcessor::SwapChainProcessor(IDDCX_SWAPCHAIN swapchain,
       device_(device),
       sender_(sender),
       mode_(mode),
-      previous_damage_(EmptyRect()) {
+      frame_index_(0) {
+  pending_damage_[0] = EmptyRect();
+  pending_damage_[1] = EmptyRect();
   terminate_event_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
 }
 
@@ -382,61 +388,65 @@ bool SwapChainProcessor::ProcessFrame(
   const int fb_width = static_cast<int>(source_desc.Width);
   const int fb_height = static_cast<int>(source_desc.Height);
 
-  /* A zero dirty rect count together with a zero move region count means the
-   * desktop did not change at all. Treating that as full-frame damage makes
-   * the driver blast a 4 MB frame every time the compositor ticks, which
-   * saturates the USB 2 link permanently and starves real updates. */
-  if (!force_full_frame_ && meta.DirtyRectCount == 0 &&
-      meta.MoveRegionCount == 0) {
-    return true;
-  }
+  const unsigned long long now_ms = GetTickCount64();
 
-  /* Work out the damage for this frame. */
-  Rect damage;
+  /* Work out what changed this frame and fold it into both buffers' pending
+   * damage. A zero dirty rect count together with a zero move region count
+   * means nothing changed at all. */
+  bool have_new_damage = false;
+  Rect damage = EmptyRect();
+
   if (force_full_frame_) {
     damage.x1 = 0;
     damage.y1 = 0;
     damage.x2 = fb_width;
     damage.y2 = fb_height;
-  } else {
+    have_new_damage = true;
+  } else if (meta.DirtyRectCount > 0 || meta.MoveRegionCount > 0) {
     std::vector<RECT> rects(meta.DirtyRectCount);
     IDARG_IN_GETDIRTYRECTS in = {};
     in.DirtyRectInCount = meta.DirtyRectCount;
     in.pDirtyRects = rects.data();
     IDARG_OUT_GETDIRTYRECTS out = {};
-    if (!NT_SUCCESS(IddCxSwapChainGetDirtyRects(swapchain_, &in, &out))) {
+    if (meta.MoveRegionCount > 0 ||
+        !NT_SUCCESS(IddCxSwapChainGetDirtyRects(swapchain_, &in, &out))) {
+      /* Move regions relocate content, so the source area needs repainting
+       * too. Rather than track both ends, repaint everything. */
       damage.x1 = 0;
       damage.y1 = 0;
       damage.x2 = fb_width;
       damage.y2 = fb_height;
     } else {
-      damage = EmptyRect();
       for (UINT i = 0; i < out.DirtyRectOutCount; ++i) {
         damage = MergeRects(damage, FromRECT(rects[i]));
       }
-      /* Move regions also change the image; treat them as full damage rather
-       * than tracking source rectangles. */
-      if (meta.MoveRegionCount > 0) {
-        damage.x1 = 0;
-        damage.y1 = 0;
-        damage.x2 = fb_width;
-        damage.y2 = fb_height;
-      }
     }
+    have_new_damage = !damage.empty();
   }
 
-  /* The panel double buffers, so resend last frame's damage as well. */
-  Rect to_send = MergeRects(damage, previous_damage_);
-  to_send = AlignDamageRect(to_send, fb_width, fb_height);
+  if (have_new_damage) {
+    pending_damage_[0] = MergeRects(pending_damage_[0], damage);
+    pending_damage_[1] = MergeRects(pending_damage_[1], damage);
+  } else if (last_send_ms_ != 0 && now_ms - last_send_ms_ >= kIdleRefreshMs) {
+    /* Keep the link and the panel awake. */
+    Rect full;
+    full.x1 = 0;
+    full.y1 = 0;
+    full.x2 = fb_width;
+    full.y2 = fb_height;
+    pending_damage_[0] = full;
+    pending_damage_[1] = full;
+  }
+
+  Rect to_send =
+      AlignDamageRect(pending_damage_[frame_index_], fb_width, fb_height);
   if (to_send.empty()) {
-    previous_damage_ = EmptyRect();
     return true;
   }
 
   std::vector<uint8_t>* transfer = sender_->AcquireBuffer(kBufferWaitMs);
   if (!transfer) {
-    /* Dropped. Remember the damage so the next successful frame includes it. */
-    previous_damage_ = MergeRects(previous_damage_, damage);
+    /* Dropped, but the damage stays pending so a later frame still sends it. */
     return true;
   }
 
@@ -471,6 +481,11 @@ bool SwapChainProcessor::ProcessFrame(
 
   sender_->Submit(transfer, length);
 
+  /* This buffer is now up to date; the other one still owes the same damage. */
+  pending_damage_[frame_index_] = EmptyRect();
+  frame_index_ = 1 - frame_index_;
+  last_send_ms_ = now_ms;
+
   /* Report how much of the screen each transfer actually covers: if damage
    * tracking is working this should be far smaller than the full frame. */
   static ULONGLONG last_rect_log = 0;
@@ -482,7 +497,6 @@ bool SwapChainProcessor::ProcessFrame(
     last_rect_log = now_ms;
   }
 
-  previous_damage_ = damage;
   force_full_frame_ = false;
   return true;
 }
