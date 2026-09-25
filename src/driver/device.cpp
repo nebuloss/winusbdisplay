@@ -664,14 +664,6 @@ bool SwapChainProcessor::ProcessFrame(
    * region could be converted one way and then the other, which alternates
    * the picture and is visible on antialiased text. Not worth the CPU saving.
    */
-  if (!converted) {
-        Log("compute: conversion failed, falling back to the CPU path");
-        compute_ready_ = false;
-        compute_failed_ = true;
-      }
-    }
-  }
-
   {
     /* Copy the damaged region out of the GPU, then convert while reading the
      * mapped staging texture. */
@@ -713,8 +705,7 @@ bool SwapChainProcessor::ProcessFrame(
     if (phase_now - last_phase_log >= 30000) {
       last_phase_log = phase_now;
       const double to_us = 1000000.0 / qpc_freq.QuadPart;
-      Log("phases: %s convert=%.0fus  %dx%d (%zu bytes)",
-          used_gpu ? "gpu" : "cpu",
+      Log("phases: convert=%.0fus  %dx%d (%zu bytes)",
           (t_converted.QuadPart - t_begin.QuadPart) * to_us, to_send.width(),
           to_send.height(), length);
     }
