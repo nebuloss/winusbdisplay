@@ -93,20 +93,30 @@ std::unique_ptr<Transport> MakeTransport(bool need_data_plane) {
     return file;
   }
 
-  if (g_options.transport != TransportKind::kHid) {
+  if (g_options.transport == TransportKind::kWinUsb) {
     std::unique_ptr<WinUsbTransport> winusb = WinUsbTransport::Open(&error);
-    if (winusb) {
-      return winusb;
-    }
-    if (g_options.transport == TransportKind::kWinUsb) {
+    if (!winusb) {
       fprintf(stderr, "error: %s\n", error.c_str());
-      return nullptr;
     }
-    if (need_data_plane) {
+    return winusb;
+  }
+
+  /* Composite is the only combination that can do both planes, because the
+   * control transfers target the HID interface and the bulk pipe is on the
+   * WinUSB one. */
+  if (g_options.transport == TransportKind::kComposite ||
+      (g_options.transport == TransportKind::kAuto && need_data_plane)) {
+    std::unique_ptr<CompositeTransport> composite =
+        CompositeTransport::Open(&error);
+    if (composite) {
+      return composite;
+    }
+    if (g_options.transport == TransportKind::kComposite ||
+        need_data_plane) {
       fprintf(stderr, "error: %s\n", error.c_str());
       fprintf(stderr,
-              "hint: the HID control plane cannot send pixels; either run\n"
-              "      scripts\\install-winusb.ps1 or use --transport file\n");
+              "hint: sending pixels needs the WinUSB data plane; run\n"
+              "      scripts\\install-winusb.ps1, or use --transport file\n");
       return nullptr;
     }
   }
