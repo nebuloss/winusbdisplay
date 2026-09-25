@@ -27,7 +27,10 @@ bool Device::FailTransport(const char* what) {
   return false;
 }
 
-bool Device::ReadByte(uint16_t address, uint8_t* value) {
+bool Device::ReadRegisters(uint16_t address, uint8_t* data, size_t len) {
+  if (len == 0 || len > kMaxRegisterReadCount) {
+    return Fail("register read count out of range");
+  }
   std::lock_guard<std::mutex> lock(ctrl_mutex_);
 
   RegisterRequest request;
@@ -43,8 +46,12 @@ bool Device::ReadByte(uint16_t address, uint8_t* value) {
                                     sizeof(request))) {
     return FailTransport("register read response");
   }
-  *value = request.data[0];
+  memcpy(data, request.data, len);
   return true;
+}
+
+bool Device::ReadByte(uint16_t address, uint8_t* value) {
+  return ReadRegisters(address, value, 1);
 }
 
 bool Device::WriteCommand(uint8_t cmd, const void* six_bytes) {
@@ -109,21 +116,25 @@ bool Device::SetResolution(const Mode& mode) {
   uint8_t data[6];
   uint8_t discard;
 
-  /* Sequence captured from the Windows driver. The three register reads look
-   * pointless but the chip stays dark without them. */
+  /* Stop any transfer in progress before reprogramming. */
   memset(data, 0, sizeof(data));
-  if (!WriteCommand(kCmdUnknown2, data)) {
+  if (!WriteCommand(kCmdTransferEnable, data)) {
     return false;
   }
-  if (!ReadByte(kRegModeSequence0, &discard) ||
+
+  /* These reads are not handshakes, whatever the reverse engineered notes
+   * say: 0x0030 is the SDRAM type and 0x0031 the video port. The vendor
+   * driver reads them for real. Keeping them preserves the captured ordering
+   * and costs nothing. */
+  if (!ReadByte(kRegSdramType, &discard) ||
       !ReadByte(kRegModeSequence1, &discard) ||
       !ReadByte(kRegModeSequence2, &discard)) {
     return false;
   }
 
   memset(data, 0, sizeof(data));
-  data[0] = 0x03;
-  if (!WriteCommand(kCmdUnknown1, data)) {
+  data[0] = kTransModeManualBlock;
+  if (!WriteCommand(kCmdSetTransMode, data)) {
     return false;
   }
 
@@ -132,7 +143,7 @@ bool Device::SetResolution(const Mode& mode) {
   PutBe16(resolution.height_be, mode.height);
   resolution.pixel_format = kPixFmtUyvy;
   resolution.byte_select = kByteSelectUyvy;
-  if (!WriteCommand(kCmdResolution, &resolution)) {
+  if (!WriteCommand(kCmdVideoInInfo, &resolution)) {
     return false;
   }
 
@@ -141,19 +152,20 @@ bool Device::SetResolution(const Mode& mode) {
   mode_request.pixel_format = 0x01;
   PutBe16(mode_request.width_be, mode.width);
   PutBe16(mode_request.height_be, mode.height);
-  if (!WriteCommand(kCmdMode, &mode_request)) {
+  if (!WriteCommand(kCmdVideoOutInfo, &mode_request)) {
     return false;
   }
 
   memset(data, 0, sizeof(data));
   data[0] = 1;
-  if (!WriteCommand(kCmdUnknown2, data)) {
-    return false;
-  }
+  return WriteCommand(kCmdTransferEnable, data);
+}
 
+bool Device::EnableOutput(bool enable) {
+  uint8_t data[6];
   memset(data, 0, sizeof(data));
-  data[0] = 1;
-  return WriteCommand(kCmdOutputEnable, data);
+  data[0] = enable ? 1 : 0;
+  return WriteCommand(kCmdVideoEnable, data);
 }
 
 bool Device::ReadVideoPort(VideoPort* port) {
