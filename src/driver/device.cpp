@@ -1182,15 +1182,16 @@ bool SwapChainProcessor::SendRefresh(bool whole_screen) {
     }
   }
 
-  sender_->Submit(transfer, length, full);
+  /* Sent twice, so both of the chip's frame buffers end up holding this
+   * picture. A single full repaint updates only the buffer it lands in and
+   * leaves the other showing whatever it had, and the two then alternate,
+   * which is visible as a periodic flicker every time the idle refresh runs.
+   * An even number of transfers also leaves the parity unchanged. */
+  sender_->Submit(transfer, length, full, true);
 
   std::lock_guard<std::mutex> damage_lock(damage_mutex_);
-  /* Only the buffer that was just written is up to date. Clearing both, as an
-   * earlier version did, left the other one stale and it would reappear on
-   * the next flip. Advance the index so successive refreshes bring both
-   * buffers current. */
-  pending_damage_[frame_index_] = EmptyRect();
-  frame_index_ = 1 - frame_index_;
+  pending_damage_[0] = EmptyRect();
+  pending_damage_[1] = EmptyRect();
   last_send_ms_ = GetTickCount64();
   return true;
 }
