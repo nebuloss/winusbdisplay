@@ -1,0 +1,24 @@
+# Build output and anything regenerated from it.
+build/
+
+# Compiled shader header, produced by scripts/build-driver.bat from the .hlsl
+src/driver/convert_cs.h
+
+# Driver signing artefacts
+*.cat
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.user
+.vs/
+
+# Vendor reference material: large, redistributable separately, and extracted
+# into build/ on demand. Kept out of the tree so history stays reviewable.
+*.zip
+*.exe
+
+# Crush CLI distribution files that happen to sit in this directory
+crush/
+.crush/

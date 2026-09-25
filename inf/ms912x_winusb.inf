@@ -1,0 +1,73 @@
+; SPDX-License-Identifier: GPL-2.0-only
+;
+; Binds WinUSB.sys to the vendor specific display interface of MacroSilicon
+; MS912x / MS913x USB display adapters, so that a user mode driver can drive
+; the control plane and the endpoint 4 bulk OUT pixel pipe.
+;
+; This claims only the display interface. The HID, audio and mass storage
+; interfaces of the composite device keep their in-box drivers.
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = USBDevice
+ClassGuid   = {88BAE032-5A81-49F0-BC3D-A4FF138216D6}
+Provider    = %ProviderName%
+CatalogFile = ms912x_winusb.cat
+DriverVer   = 01/01/2026,1.0.0.0
+PnpLockdown = 1
+
+[Manufacturer]
+%ManufacturerName% = Standard, NTamd64, NTarm64
+
+; ---------------------------------------------------------------------------
+; USB 3 parts (MS913x) are composite; the display interface is MI_03. This is
+; verified against 345F:9133 hardware.
+;
+; USB 2 parts (MS912x) are listed by bare device id because those dongles are
+; reported to expose the vendor specific interface without a composite parent.
+; Unverified: confirm the hardware id with "pnputil /enum-devices /connected"
+; before trusting these lines.
+; ---------------------------------------------------------------------------
+
+[Standard.NTamd64]
+%DeviceName% = USB_Install, USB\VID_345F&PID_9132&MI_03
+%DeviceName% = USB_Install, USB\VID_345F&PID_9133&MI_03
+%DeviceName% = USB_Install, USB\VID_345F&PID_9135&MI_03
+%DeviceName% = USB_Install, USB\VID_534D&PID_6021
+%DeviceName% = USB_Install, USB\VID_534D&PID_0821
+
+[Standard.NTarm64]
+%DeviceName% = USB_Install, USB\VID_345F&PID_9132&MI_03
+%DeviceName% = USB_Install, USB\VID_345F&PID_9133&MI_03
+%DeviceName% = USB_Install, USB\VID_345F&PID_9135&MI_03
+%DeviceName% = USB_Install, USB\VID_534D&PID_6021
+%DeviceName% = USB_Install, USB\VID_534D&PID_0821
+
+[USB_Install]
+Include = winusb.inf
+Needs   = WINUSB.NT
+
+[USB_Install.Services]
+Include = winusb.inf
+Needs   = WINUSB.NT.Services
+
+[USB_Install.Wdf]
+KmdfLibraryVersion = 1.11
+
+[USB_Install.HW]
+AddReg = Dev_AddReg
+
+[Dev_AddReg]
+; Must match kDeviceInterfaceGuid in src/common/winusb_transport.cpp.
+HKR,,DeviceInterfaceGUIDs,0x10000,"{6C2C4F1E-3B7A-4D4F-9F2E-5A1B8C7D3E90}"
+; The indirect display driver runs in WUDFHost as LOCAL SERVICE, which the
+; default WinUSB interface ACL does not cover. Grant it access explicitly,
+; plus SYSTEM, Administrators and authenticated users so the msdisp tool
+; still works from an ordinary shell.
+HKR,,DeviceCharacteristics,0x10001,0x0100
+HKR,,Security,,"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;LS)(A;;GA;;;AU)"
+
+[Strings]
+ProviderName     = "winusbdisplay"
+ManufacturerName = "MacroSilicon"
+DeviceName       = "MacroSilicon USB Display (WinUSB)"

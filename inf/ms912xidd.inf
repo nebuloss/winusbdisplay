@@ -1,0 +1,101 @@
+; SPDX-License-Identifier: GPL-2.0-only
+;
+; Indirect display driver for MacroSilicon MS912x / MS913x USB display
+; adapters. UMDF2 + IddCx.
+;
+; The structure here deliberately mirrors the in-box rdpidd.inf, which is a
+; known-good IddCx package. The parts that matter and are easy to get wrong:
+;
+;   ClassVer = 2.0            required for the Display class
+;   Include/Needs wudfrd.inf  sets up the UMDF reflector properly; hand
+;                             writing an AddService for WUDFRd is not enough
+;   .NT-decorated sections    matches how the in-box packages are written
+;   UpperFilters IndirectKmd  required by IddCx
+;   Security descriptor       the device must be openable by the OS
+;
+; This is a ROOT-ENUMERATED software device rather than a driver bound to the
+; USB interface, which is how every shipping IddCx driver is built. IddCx
+; needs the IndirectKmd upper filter, and that is incompatible with
+; UmdfDispatcher = WinUsb: a driver bound to the USB interface cannot create
+; its USB target and never starts.
+;
+; The driver reaches the dongle from user mode instead, exactly as the msdisp
+; tool does: control plane over the HID interface, pixel pipe over the WinUSB
+; interface bound by inf\ms912x_winusb.inf. BOTH packages must be installed.
+
+[Version]
+Signature   = "$Windows NT$"
+ClassGUID   = {4D36E968-E325-11CE-BFC1-08002BE10318}
+Class       = Display
+ClassVer    = 2.0
+Provider    = %ManufacturerName%
+CatalogFile = ms912xidd.cat
+DriverVer   = 01/01/2026,1.0.0.0
+PnpLockdown = 1
+
+[ControlFlags]
+PreConfigureDriver = *
+
+[DestinationDirs]
+UMDriverCopy = 13
+
+[SourceDisksNames]
+1 = %DiskName%
+
+[SourceDisksFiles]
+ms912xidd.dll = 1
+
+[Manufacturer]
+%ManufacturerName% = Standard, NTamd64, NTarm64
+
+[Standard.NTamd64]
+%MS912xIdd.DeviceDesc% = MS912xIdd_Install, root\ms912xidd
+
+[Standard.NTarm64]
+%MS912xIdd.DeviceDesc% = MS912xIdd_Install, root\ms912xidd
+
+[MS912xIdd_Install.NT]
+CopyFiles = UMDriverCopy
+Include   = wudfrd.inf
+Needs     = WUDFRD.NT
+
+[MS912xIdd_Install.NT.hw]
+AddReg    = MS912xIdd_HardwareDeviceSettings
+Include   = wudfrd.inf
+Needs     = WUDFRD.NT.HW
+
+[MS912xIdd_Install.NT.Services]
+Include   = wudfrd.inf
+Needs     = WUDFRD.NT.Services
+
+[MS912xIdd_Install.NT.Wdf]
+UmdfService                = ms912xidd, MS912xIdd_Install
+UmdfServiceOrder           = ms912xidd
+UmdfKernelModeClientPolicy = AllowKernelModeClients
+UmdfHostProcessSharing     = ProcessSharingDisabled
+; Impersonation, not Identification: the host has to open the HID and WinUSB
+; device interfaces belonging to the dongle.
+UmdfImpersonationLevel     = Impersonation
+
+[MS912xIdd_Install]
+; Must match the UmdfVersion the binary was built against
+; (src/driver/ms912xidd.vcxproj), not whatever the in-box INF happens to use.
+UmdfLibraryVersion = 2.33.0
+ServiceBinary      = %13%\ms912xidd.dll
+UmdfExtensions     = IddCx0102
+
+[UMDriverCopy]
+ms912xidd.dll,,,0x100
+
+[MS912xIdd_HardwareDeviceSettings]
+HKR,, "UpperFilters", %REG_MULTI_SZ%, "IndirectKmd"
+HKR,, Security, , "D:P(A;;GA;;;WD)"
+
+[Strings]
+REG_MULTI_SZ = 0x00010000
+REG_SZ       = 0x00000000
+REG_DWORD    = 0x00010001
+
+ManufacturerName      = "winusbdisplay"
+MS912xIdd.DeviceDesc  = "MacroSilicon USB Display (indirect display driver)"
+DiskName              = "MacroSilicon USB Display Installation Disk"
