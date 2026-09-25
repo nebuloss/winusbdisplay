@@ -60,6 +60,7 @@ void PrintUsage() {
       "  bench [--mode WxH@Hz] [--frames N] [--rawio]\n"
       "        [--depth N] [--chunk KB]\n"
       "  benchsizes              transfer cost against rect size\n"
+      "  flickertest             isolate the chip's partial update behaviour\n"
       "                          measure sustained bulk throughput\n"
       "  image --mode WxH@Hz --bmp FILE [--no-modeset]\n"
       "                          push a 24 or 32 bit BMP, letterboxed\n"
@@ -672,6 +673,124 @@ int CmdSelfTest() {
 /* Measures cost against transfer size. A large fixed cost per transfer would
  * mean many small updates are dominated by overhead rather than by pixels,
  * which is what interactive use actually looks like. */
+/* Isolates what the chip does with partial updates, with the driver and the
+ * compositor out of the picture entirely.
+ *
+ * Phase 1 writes a block once and then leaves it alone while other parts of
+ * the screen keep changing. If that block flickers, a single transfer only
+ * reaches one of the chip's two frame buffers and they alternate on screen.
+ *
+ * Phase 2 writes the same block twice before moving on. If phase 1 flickers
+ * and phase 2 does not, the two buffer theory is confirmed and the fix is to
+ * repeat every partial update. */
+int CmdFlickerTest() {
+  std::string control_error, data_error;
+  std::unique_ptr<HidTransport> control = HidTransport::Open(&control_error);
+  std::unique_ptr<WinUsbTransport> data = WinUsbTransport::Open(&data_error);
+  if (!control || !data) {
+    fprintf(stderr, "error: %s\n",
+            control ? data_error.c_str() : control_error.c_str());
+    fprintf(stderr, "hint: disable the display driver first\n");
+    return 1;
+  }
+  Device device(std::unique_ptr<Transport>(
+      new CompositeTransport(std::move(control), std::move(data))));
+
+  const Mode* mode = FindMode(1920, 1080, 60);
+  if (!device.PowerOn() || !device.SetResolution(*mode)) {
+    fprintf(stderr, "error: %s\n", device.last_error().c_str());
+    return 1;
+  }
+
+  const size_t stride = static_cast<size_t>(mode->width) * 4;
+  std::vector<uint8_t> framebuffer(stride * mode->height);
+  std::vector<uint8_t> transfer(kMaxTransferLen);
+
+  auto send_rect = [&](const Rect& r) {
+    const size_t length =
+        FrameRect(transfer.data(), transfer.size(), framebuffer.data(), stride,
+                  mode->width, mode->height, r);
+    return length && device.SendFrame(transfer.data(), length);
+  };
+
+  /* Mid grey everywhere, sent as a full frame so both buffers start equal. */
+  FillSolid(framebuffer.data(), stride, mode->width, mode->height, 96, 96, 96);
+  Rect full;
+  full.x1 = 0;
+  full.y1 = 0;
+  full.x2 = mode->width;
+  full.y2 = mode->height;
+  if (!send_rect(full)) {
+    fprintf(stderr, "error: %s\n", device.last_error().c_str());
+    return 1;
+  }
+
+  /* A static block, and a strip elsewhere that keeps changing so the chip
+   * keeps flipping buffers. */
+  Rect block;
+  block.x1 = 400;
+  block.y1 = 300;
+  block.x2 = 900;
+  block.y2 = 600;
+
+  Rect strip;
+  strip.x1 = 400;
+  strip.y1 = 800;
+  strip.x2 = 900;
+  strip.y2 = 860;
+
+  for (int phase = 1; phase <= 2; ++phase) {
+    printf("\nphase %d: static block written %s, strip animating\n", phase,
+           phase == 1 ? "ONCE" : "TWICE");
+    printf("  watch the block at (400,300)-(900,600) for 8 seconds\n");
+
+    /* Paint the block bright green and send it the chosen number of times. */
+    for (int y = block.y1; y < block.y2; ++y) {
+      uint8_t* row = framebuffer.data() + static_cast<size_t>(y) * stride;
+      for (int x = block.x1; x < block.x2; ++x) {
+        row[x * 4 + 0] = 40;
+        row[x * 4 + 1] = 220;
+        row[x * 4 + 2] = 40;
+        row[x * 4 + 3] = 255;
+      }
+    }
+    for (int i = 0; i < phase; ++i) {
+      send_rect(block);
+    }
+
+    /* Now animate only the strip, never touching the block again. */
+    for (int step = 0; step < 60; ++step) {
+      const uint8_t level = static_cast<uint8_t>((step * 4) % 256);
+      for (int y = strip.y1; y < strip.y2; ++y) {
+        uint8_t* row = framebuffer.data() + static_cast<size_t>(y) * stride;
+        for (int x = strip.x1; x < strip.x2; ++x) {
+          row[x * 4 + 0] = level;
+          row[x * 4 + 1] = 0;
+          row[x * 4 + 2] = static_cast<uint8_t>(255 - level);
+          row[x * 4 + 3] = 255;
+        }
+      }
+      send_rect(strip);
+    }
+
+    /* Restore grey over the block for the next phase. */
+    for (int y = block.y1; y < block.y2; ++y) {
+      uint8_t* row = framebuffer.data() + static_cast<size_t>(y) * stride;
+      for (int x = block.x1; x < block.x2; ++x) {
+        row[x * 4 + 0] = row[x * 4 + 1] = row[x * 4 + 2] = 96;
+      }
+    }
+    send_rect(block);
+    send_rect(block);
+  }
+
+  printf("\ndone\n");
+  printf("If the block was steady in phase 1, one transfer reaches both\n");
+  printf("buffers. If it flickered in phase 1 but was steady in phase 2,\n");
+  printf("every partial update has to be sent twice.\n");
+  return 0;
+}
+
 int CmdBenchSizes() {
   std::string control_error, data_error;
   std::unique_ptr<HidTransport> control = HidTransport::Open(&control_error);
@@ -942,6 +1061,9 @@ int main(int argc, char** argv) {
   }
   if (strcmp(command, "selftest") == 0) {
     return CmdSelfTest();
+  }
+  if (strcmp(command, "flickertest") == 0) {
+    return CmdFlickerTest();
   }
   if (strcmp(command, "benchsizes") == 0) {
     return CmdBenchSizes();
