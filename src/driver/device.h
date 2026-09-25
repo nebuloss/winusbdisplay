@@ -46,32 +46,18 @@ class FrameSender {
   void Start();
   void Stop();
 
-  /* Returns the buffer to convert into, or nullptr if both are on the wire
-   * and the caller should drop this frame.
-   *
-   * If a frame that had been queued but not yet started is taken back, the
-   * damage it was carrying is written to `superseded` so the caller can fold
-   * it back into what still needs sending. That damage never reached the
-   * chip, so forgetting it would leave the region stale. */
-  std::vector<uint8_t>* AcquireBuffer(DWORD wait_ms, Rect* superseded);
+  /* Returns the buffer to convert into, or nullptr if both are busy and the
+   * caller should drop this frame. */
+  std::vector<uint8_t>* AcquireBuffer(DWORD wait_ms);
 
-  /* Hands the buffer previously returned by AcquireBuffer to the worker,
-   * along with the damage it covers. */
-  /* `twice` transmits the same bytes back to back. The chip alternates
-   * between two frame buffers on every transfer, so a standalone partial
-   * update otherwise lands in one of them and the other keeps older content,
-   * which alternates visibly on screen. Sending it twice puts it in both. */
-  void Submit(std::vector<uint8_t>* buffer, size_t length, const Rect& damage,
-              bool twice = false);
+  /* Hands the buffer previously returned by AcquireBuffer to the worker. */
+  void Submit(std::vector<uint8_t>* buffer, size_t length);
 
   /* Returns a buffer to the pool without sending it. */
   void Cancel(std::vector<uint8_t>* buffer);
 
   uint64_t frames_sent() const { return frames_sent_; }
   uint64_t frames_dropped() const { return frames_dropped_; }
-  /* Frames replaced before they reached the wire. Not a loss: it means a
-   * newer picture went out in place of a stale one. */
-  uint64_t frames_superseded() const { return frames_superseded_; }
 
  private:
   void WorkerMain();
@@ -81,14 +67,11 @@ class FrameSender {
     size_t length = 0;
     bool in_flight = false;
     bool queued = false;
-    /* What this frame repaints, so it can be recovered if superseded. */
-    Rect damage;
-    unsigned long long queued_at = 0;
-    bool twice = false;
   };
 
   Device* device_;
   Slot slots_[2];
+  size_t next_slot_ = 0;
 
   std::mutex mutex_;
   std::condition_variable free_cv_;
@@ -98,7 +81,6 @@ class FrameSender {
 
   std::atomic<uint64_t> frames_sent_{0};
   std::atomic<uint64_t> frames_dropped_{0};
-  std::atomic<uint64_t> frames_superseded_{0};
 };
 
 /* Drives one IddCx swapchain on its own thread. */
@@ -106,8 +88,7 @@ class SwapChainProcessor {
  public:
   SwapChainProcessor(IDDCX_SWAPCHAIN swapchain, LUID render_adapter,
                      HANDLE new_frame_event, Device* device,
-                     FrameSender* sender, const Mode& mode, DdcCiSlave* ddc,
-                     IDDCX_MONITOR monitor);
+                     FrameSender* sender, const Mode& mode, DdcCiSlave* ddc);
   ~SwapChainProcessor();
 
   /* D3D is initialised on the calling thread, so a failure can be reported
@@ -178,38 +159,20 @@ class SwapChainProcessor {
   UINT staging_width_ = 0;
   UINT staging_height_ = 0;
 
-  Microsoft::WRL::ComPtr<ID3D11ComputeShader> compute_shader_;
-  Microsoft::WRL::ComPtr<ID3D11Buffer> compute_output_;
-  Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> compute_output_uav_;
-  Microsoft::WRL::ComPtr<ID3D11Buffer> compute_readback_;
-  Microsoft::WRL::ComPtr<ID3D11Buffer> compute_params_;
-  /* The acquired surface is a different texture most frames, so the view is
-   * cached against the texture it was made for. */
-  Microsoft::WRL::ComPtr<ID3D11Texture2D> compute_source_;
-  Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> compute_source_srv_;
-  bool compute_ready_ = false;
-  bool compute_failed_ = false;
-  bool compute_verified_ = false;
-  unsigned verify_content_frames_ = 0;
-  /* Last acquired surface, held so the idle refresh has something current to
-   * convert from. */
+  /* Last acquired surface, held so the idle refresh has a current picture to
+   * convert from when the desktop is static and no new frame is arriving. */
   Microsoft::WRL::ComPtr<ID3D11Texture2D> last_source_;
   int last_width_ = 0;
   int last_height_ = 0;
-  int verify_fb_width_ = 0;
-  int verify_fb_height_ = 0;
 
-  /* The chip holds two frame buffers and alternates between them, so damage
-   * has to be tracked per buffer: new damage accumulates into both, and only
-   * the buffer actually written is cleared. Tracking a single rectangle makes
-   * each buffer miss half the updates, which shows up as ghosting and as the
-   * picture flickering between two different images. */
-  /* Damage owed by each chip buffer, and which buffer the next transfer will
-   * land in. Touched by both the swapchain thread and the cursor thread, so
-   * everything that reads or writes them holds damage_mutex_. */
-  std::mutex damage_mutex_;
+  /* Damage still owed to the chip. [0] accumulates what has changed since
+   * the last transfer, [1] is what the last transfer covered. Every transfer
+   * sends the union of the two, because the chip alternates between two
+   * frame buffers and a region carried by only one transfer lands in just
+   * one of them: it then shows new content on one refresh and old content on
+   * the next. Covering two consecutive frames of damage puts every change in
+   * both buffers without having to know which one the chip will use. */
   Rect pending_damage_[2];
-  int frame_index_ = 0;
   bool force_full_frame_ = true;
 
   /* The panel drops its signal if left idle, so refresh it periodically even
@@ -220,24 +183,6 @@ class SwapChainProcessor {
   std::thread thread_;
   HANDLE terminate_event_ = nullptr;
 
-  IDDCX_MONITOR monitor_ = nullptr;
-  std::thread cursor_thread_;
-  HANDLE cursor_event_ = nullptr;
-  std::vector<uint8_t> cursor_shape_;
-  std::vector<uint8_t> cursor_scratch_;
-  /* Guards the cached desktop copy the cursor thread composites over. */
-  std::mutex cursor_mutex_;
-  std::vector<uint8_t> desktop_copy_;
-  int desktop_width_ = 0;
-  int desktop_height_ = 0;
-  size_t desktop_stride_ = 0;
-  UINT cursor_shape_id_ = 0;
-  int cursor_width_ = 0;
-  int cursor_height_ = 0;
-  bool cursor_is_alpha_ = false;
-  /* Where the pointer was last drawn, so it can be erased. */
-  Rect cursor_previous_;
-  bool cursor_active_ = false;
 };
 
 /* Per-WDFDEVICE state. */
