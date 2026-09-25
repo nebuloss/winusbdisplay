@@ -88,10 +88,13 @@ NTSTATUS EvtDeviceD0Entry(WDFDEVICE wdf_device, WDF_POWER_DEVICE_STATE) {
   IDDCX_ADAPTER_CAPS caps = {};
   caps.Size = sizeof(caps);
   caps.MaxMonitorsSupported = 1;
-  /* USB 2 gives roughly 35 MB/s, so cap the pipeline near one 1080p UYVY
-   * frame every eight refreshes rather than letting the OS expect 60. */
+  /* This is the pixel rate the adapter claims it can drive, and the OS
+   * validates every mode against it. Advertising the real USB 2 bandwidth
+   * here disqualifies all of them and monitor arrival then fails with
+   * STATUS_DEVICE_NOT_READY. Report what the modes need; actual bandwidth is
+   * handled by dropping frames in FrameSender, not by lying to the OS. */
   caps.MaxDisplayPipelineRate =
-      static_cast<UINT64>(1920) * 1080 * 2 * 8;
+      static_cast<UINT64>(kMaxWidth) * kMaxHeight * 60;
   caps.EndPointDiagnostics.Size = sizeof(caps.EndPointDiagnostics);
   caps.EndPointDiagnostics.GammaSupport = IDDCX_FEATURE_IMPLEMENTATION_NONE;
   caps.EndPointDiagnostics.TransmissionType =
