@@ -103,6 +103,30 @@ Start-Sleep -Seconds 3
 pnputil /scan-devices | Out-Null
 
 Write-Host ''
+Write-Host '=== 4. brightness settings key ==='
+# The driver runs as LOCAL SERVICE and cannot read a user hive, so the
+# brightness value lives in HKLM. Widen that one key so the tray app can set
+# it without elevation. Scope is deliberately narrow: one key, and the only
+# values in it control picture settings.
+$settingsKey = 'HKLM:\SOFTWARE\winusbdisplay'
+if (-not (Test-Path $settingsKey)) {
+    New-Item -Path $settingsKey -Force | Out-Null
+}
+foreach ($pair in @(@('Brightness', 100), @('Contrast', 50))) {
+    if ($null -eq (Get-ItemProperty -Path $settingsKey -Name $pair[0] -ErrorAction SilentlyContinue)) {
+        New-ItemProperty -Path $settingsKey -Name $pair[0] -Value $pair[1] -PropertyType DWord -Force | Out-Null
+    }
+}
+$acl = Get-Acl $settingsKey
+$users = New-Object System.Security.Principal.SecurityIdentifier(
+    [System.Security.Principal.WellKnownSidType]::BuiltinUsersSid, $null)
+$rule = New-Object System.Security.AccessControl.RegistryAccessRule(
+    $users, 'SetValue,QueryValues,ReadKey', 'None', 'None', 'Allow')
+$acl.SetAccessRule($rule)
+Set-Acl -Path $settingsKey -AclObject $acl
+Write-Host '    users may now set brightness without elevation'
+
+Write-Host ''
 Write-Host '=== result ==='
 Get-PnpDevice | Where-Object {
     $_.InstanceId -match 'ms912xidd' -or $_.InstanceId -match 'VID_345F.*MI_03'
