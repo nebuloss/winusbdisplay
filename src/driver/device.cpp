@@ -630,40 +630,24 @@ void IndirectDevice::BuildModeList() {
 }
 
 void IndirectDevice::CreateMonitor() {
-  /* Arrival may only be attempted once per monitor object, so probe several
-   * candidate configurations by creating a fresh object for each until one is
-   * accepted. This is diagnostic scaffolding; once the working combination is
-   * known it collapses to a single case. */
-  struct Candidate {
-    const char* name;
-    DISPLAYCONFIG_VIDEO_OUTPUT_TECHNOLOGY type;
-    bool use_edid;
-  };
-  const Candidate candidates[] = {
-      {"indirect_wired + edid", DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INDIRECT_WIRED, true},
-      {"indirect_virtual + edid", DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INDIRECT_VIRTUAL, true},
-      {"indirect_wired + no edid", DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INDIRECT_WIRED, false},
-      {"indirect_virtual + no edid", DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INDIRECT_VIRTUAL, false},
-      {"hdmi + edid", DISPLAYCONFIG_OUTPUT_TECHNOLOGY_HDMI, true},
-  };
+  /* Arrival may only be attempted once per monitor object, so each retry uses
+   * a freshly created one. The delays establish whether the OS side simply
+   * needs more time to be ready to accept a monitor. */
+  const DWORD delays_ms[] = {0, 250, 500, 1000, 2000, 4000, 8000};
 
-  for (const Candidate& candidate : candidates) {
+  for (DWORD delay : delays_ms) {
+    if (delay) {
+      Sleep(delay);
+    }
+
     IDDCX_MONITOR_INFO info = {};
     info.Size = sizeof(info);
-    info.MonitorType = candidate.type;
+    info.MonitorType = DISPLAYCONFIG_OUTPUT_TECHNOLOGY_HDMI;
     info.ConnectorIndex = 0;
     info.MonitorDescription.Size = sizeof(info.MonitorDescription);
-    if (candidate.use_edid) {
-      info.MonitorDescription.Type = IDDCX_MONITOR_DESCRIPTION_TYPE_EDID;
-      info.MonitorDescription.DataSize = static_cast<UINT>(edid_.size());
-      info.MonitorDescription.pData = edid_.data();
-    } else {
-      /* IddCx represents an EDID-less monitor as an EDID description with no
-       * payload, not as an UNINITIALIZED type. */
-      info.MonitorDescription.Type = IDDCX_MONITOR_DESCRIPTION_TYPE_EDID;
-      info.MonitorDescription.DataSize = 0;
-      info.MonitorDescription.pData = nullptr;
-    }
+    info.MonitorDescription.Type = IDDCX_MONITOR_DESCRIPTION_TYPE_EDID;
+    info.MonitorDescription.DataSize = static_cast<UINT>(edid_.size());
+    info.MonitorDescription.pData = edid_.data();
     if (FAILED(CoCreateGuid(&info.MonitorContainerId))) {
       Log("CreateMonitor: CoCreateGuid failed");
       return;
@@ -679,7 +663,7 @@ void IndirectDevice::CreateMonitor() {
     IDARG_OUT_MONITORCREATE created = {};
     NTSTATUS status = IddCxMonitorCreate(adapter_, &create, &created);
     if (!NT_SUCCESS(status)) {
-      Log("probe [%s]: create -> 0x%08X", candidate.name, status);
+      Log("attempt +%lums: create -> 0x%08X", delay, status);
       continue;
     }
 
@@ -690,15 +674,15 @@ void IndirectDevice::CreateMonitor() {
 
     IDARG_OUT_MONITORARRIVAL arrival = {};
     status = IddCxMonitorArrival(created.MonitorObject, &arrival);
-    Log("probe [%s]: create ok, arrival -> 0x%08X", candidate.name, status);
+    Log("attempt +%lums: arrival -> 0x%08X", delay, status);
     if (NT_SUCCESS(status)) {
       monitor_ = created.MonitorObject;
-      Log("MONITOR ARRIVED using [%s]", candidate.name);
+      Log("MONITOR ARRIVED after %lums", delay);
       return;
     }
     IddCxMonitorDeparture(created.MonitorObject);
   }
-  Log("CreateMonitor: every candidate failed");
+  Log("CreateMonitor: arrival never succeeded");
 }
 
 void IndirectDevice::OnAdapterInitFinished(IDDCX_ADAPTER adapter) {
