@@ -89,3 +89,91 @@ USBPcap plus Wireshark will capture your own traffic. If you can install the
 vendor driver on a spare machine and capture *its* traffic doing the same
 operation, diffing the two is by far the most effective debugging tool
 available for this project.
+
+---
+
+# Indirect display driver (IddCx)
+
+## The driver and the msdisp tool fight over the USB pipe
+
+The WinUSB pixel pipe is exclusive. If the driver is running, `msdisp` fails
+to open it with `0x00000005` (access denied), and vice versa. Disable the
+driver's device node while using the tool:
+
+```
+Disable-PnpDevice -InstanceId 'ROOT\DISPLAY\0000' -Confirm:$false
+```
+
+## Reading what the driver actually did
+
+WDF collapses most initialisation failures into a single generic status, so
+the driver keeps its own log:
+
+```
+C:\Windows\Temp\ms912xidd.log
+```
+
+It records every step of `DriverEntry`, `PrepareHardware`, `D0Entry`, adapter
+init and monitor creation with the exact `NTSTATUS` of each IddCx call. Start
+here; the event log will usually only tell you "problem code 10".
+
+For the PnP-level view, the UMDF operational log is disabled by default:
+
+```
+wevtutil sl Microsoft-Windows-DriverFrameworks-UserMode/Operational /e:true
+```
+
+## Device fails to start, problem code 10
+
+The event log reports only `STATUS_DEVICE_POWER_FAILURE` (0xC000009E) on the
+start IRP, which is WDF's generic mapping for `EvtDeviceD0Entry` failing. The
+driver log has the real status. Causes found so far:
+
+| Symptom in the log | Cause |
+|---|---|
+| `IddCxAdapterInitAsync -> 0xC000000D` | `pHardwareVersion` / `pFirmwareVersion` left null in the adapter caps. Both are mandatory. |
+| `IddCxMonitorCreate -> 0xC000000D` | `MonitorContainerId` left as an all-zero GUID. Generate one with `CoCreateGuid`. |
+| `PrepareHardware -> 0xC0000182` | The WDF USB target could not be created. See below. |
+
+## Why the driver is root-enumerated rather than bound to the USB interface
+
+An earlier revision bound the driver directly to the dongle's display
+interface and used the WDF USB target with `UmdfDispatcher = WinUsb`. That
+never starts: `WdfUsbTargetDeviceCreateWithParameters` fails, even with the
+WinUSB service installed and `LowerFilters = WinUsb` correctly applied.
+
+IddCx requires the `IndirectKmd` upper filter, and that topology appears to be
+incompatible with the WinUsb dispatcher. Neither in-box indirect display
+driver (`rdpidd.inf`, `miradisp.inf`) declares a `UmdfDispatcher` at all.
+
+So the driver is a root-enumerated software device and reaches the dongle
+through user-mode handles instead, which works because UMDF hosts are user
+mode processes. This also means both INF packages must be installed.
+
+## Known unresolved issue: IddCxMonitorArrival
+
+Current state: the device starts cleanly (problem 0), both transports open
+from `WUDFHost` running as LOCAL SERVICE, EDID reads correctly, the mode list
+builds, `IddCxAdapterInitAsync` and `IddCxMonitorCreate` both succeed, and
+`EvtIddCxParseMonitorDescription` is called and answers both passes.
+
+`IddCxMonitorArrival` then returns `STATUS_DEVICE_NOT_READY` (0xC00000A3), so
+no monitor appears in Settings.
+
+Ruled out:
+
+- timing: deferring creation off the `AdapterInitFinished` callback does not help
+- retrying: arrival may only be called once, a second call returns `STATUS_INVALID_PARAMETER`
+- `IndirectKmd` not loading: the filter is attached and the service is running
+- connector type: `INDIRECT_WIRED` behaves the same as `HDMI`
+- `MaxDisplayPipelineRate` being too low to admit any mode
+
+Still to try:
+
+- returning a mode list derived from the EDID's own detailed timings rather
+  than the chip's 26-entry table, in case the OS cross-checks them
+- running the host with a different `UmdfImpersonationLevel`, or as a
+  different account
+- comparing against a stock build of Microsoft's `IndirectDisplay` sample on
+  this same machine to isolate whether the problem is our code or the
+  environment

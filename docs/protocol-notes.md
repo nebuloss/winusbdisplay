@@ -277,3 +277,47 @@ Everything below needs the bulk pipe, which needs driver installation:
   to be
 - hotplug, suspend and resume
 - custom timing decoding (this dongle's flash has none programmed)
+
+---
+
+## Windows-specific constraint: the two planes live on different interfaces
+
+Not a protocol issue, but it shapes the whole driver design and is invisible
+from the Linux sources.
+
+The control transfers are class requests with recipient = Interface and
+`wIndex = 0`, so they target **interface 0**, the HID collection. The bulk
+pixel endpoint is on a **different interface** (MI_03 on the USB 3 parts).
+
+On Linux one driver holds the whole `usb_device` and can address either
+interface. On Windows each interface is owned by a different driver, and
+WinUSB refuses to forward an interface-recipient control request to an
+interface it does not own: it fails with `ERROR_GEN_FAILURE` (0x1F).
+
+So the working arrangement is a **hybrid transport**:
+
+| plane | interface | owner | mechanism |
+|---|---|---|---|
+| control | MI_00 | hidusb (in-box) | `HidD_SetFeature` / `HidD_GetFeature` |
+| data | MI_03 | WinUSB (our INF) | `WinUsb_WritePipe` on endpoint 4 |
+
+This is what `CompositeTransport` exists for, and it is verified working: the
+panel displays our frames.
+
+Note the WinUSB pipe is **exclusive**. The `msdisp` tool and the indirect
+display driver cannot both hold it; whichever opens it first wins and the
+other gets `ERROR_ACCESS_DENIED` (0x5). Disable the driver's device node when
+using the tool.
+
+## Verified on hardware, second pass
+
+| What | Result |
+|---|---|
+| Bulk OUT pipe | endpoint 0x04, 512 byte max packet, USB 2.0 high speed |
+| Full 1080p frame transfer | ~160 ms wall clock, consistent with ~35 MB/s |
+| Modeset then full frame | **panel displays the image** |
+| Solid colours and colour bars at 1080p | correct, no fringing, no tearing |
+| 720p60 (chip mode 0x4F) | works |
+
+So sections 4.1 through 4.5 of `AGENT_PROMPT.md`, with the corrections above,
+are confirmed end to end against real hardware.
