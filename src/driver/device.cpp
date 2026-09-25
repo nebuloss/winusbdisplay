@@ -1156,12 +1156,7 @@ bool SwapChainProcessor::SendRefresh(bool whole_screen) {
     return false;
   }
 
-  /* Sent twice, so both of the chip's frame buffers end up holding this
-   * picture. A single full repaint updates only the buffer it lands in and
-   * leaves the other showing whatever it had, and the two then alternate,
-   * which is visible as a periodic flicker every time the idle refresh runs.
-   * An even number of transfers also leaves the parity unchanged. */
-  sender_->Submit(transfer, length, full, true);
+  sender_->Submit(transfer, length, full);
 
   std::lock_guard<std::mutex> damage_lock(damage_mutex_);
   pending_damage_[0] = EmptyRect();
@@ -1411,9 +1406,14 @@ void SwapChainProcessor::Run() {
         }
       }
 
-      /* Nothing new to draw. Keep the panel awake anyway. */
-      if (last_send_ms_ != 0 &&
-          idle_now - last_send_ms_ >= kIdleRefreshMs) {
+      /* Nothing new to draw. The panel blanks without traffic, so it still
+       * needs something periodically, but a full repaint is the wrong tool:
+       * two full frames cost 250 ms during which no real update can go out,
+       * and it repaints from a copy built up region by region, so anywhere
+       * the copy never received shows stale content. Only refresh once the
+       * link has genuinely been quiet. */
+      if (last_send_ms_ != 0 && idle_now - last_send_ms_ >= kIdleRefreshMs &&
+          ReadPolicyDword(L"IdleRefresh", 1) != 0) {
         SendRefresh(false);
       }
       DWORD wait = WaitForMultipleObjects(2, waits, FALSE, 17);
