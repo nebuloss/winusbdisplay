@@ -132,6 +132,20 @@ foreach ($block in ((pnputil /enum-drivers | Out-String) -split "`r?`n`r?`n")) {
     }
 }
 
+Write-Host '==> removing our own WinUSB package if present'
+# ms912x_winusb.inf matches exactly the same hardware ids as this package, and
+# Windows will happily leave an already-working WinUSB binding in place. The
+# competing package has to go or the monitor never appears.
+foreach ($block in ((pnputil /enum-drivers | Out-String) -split "`r?`n`r?`n")) {
+    if ($block -match 'ms912x_winusb\.inf') {
+        $oem = [regex]::Match($block, 'oem\d+\.inf').Value
+        if ($oem) {
+            Write-Host "    deleting $oem"
+            pnputil /delete-driver $oem /uninstall /force
+        }
+    }
+}
+
 Write-Host '==> installing driver package'
 pnputil /add-driver (Join-Path $stage 'ms912xidd.inf') /install
 if ($LASTEXITCODE -ne 0) { throw 'pnputil /add-driver failed' }
@@ -151,8 +165,31 @@ if (-not $KeepVendorDriver) {
     }
 }
 
+Write-Host '==> forcing a rebind of the live display interface'
+# /scan-devices alone will not move a device that already has a working
+# driver, so restart the device node explicitly.
+$targets = Get-PnpDevice | Where-Object {
+    $_.InstanceId -match 'VID_345F.*MI_03|VID_534D' -and $_.Status -eq 'OK'
+}
+foreach ($t in $targets) {
+    Write-Host ("    restarting " + $t.InstanceId)
+    Disable-PnpDevice -InstanceId $t.InstanceId -Confirm:$false -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 500
+    Enable-PnpDevice -InstanceId $t.InstanceId -Confirm:$false -ErrorAction SilentlyContinue
+}
+
 Write-Host '==> rescanning'
 pnputil /scan-devices
+Start-Sleep -Seconds 2
+
+Write-Host ''
+Write-Host '=== resulting binding ==='
+Get-PnpDevice | Where-Object { $_.InstanceId -match 'VID_345F.*MI_03' -and $_.Status -eq 'OK' } |
+    ForEach-Object {
+        $p = $_ | Get-PnpDeviceProperty -KeyName 'DEVPKEY_Device_DriverInfPath','DEVPKEY_Device_Service'
+        Write-Host ("  inf=" + ($p | Where-Object KeyName -eq 'DEVPKEY_Device_DriverInfPath').Data +
+                    "  service=" + ($p | Where-Object KeyName -eq 'DEVPKEY_Device_Service').Data)
+    }
 
 Write-Host ''
 Write-Host 'Done. An extra monitor should appear in Settings > System > Display.'
