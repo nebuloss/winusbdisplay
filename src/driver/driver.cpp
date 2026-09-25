@@ -177,9 +177,9 @@ NTSTATUS EvtIddCxParseMonitorDescription(
   /* This callback has no handle to get back to the device, so answer from the
    * static mode table. The commit path validates against the device anyway. */
   std::vector<Mode> modes;
-  for (size_t i = 0; i < kModeListLen; ++i) {
-    modes.push_back(kModeList[i]);
-  }
+  /* BISECT: single mode only, to test whether arrival rejects the list. */
+  const Mode* one = FindMode(1920, 1080, 60);
+  modes.push_back(*one);
 
   Log("ParseMonitorDescription: in=%u buf=%p descType=%u dataSize=%u",
       args->MonitorModeBufferInputCount, (void*)args->pMonitorModes,
