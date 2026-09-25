@@ -52,6 +52,7 @@ void PrintUsage() {
       "  edid [--blocks N] [--out FILE]\n"
       "  timings                 custom timings stored in flash\n"
       "  modes                   built-in mode table\n"
+      "  selftest                verify SIMD conversion against scalar\n"
       "  poweron | poweroff\n"
       "  modeset --mode WxH@Hz   run the section 4.3 modeset sequence\n"
       "  testpattern --mode WxH@Hz [--bars | --solid R,G,B] [--no-modeset]\n"
@@ -615,6 +616,58 @@ int CmdImage(int argc, char** argv) {
   return PushFullFrame(device.get(), *mode, framebuffer);
 }
 
+int CmdSelfTest() {
+  /* Correctness first: the SIMD path must agree with the scalar reference. */
+  int worst = 0;
+  for (int width : {8, 16, 64, 258, 532, 1024, 1920}) {
+    const int diff = ConvertSelfTest(width, 64);
+    printf("  width %4d  max difference %d\n", width, diff);
+    if (diff > worst) {
+      worst = diff;
+    }
+  }
+
+  /* Then speed, since that is the reason the SIMD path exists. */
+  const int width = 1920;
+  const int rows = 1080;
+  std::vector<uint8_t> source(static_cast<size_t>(width) * 4);
+  std::vector<uint8_t> dest(static_cast<size_t>(width) * 2);
+  for (size_t i = 0; i < source.size(); ++i) {
+    source[i] = static_cast<uint8_t>(i * 7);
+  }
+
+  LARGE_INTEGER freq, start, end;
+  QueryPerformanceFrequency(&freq);
+
+  QueryPerformanceCounter(&start);
+  for (int y = 0; y < rows; ++y) {
+    ConvertRowXrgbToUyvyScalar(dest.data(), source.data(), width);
+  }
+  QueryPerformanceCounter(&end);
+  const double scalar_ms =
+      1000.0 * (end.QuadPart - start.QuadPart) / freq.QuadPart;
+
+  QueryPerformanceCounter(&start);
+  for (int y = 0; y < rows; ++y) {
+    ConvertRowXrgbToUyvySimd(dest.data(), source.data(), width);
+  }
+  QueryPerformanceCounter(&end);
+  const double simd_ms =
+      1000.0 * (end.QuadPart - start.QuadPart) / freq.QuadPart;
+
+  printf("\n  full 1920x1080 frame:\n");
+  printf("    scalar %7.2f ms\n", scalar_ms);
+  printf("    simd   %7.2f ms  (%.1fx)\n", simd_ms,
+         simd_ms > 0 ? scalar_ms / simd_ms : 0.0);
+
+  if (worst > 1) {
+    printf("\nFAIL: paths differ by more than one least significant bit\n");
+    return 1;
+  }
+  printf("\nok\n");
+  return 0;
+}
+
 int CmdBench(int argc, char** argv) {
   const char* spec = "1920x1080@60";
   int frames = 20;
@@ -783,6 +836,9 @@ int main(int argc, char** argv) {
   }
   if (strcmp(command, "testpattern") == 0) {
     return CmdTestPattern(rest_argc, rest_argv);
+  }
+  if (strcmp(command, "selftest") == 0) {
+    return CmdSelfTest();
   }
   if (strcmp(command, "bench") == 0) {
     return CmdBench(rest_argc, rest_argv);
