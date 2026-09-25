@@ -4,6 +4,7 @@
 
 #include <objbase.h>
 
+#include "convert_cs.h"
 #include "log.h"
 
 #include <algorithm>
@@ -417,6 +418,233 @@ bool SwapChainProcessor::EnsureStaging(UINT width, UINT height) {
   staging_width_ = width;
   staging_height_ = height;
   return true;
+}
+
+namespace {
+
+/* Mirrors the cbuffer in convert_cs.hlsl. */
+struct ConvertParams {
+  UINT origin_x;
+  UINT origin_y;
+  UINT size_x;
+  UINT size_y;
+  UINT row_bytes;
+  UINT luma_gain;
+  UINT chroma_gain;
+  UINT padding;
+};
+
+}  // namespace
+
+bool SwapChainProcessor::EnsureCompute() {
+  if (compute_ready_) {
+    return true;
+  }
+  if (compute_failed_) {
+    return false;
+  }
+  compute_failed_ = true;  /* cleared on success, so failure is not retried */
+
+  if (ReadPolicyDword(L"UseComputeShader", 1) == 0) {
+    Log("compute: disabled by policy, using the CPU path");
+    return false;
+  }
+
+  if (FAILED(d3d_device_->CreateComputeShader(kConvertComputeShader,
+                                              sizeof(kConvertComputeShader),
+                                              nullptr, &compute_shader_))) {
+    Log("compute: CreateComputeShader failed, using the CPU path");
+    return false;
+  }
+
+  /* One buffer sized for the largest mode, so nothing is reallocated per
+   * frame. A byte address buffer needs the raw views flag. */
+  D3D11_BUFFER_DESC output = {};
+  output.ByteWidth = static_cast<UINT>(kMaxWidth * kMaxHeight * 2);
+  output.Usage = D3D11_USAGE_DEFAULT;
+  output.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+  output.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
+  output.StructureByteStride = 0;
+  if (FAILED(d3d_device_->CreateBuffer(&output, nullptr, &compute_output_))) {
+    Log("compute: output buffer allocation failed");
+    return false;
+  }
+
+  D3D11_UNORDERED_ACCESS_VIEW_DESC uav = {};
+  uav.Format = DXGI_FORMAT_R32_TYPELESS;
+  uav.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+  uav.Buffer.FirstElement = 0;
+  uav.Buffer.NumElements = output.ByteWidth / 4;
+  uav.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
+  if (FAILED(d3d_device_->CreateUnorderedAccessView(
+          compute_output_.Get(), &uav, &compute_output_uav_))) {
+    Log("compute: UAV creation failed");
+    return false;
+  }
+
+  D3D11_BUFFER_DESC readback = {};
+  readback.ByteWidth = output.ByteWidth;
+  readback.Usage = D3D11_USAGE_STAGING;
+  readback.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+  if (FAILED(d3d_device_->CreateBuffer(&readback, nullptr,
+                                       &compute_readback_))) {
+    Log("compute: readback buffer allocation failed");
+    return false;
+  }
+
+  D3D11_BUFFER_DESC params = {};
+  params.ByteWidth = sizeof(ConvertParams);
+  params.Usage = D3D11_USAGE_DYNAMIC;
+  params.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+  params.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+  if (FAILED(d3d_device_->CreateBuffer(&params, nullptr, &compute_params_))) {
+    Log("compute: constant buffer allocation failed");
+    return false;
+  }
+
+  compute_failed_ = false;
+  compute_ready_ = true;
+  Log("compute: GPU conversion enabled");
+  return true;
+}
+
+bool SwapChainProcessor::ConvertOnGpu(ID3D11Texture2D* source,
+                                      const Rect& rect,
+                                      const PictureAdjust& adjust,
+                                      uint8_t* dst, size_t dst_capacity) {
+  const size_t row_bytes = static_cast<size_t>(rect.width()) * 2;
+  const size_t needed = row_bytes * rect.height();
+  if (needed > dst_capacity) {
+    return false;
+  }
+
+  if (compute_source_.Get() != source) {
+    compute_source_srv_.Reset();
+    D3D11_SHADER_RESOURCE_VIEW_DESC srv = {};
+    srv.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    srv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    srv.Texture2D.MipLevels = 1;
+    if (FAILED(d3d_device_->CreateShaderResourceView(source, &srv,
+                                                     &compute_source_srv_))) {
+      return false;
+    }
+    compute_source_ = source;
+  }
+
+  D3D11_MAPPED_SUBRESOURCE mapped_params = {};
+  if (FAILED(d3d_context_->Map(compute_params_.Get(), 0,
+                               D3D11_MAP_WRITE_DISCARD, 0, &mapped_params))) {
+    return false;
+  }
+  ConvertParams* params = static_cast<ConvertParams*>(mapped_params.pData);
+  params->origin_x = static_cast<UINT>(rect.x1);
+  params->origin_y = static_cast<UINT>(rect.y1);
+  params->size_x = static_cast<UINT>(rect.width());
+  params->size_y = static_cast<UINT>(rect.height());
+  params->row_bytes = static_cast<UINT>(row_bytes);
+  params->luma_gain = static_cast<UINT>((adjust.brightness * 256) / 100);
+  params->chroma_gain = static_cast<UINT>((adjust.contrast * 256) / 50);
+  params->padding = 0;
+  d3d_context_->Unmap(compute_params_.Get(), 0);
+
+  ID3D11ShaderResourceView* srvs[] = {compute_source_srv_.Get()};
+  ID3D11UnorderedAccessView* uavs[] = {compute_output_uav_.Get()};
+  ID3D11Buffer* buffers[] = {compute_params_.Get()};
+
+  d3d_context_->CSSetShader(compute_shader_.Get(), nullptr, 0);
+  d3d_context_->CSSetShaderResources(0, 1, srvs);
+  d3d_context_->CSSetUnorderedAccessViews(0, 1, uavs, nullptr);
+  d3d_context_->CSSetConstantBuffers(0, 1, buffers);
+
+  /* One thread per pixel pair, groups of 8x8. */
+  const UINT groups_x = (static_cast<UINT>(rect.width() / 2) + 7) / 8;
+  const UINT groups_y = (static_cast<UINT>(rect.height()) + 7) / 8;
+  d3d_context_->Dispatch(groups_x, groups_y, 1);
+
+  /* Unbind so the buffer can be read; leaving a UAV bound blocks the copy. */
+  ID3D11ShaderResourceView* no_srv[] = {nullptr};
+  ID3D11UnorderedAccessView* no_uav[] = {nullptr};
+  d3d_context_->CSSetShaderResources(0, 1, no_srv);
+  d3d_context_->CSSetUnorderedAccessViews(0, 1, no_uav, nullptr);
+
+  /* Copy only the bytes actually produced, not the whole buffer. */
+  D3D11_BOX box = {};
+  box.left = 0;
+  box.right = static_cast<UINT>(needed);
+  box.top = 0;
+  box.bottom = 1;
+  box.front = 0;
+  box.back = 1;
+  d3d_context_->CopySubresourceRegion(compute_readback_.Get(), 0, 0, 0, 0,
+                                      compute_output_.Get(), 0, &box);
+
+  D3D11_MAPPED_SUBRESOURCE mapped = {};
+  if (FAILED(d3d_context_->Map(compute_readback_.Get(), 0, D3D11_MAP_READ, 0,
+                               &mapped))) {
+    return false;
+  }
+  memcpy(dst, mapped.pData, needed);
+  d3d_context_->Unmap(compute_readback_.Get(), 0);
+  return true;
+}
+
+void SwapChainProcessor::VerifyGpuAgainstCpu(ID3D11Texture2D* source,
+                                             const Rect& rect,
+                                             const PictureAdjust& adjust) {
+  compute_verified_ = true;
+
+  const size_t row_bytes = static_cast<size_t>(rect.width()) * 2;
+  const size_t needed = row_bytes * rect.height();
+  std::vector<uint8_t> gpu(needed);
+  if (!ConvertOnGpu(source, rect, adjust, gpu.data(), gpu.size())) {
+    Log("compute: verification could not run");
+    return;
+  }
+
+  if (!EnsureStaging(staging_width_, staging_height_)) {
+    return;
+  }
+  D3D11_BOX box = {};
+  box.left = static_cast<UINT>(rect.x1);
+  box.top = static_cast<UINT>(rect.y1);
+  box.right = static_cast<UINT>(rect.x2);
+  box.bottom = static_cast<UINT>(rect.y2);
+  box.back = 1;
+  d3d_context_->CopySubresourceRegion(staging_.Get(), 0, box.left, box.top, 0,
+                                      source, 0, &box);
+
+  D3D11_MAPPED_SUBRESOURCE mapped = {};
+  if (FAILED(d3d_context_->Map(staging_.Get(), 0, D3D11_MAP_READ, 0,
+                               &mapped))) {
+    return;
+  }
+  std::vector<uint8_t> cpu(needed + kFrameOverhead);
+  const size_t produced =
+      FrameRect(cpu.data(), cpu.size(), static_cast<const uint8_t*>(mapped.pData),
+                mapped.RowPitch, rect.x2, rect.y2, rect, adjust);
+  d3d_context_->Unmap(staging_.Get(), 0);
+  if (produced == 0) {
+    return;
+  }
+
+  int worst = 0;
+  for (size_t i = 0; i < needed; ++i) {
+    int diff = static_cast<int>(gpu[i]) -
+               static_cast<int>(cpu[kFrameHeaderSize + i]);
+    if (diff < 0) {
+      diff = -diff;
+    }
+    if (diff > worst) {
+      worst = diff;
+    }
+  }
+  Log("compute: GPU vs CPU over %zu bytes, largest difference %d", needed,
+      worst);
+  if (worst > 2) {
+    Log("compute: difference too large, falling back to the CPU path");
+    compute_ready_ = false;
+    compute_failed_ = true;
+  }
 }
 
 bool SwapChainProcessor::ProcessFrame(
