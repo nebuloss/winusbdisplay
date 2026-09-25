@@ -196,12 +196,16 @@ bool EdidBlockChecksumOk(const uint8_t* block) {
 bool Device::ReadEdid(std::vector<uint8_t>* edid, int blocks,
                       bool* checksum_ok) {
   edid->assign(static_cast<size_t>(blocks) * 128, 0);
-  for (size_t i = 0; i < edid->size(); ++i) {
-    uint8_t value = 0;
-    if (!ReadByte(static_cast<uint16_t>(kRegEdidBase + i), &value)) {
+  /* Four bytes per round trip, so one block costs 32 transfers not 128. */
+  for (size_t i = 0; i < edid->size(); i += kMaxRegisterReadCount) {
+    size_t chunk = edid->size() - i;
+    if (chunk > kMaxRegisterReadCount) {
+      chunk = kMaxRegisterReadCount;
+    }
+    if (!ReadRegisters(static_cast<uint16_t>(kRegEdidBase + i),
+                       edid->data() + i, chunk)) {
       return false;
     }
-    (*edid)[i] = value;
   }
 
   bool ok = true;
@@ -216,41 +220,63 @@ bool Device::ReadEdid(std::vector<uint8_t>* edid, int blocks,
   return true;
 }
 
+const char* ChipFamilyName(ChipFamily family) {
+  switch (family) {
+    case ChipFamily::kMs9120:
+      return "MS9120";
+    case ChipFamily::kMs912A:
+      return "MS912A";
+    case ChipFamily::kMs912C:
+      return "MS912C";
+    case ChipFamily::kMs9132:
+      return "MS9132";
+    default:
+      return "unrecognised";
+  }
+}
+
 bool Device::ReadChipInfo(ChipInfo* info) {
   info->family = ChipFamily::kUnknown;
   info->custom_timing_base = 0;
 
-  struct Candidate {
-    uint16_t reg;
-    uint8_t signature_msb;
-    ChipFamily family;
-    uint32_t timing_base;
-  };
-  const Candidate candidates[] = {
-      {kReg913xChipId, kChipIdSignatureMsb913x, ChipFamily::kMs913x,
-       kCustomTimingBase913x},
-      {kReg912xChipId, kChipIdSignatureMsb912x, ChipFamily::kMs912x,
-       kCustomTimingBase912x},
-  };
-
-  for (const Candidate& candidate : candidates) {
-    uint8_t signature[3] = {0, 0, 0};
-    for (int i = 0; i < 3; ++i) {
-      if (!ReadByte(static_cast<uint16_t>(candidate.reg + i), &signature[i])) {
-        return false;
-      }
-    }
-    memcpy(info->signature, signature, sizeof(signature));
-    if (signature[1] == candidate.signature_msb &&
-        signature[2] == kChipIdSignatureLsb) {
-      info->family = candidate.family;
-      info->custom_timing_base = candidate.timing_base;
-      return true;
-    }
+  /* Signature layout, from the vendor HAL: byte 1 is the family marker and
+   * byte 2 is always 0x0A. For the 912x family byte 0 distinguishes the
+   * variant. Note that a dongle sold with a USB 3 product id can still carry
+   * a 912x die, so never infer the chip from the USB product id. */
+  uint8_t signature[3] = {0, 0, 0};
+  if (!ReadRegisters(kReg913xChipId, signature, 3)) {
+    return false;
+  }
+  memcpy(info->signature, signature, sizeof(signature));
+  if (signature[1] == kChipIdSignatureMsb913x &&
+      signature[2] == kChipIdSignatureLsb) {
+    info->family = ChipFamily::kMs9132;
+    info->custom_timing_base = kCustomTimingBase913x;
+    return true;
   }
 
-  /* Signature did not match either family. info->signature holds the last
-   * attempt so the caller can report what the chip actually said. */
+  if (!ReadRegisters(kReg912xChipId, signature, 3)) {
+    return false;
+  }
+  memcpy(info->signature, signature, sizeof(signature));
+  if (signature[1] == kChipIdSignatureMsb912x &&
+      signature[2] == kChipIdSignatureLsb) {
+    switch (signature[0]) {
+      case 0xB7:
+        info->family = ChipFamily::kMs912C;
+        break;
+      case 0xA7:
+        info->family = ChipFamily::kMs912A;
+        break;
+      default:
+        info->family = ChipFamily::kMs9120;
+        break;
+    }
+    info->custom_timing_base = kCustomTimingBase912x;
+  }
+
+  /* An unrecognised signature is not an I/O failure. info->signature holds
+   * what the chip actually said so the caller can report it. */
   return true;
 }
 
