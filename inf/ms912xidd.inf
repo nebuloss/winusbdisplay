@@ -54,9 +54,15 @@ AddReg = MS912xIdd_HwAddReg
 
 [MS912xIdd_HwAddReg]
 HKR,,"UpperFilters",0x00010000,"IndirectKmd"
+HKR,,"DeviceInterfaceGUIDs",0x10000,"{6C2C4F1E-3B7A-4D4F-9F2E-5A1B8C7D3E90}"
 
 [MS912xIdd_Install.Services]
 AddService = WUDFRd, 0x000001fa, WUDFRD_ServiceInstall
+; UmdfDispatcher = WinUsb means WinUSB.sys sits underneath this driver and
+; services the USB requests. It has to be installed as a service here, or
+; WdfUsbTargetDeviceCreateWithParameters fails and the device never starts
+; (problem code 10). WinUSB.sys is in-box, so nothing needs copying.
+AddService = WinUsb, 0x000001f8, WinUsb_ServiceInstall
 
 [WUDFRD_ServiceInstall]
 DisplayName   = %WudfRdDisplayName%
@@ -65,6 +71,13 @@ StartType     = 3
 ErrorControl  = 1
 ServiceBinary = %13%\WUDFRd.sys
 LoadOrderGroup = Base
+
+[WinUsb_ServiceInstall]
+DisplayName   = %WinUsbDisplayName%
+ServiceType   = 1
+StartType     = 3
+ErrorControl  = 1
+ServiceBinary = %12%\WinUSB.sys
 
 [MS912xIdd_Install.Wdf]
 UmdfService              = ms912xidd, MS912xIdd_UmdfInstall
