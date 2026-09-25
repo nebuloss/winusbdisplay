@@ -68,10 +68,19 @@ if (-not $SkipBuild) {
 
 $binDir = Join-Path $root "build\driver\$Platform\$Configuration"
 $dll = Join-Path $binDir 'ms912xidd.dll'
-$inf = Join-Path $root 'inf\ms912xidd.inf'
+
+# Use the INF the build stamped, not the source one. The build rewrites
+# [Version] DriverVer with the current timestamp; without that, pnputil sees
+# an identical package version, reports "already exists" and silently keeps
+# the previous binary in the driver store.
+$inf = Join-Path $binDir 'ms912xidd.inf'
+if (-not (Test-Path $inf)) { $inf = Join-Path $root 'inf\ms912xidd.inf' }
+
 foreach ($f in @($dll, $inf)) {
     if (-not (Test-Path $f)) { throw "missing $f" }
 }
+Write-Host ("==> using INF " + $inf)
+Write-Host ("    " + ((Select-String -Path $inf -Pattern '^DriverVer').Line))
 
 # Inf2Cat needs the INF and every file it copies in one directory.
 $stage = Join-Path $root 'build\package'
