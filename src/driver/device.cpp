@@ -22,6 +22,22 @@ constexpr DWORD kBufferWaitMs = 10;
  * this long, which is what stops the panel deciding there is no signal. */
 constexpr unsigned long long kIdleRefreshMs = 2500;
 
+/* Where GPU conversion starts paying off, measured on this hardware by timing
+ * both paths on the same rectangle:
+ *
+ *    160k pixels   gpu 663us   cpu 268us    CPU 2.5x faster
+ *    240k pixels   gpu 758us   cpu 474us    CPU 1.6x faster
+ *    570k pixels   gpu 1332us  cpu 784us    CPU 1.7x faster
+ *  2.07M pixels   gpu 4190us  cpu 4392us    about equal
+ *
+ * A dispatch and readback costs roughly half a millisecond no matter how
+ * small the region is, so for ordinary desktop damage the CPU path is simply
+ * faster. It only stops being faster near full screen, where the GPU does the
+ * same work for a fraction of the processor time.
+ *
+ * So: CPU below the threshold, GPU above it. */
+constexpr size_t kGpuConversionMinPixels = 1000000;
+
 /* Modes offered per connector type, mirroring the Linux driver's choices. */
 const uint16_t kCvbsModes[][3] = {{720, 480, 60}, {720, 576, 50}};
 const uint16_t kYPbPrModes[][3] = {
@@ -657,27 +673,6 @@ void SwapChainProcessor::VerifyGpuAgainstCpu(ID3D11Texture2D* source,
     }
   }
 
-  {
-    /* Cost of each path on this exact rect, so the crossover can be found. */
-    const size_t pixels = static_cast<size_t>(rect.width()) * rect.height();
-    LARGE_INTEGER freq, a, b, c;
-    QueryPerformanceFrequency(&freq);
-    QueryPerformanceCounter(&a);
-    ConvertOnGpu(source, rect, adjust, gpu.data(), gpu.size());
-    QueryPerformanceCounter(&b);
-    if (SUCCEEDED(d3d_context_->Map(staging_.Get(), 0, D3D11_MAP_READ, 0,
-                                    &mapped))) {
-      FrameRect(cpu.data(), cpu.size(),
-                static_cast<const uint8_t*>(mapped.pData), mapped.RowPitch,
-                verify_fb_width_, verify_fb_height_, rect, adjust);
-      d3d_context_->Unmap(staging_.Get(), 0);
-    }
-    QueryPerformanceCounter(&c);
-    const double to_us = 1000000.0 / freq.QuadPart;
-    Log("crossover: %6zu px  gpu=%6.0fus cpu=%6.0fus", pixels,
-        (b.QuadPart - a.QuadPart) * to_us, (c.QuadPart - b.QuadPart) * to_us);
-  }
-
   if (!uniform && worst > 2) {
     Log("verify: %dx%d at (%d,%d) worst=%d at byte %zu", rect.width(),
         rect.height(), rect.x1, rect.y1, worst, worst_at);
@@ -694,7 +689,7 @@ void SwapChainProcessor::VerifyGpuAgainstCpu(ID3D11Texture2D* source,
     }
     /* Only trust the GPU path once several frames with real content, at
      * different offsets and sizes, have matched. */
-    if (verify_content_frames_ >= 40) {
+    if (verify_content_frames_ >= 8) {
       Log("verify: GPU path matches the CPU reference over %u frames",
           verify_content_frames_);
       compute_verified_ = true;
@@ -837,6 +832,10 @@ bool SwapChainProcessor::ProcessFrame(
   verify_fb_width_ = fb_width;
   verify_fb_height_ = fb_height;
 
+  const size_t rect_pixels =
+      static_cast<size_t>(to_send.width()) * to_send.height();
+  const bool prefer_gpu = rect_pixels >= kGpuConversionMinPixels;
+
   /* IddCx keeps the acquired surface valid until the next acquire, so holding
    * it lets an idle refresh re-convert the current picture instead of
    * resending something stale. */
@@ -849,7 +848,7 @@ bool SwapChainProcessor::ProcessFrame(
     if (!compute_verified_) {
       VerifyGpuAgainstCpu(source.Get(), to_send, adjust);
     }
-    if (compute_ready_) {
+    if (compute_ready_ && prefer_gpu) {
       converted = ConvertOnGpu(source.Get(), to_send, adjust,
                                transfer->data() + kFrameHeaderSize,
                                transfer->size() - kFrameOverhead);
