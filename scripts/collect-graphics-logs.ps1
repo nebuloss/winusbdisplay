@@ -6,7 +6,9 @@ $names = wevtutil el 2>$null | Where-Object {
     $_ -match 'Dxgkrnl|Display|Graphics|Idd|Indirect|DeviceSetupManager'
 }
 foreach ($n in $names) {
-    $ev = Get-WinEvent -FilterHashtable @{ LogName = $n; StartTime = $since } -MaxEvents 12 -ErrorAction SilentlyContinue
+    # Analytic/debug channels must be read Oldest-first; skip them entirely.
+    $ev = Get-WinEvent -FilterHashtable @{ LogName = $n; StartTime = $since } `
+        -MaxEvents 12 -ErrorAction SilentlyContinue 2>$null
     if (-not $ev) { continue }
     Write-Output ""
     Write-Output ("--- " + $n)
