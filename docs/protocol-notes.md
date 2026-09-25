@@ -321,3 +321,89 @@ using the tool.
 
 So sections 4.1 through 4.5 of `AGENT_PROMPT.md`, with the corrections above,
 are confirmed end to end against real hardware.
+
+---
+
+## Measured performance ceiling
+
+Benchmarked with `msdisp bench` on the MS912C test unit, sending full 1080p
+frames back to back:
+
+| Configuration | Throughput | Full-frame rate |
+|---|---|---|
+| Synchronous writes | 29.5 MB/s | 7.4 fps |
+| Pipelined, depth 2 | 29.4 MB/s | 7.4 fps |
+| Pipelined, depth 4 | 29.5 MB/s | 7.5 fps |
+| Pipelined, depth 8 | 29.7 MB/s | 7.5 fps |
+
+Pipelining with RAW_IO and up to eight overlapped transfers in flight makes no
+measurable difference, which means **the device, not the host or the bus, is
+the limit**. USB 2.0 high speed can carry about 53 MB/s of bulk traffic and a
+well driven host reaches 40 to 45; this chip tops out at 29.6.
+
+Three independent confirmations that the silicon is USB 2:
+
+1. Chip id `B7 16 0A` at `0xF000` decodes to MS912C, which the vendor source
+   places in the 912x (USB 2) family.
+2. The device descriptor reports `bcdUSB 2.00` with 512 byte bulk packets.
+3. There is **no BOS descriptor**. A USB 3 capable device carries one even
+   when it negotiates high speed, so this rules out the port, cable or hub
+   being the constraint.
+
+Note the product id `345F:9133` appears in the USB 3 list in
+`AGENT_PROMPT.md` §3, but this unit is USB 2 silicon behind that id. Another
+reason never to infer capability from the product id.
+
+Per-mode consequences, all measured:
+
+| Mode | Bytes/frame | Full-frame rate |
+|---|---|---|
+| 1920x1080 | 4.1 MB | 7.5 fps |
+| 1280x720 | 1.8 MB | 15.0 fps |
+| 1024x768 | 1.6 MB | 19.2 fps |
+
+So the only ways to go faster are to send fewer pixels (damage tracking) or
+smaller frames (lower resolution). There is no encoding to fall back on: the
+chip's formats are RGB565, RGB888, YUV422 and YUV444, and the 16 bpp ones we
+already use are the cheapest available.
+
+### vSyncFreqDivider does not work here
+
+`DISPLAYCONFIG_VIDEO_SIGNAL_INFO.AdditionalSignalInfo.vSyncFreqDivider` looks
+like the designed answer: let the panel run at 60 Hz while the OS composes
+less often. Setting it to anything above 1 makes Windows reject the whole
+topology, with `SetDisplayConfig` failing with `ERROR_GEN_FAILURE` and the
+path disappearing. Pacing is therefore done by dropping frames in
+`FrameSender`, and by offering 1920x1080@30 (chip mode `0x22`) as a real mode
+so a user can pick a rate the link can sustain.
+
+## DDC/CI is not routed to indirect displays
+
+The driver implements a complete DDC/CI slave (`src/driver/ddcci.cpp`): VCP
+`0x10` brightness, `0x12` contrast, the capabilities string, and correct
+checksums on both directions. It is wired to `EvtIddCxMonitorI2CTransmit` and
+`EvtIddCxMonitorI2CReceive`.
+
+Windows never calls it. Probing with the same API Twinkle Tray uses:
+
+```
+monitor: Generic PnP Monitor        <- real Acer on the Intel GPU
+  capabilities: (prot(monitor)type(lcd)model(ACER)...vcp(...10 12...))
+  VCP 0x10 brightness: current=35 max=100
+
+monitor: Generic PnP Monitor        <- ours
+  capabilities length FAILED err=50     (ERROR_NOT_SUPPORTED)
+  VCP 0x10 read FAILED err=50
+```
+
+The driver log shows no `ddcci:` transmit entries at all, so the callbacks are
+never invoked. Microsoft's documentation for the newer
+`EvtIddCxMonitorI2CTransmitAndReceive` says outright that it is "safe for the
+driver to expose the new function, but the OS doesn't use it". DDC/CI goes
+from `dxva2.dll` straight to the graphics adapter's hardware I2C master, which
+an indirect display has no place in.
+
+The slave is kept because it is correct and costs nothing if this ever
+changes. Brightness is delivered instead through a registry value the driver
+polls, applied during colour conversion so it genuinely dims the picture. See
+`scripts/brightness.ps1`.
