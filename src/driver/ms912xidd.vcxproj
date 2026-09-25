@@ -82,7 +82,7 @@
       <AdditionalIncludeDirectories>$(SdkIddCxInc);$(SolutionDir)src\common;$(SolutionDir)src\driver;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>$(SdkIddCxLib)\IddCxStub.lib;d3d11.lib;dxgi.lib;setupapi.lib;hid.lib;winusb.lib;ole32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(SdkIddCxLib)\IddCxStub.lib;d3d11.lib;dxgi.lib;setupapi.lib;hid.lib;winusb.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <Inf>
       <SpecifyArchitecture>true</SpecifyArchitecture>

@@ -207,7 +207,9 @@ this up can skip them:
 | SIMD and scalar disagree by rounding | unified all three paths to identical 15 bit arithmetic, verified byte-identical | still shimmers |
 | One transfer reaches only one of the chip's two frame buffers | sent every update twice | still shimmers |
 | The two buffers sit one update apart | restored the reference driver's union of current and previous damage | still shimmers |
-| The idle refresh paints a recycled surface | driver now keeps its own desktop copy | still shimmers |
+| The idle refresh paints a recycled surface | driver keeps its own desktop copy | still shimmers |
+| GPU and CPU paths differ by one bit and are mixed by damage size | required exact agreement, which disabled the GPU path | still shimmers |
+| The chip's `BYPASS_MANUAL_BLOCK` transfer mode avoids double buffering | selected mode 5 instead of 3 | chip rejects every transfer, panel dark |
 
 What was learned along the way, and is worth knowing:
 
@@ -222,10 +224,22 @@ What was learned along the way, and is worth knowing:
   commented out. If the chip can be told to hold display until a transfer
   completes, that command is where to look.
 
+One further observation worth recording: the panel drops its signal after
+roughly one to two seconds without traffic, which is why the driver repaints
+periodically at all. Shortening that interval does not remove the shimmer.
+
 The tool for settling it is the one `AGENT_PROMPT.md` section 9 recommends and
-which has not been used here: capture the vendor driver's USB traffic while
-text redraws, and diff it against ours. That will show directly whether the
-vendor sends something we do not, most likely around `TRIGGER_FRAME`.
+which has not been used here, because neither USBPcap nor Wireshark is
+installed on this machine: capture the vendor driver's USB traffic while text
+redraws and diff it against ours. That shows directly whether the vendor sends
+something we do not, most likely around `TRIGGER_FRAME`, which exists in the
+vendor's own source but is commented out.
+
+Each of the fixes above was reverted once it was shown not to help, so the
+driver is not carrying speculative complexity. The GPU conversion path in
+particular was removed entirely: it was measurably slower than the threaded
+SIMD path for ordinary damage, only equal at full screen, and mixing two paths
+that disagree by one bit is a correctness hazard for no real gain.
 
 ## Recovering a wedged chip
 

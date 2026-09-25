@@ -202,14 +202,11 @@ Each of these cost real investigation; the evidence is in
   `totalSize.cx * totalSize.cy * vSyncFreq` and `hSyncFreq` equals
   `pixelRate / totalSize.cx`, with `totalSize` including blanking. Setting
   `totalSize` equal to `activeSize` breaks those identities.
-- **Conversion runs on the GPU by default** (`src/driver/convert_cs.hlsl`,
-  compiled offline into `convert_cs.h` by the driver build). It is bit exact
-  with the scalar reference and the driver verifies that on the first frame.
-  The threaded SIMD CPU path remains as an automatic fallback and is selected
-  by `UseComputeShader=0`. Wall clock is near break even on integrated
-  graphics; the win is halved CPU use. Re-measure with the phase timers in
-  `ProcessFrame` and `scripts/compare-paths.ps1`, and check the CPU paths
-  against each other with `msdisp selftest`.
+- **There is one conversion path, threaded SIMD on the CPU.** A GPU compute
+  shader was implemented and removed: slower than the CPU path for ordinary
+  damage, equal at full screen, and one least significant bit different, which
+  makes mixing the two a correctness hazard. Do not reintroduce a second path
+  without making it bit exact first. Check with `msdisp selftest`.
 - **Windows never calls the IddCx I2C callbacks**, so DDC/CI cannot work for
   an indirect display. Microsoft documents this, and it was measured: the
   callbacks never fire and `dxva2` returns `ERROR_NOT_SUPPORTED`.

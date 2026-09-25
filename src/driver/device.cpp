@@ -4,7 +4,6 @@
 
 #include <objbase.h>
 
-#include "convert_cs.h"
 #include "log.h"
 
 
@@ -411,7 +410,6 @@ SwapChainProcessor::SwapChainProcessor(IDDCX_SWAPCHAIN swapchain,
       ddc_(ddc),
       monitor_(monitor),
       frame_index_(0) {
-  cursor_previous_ = EmptyRect();
   pending_damage_[0] = EmptyRect();
   pending_damage_[1] = EmptyRect();
   terminate_event_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -437,19 +435,8 @@ void SwapChainProcessor::Terminate() {
   if (terminate_event_) {
     SetEvent(terminate_event_);
   }
-  if (cursor_event_) {
-    /* Wake the cursor thread so it notices the terminate event. */
-    SetEvent(cursor_event_);
-  }
-  if (cursor_thread_.joinable()) {
-    cursor_thread_.join();
-  }
   if (thread_.joinable()) {
     thread_.join();
-  }
-  if (cursor_event_) {
-    CloseHandle(cursor_event_);
-    cursor_event_ = nullptr;
   }
 }
 
@@ -505,263 +492,6 @@ bool SwapChainProcessor::EnsureStaging(UINT width, UINT height) {
   staging_width_ = width;
   staging_height_ = height;
   return true;
-}
-
-namespace {
-
-/* Mirrors the cbuffer in convert_cs.hlsl. */
-struct ConvertParams {
-  UINT origin_x;
-  UINT origin_y;
-  UINT size_x;
-  UINT size_y;
-  UINT row_bytes;
-  UINT luma_gain;
-  UINT chroma_gain;
-  UINT padding;
-};
-
-}  // namespace
-
-bool SwapChainProcessor::EnsureCompute() {
-  if (compute_ready_) {
-    return true;
-  }
-  if (compute_failed_) {
-    return false;
-  }
-  compute_failed_ = true;  /* cleared on success, so failure is not retried */
-
-  if (ReadPolicyDword(L"UseComputeShader", 1) == 0) {
-    Log("compute: disabled by policy, using the CPU path");
-    return false;
-  }
-
-  if (FAILED(d3d_device_->CreateComputeShader(kConvertComputeShader,
-                                              sizeof(kConvertComputeShader),
-                                              nullptr, &compute_shader_))) {
-    Log("compute: CreateComputeShader failed, using the CPU path");
-    return false;
-  }
-
-  /* One buffer sized for the largest mode, so nothing is reallocated per
-   * frame. A byte address buffer needs the raw views flag. */
-  D3D11_BUFFER_DESC output = {};
-  output.ByteWidth = static_cast<UINT>(kMaxWidth * kMaxHeight * 2);
-  output.Usage = D3D11_USAGE_DEFAULT;
-  output.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
-  output.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
-  output.StructureByteStride = 0;
-  if (FAILED(d3d_device_->CreateBuffer(&output, nullptr, &compute_output_))) {
-    Log("compute: output buffer allocation failed");
-    return false;
-  }
-
-  D3D11_UNORDERED_ACCESS_VIEW_DESC uav = {};
-  uav.Format = DXGI_FORMAT_R32_TYPELESS;
-  uav.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
-  uav.Buffer.FirstElement = 0;
-  uav.Buffer.NumElements = output.ByteWidth / 4;
-  uav.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
-  if (FAILED(d3d_device_->CreateUnorderedAccessView(
-          compute_output_.Get(), &uav, &compute_output_uav_))) {
-    Log("compute: UAV creation failed");
-    return false;
-  }
-
-  D3D11_BUFFER_DESC readback = {};
-  readback.ByteWidth = output.ByteWidth;
-  readback.Usage = D3D11_USAGE_STAGING;
-  readback.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-  if (FAILED(d3d_device_->CreateBuffer(&readback, nullptr,
-                                       &compute_readback_))) {
-    Log("compute: readback buffer allocation failed");
-    return false;
-  }
-
-  D3D11_BUFFER_DESC params = {};
-  params.ByteWidth = sizeof(ConvertParams);
-  params.Usage = D3D11_USAGE_DYNAMIC;
-  params.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-  params.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-  if (FAILED(d3d_device_->CreateBuffer(&params, nullptr, &compute_params_))) {
-    Log("compute: constant buffer allocation failed");
-    return false;
-  }
-
-  compute_failed_ = false;
-  compute_ready_ = true;
-  Log("compute: GPU conversion enabled");
-  return true;
-}
-
-bool SwapChainProcessor::ConvertOnGpu(ID3D11Texture2D* source,
-                                      const Rect& rect,
-                                      const PictureAdjust& adjust,
-                                      uint8_t* dst, size_t dst_capacity) {
-  const size_t row_bytes = static_cast<size_t>(rect.width()) * 2;
-  const size_t needed = row_bytes * rect.height();
-  if (needed > dst_capacity) {
-    return false;
-  }
-
-  if (compute_source_.Get() != source) {
-    compute_source_srv_.Reset();
-    D3D11_SHADER_RESOURCE_VIEW_DESC srv = {};
-    srv.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-    srv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-    srv.Texture2D.MipLevels = 1;
-    if (FAILED(d3d_device_->CreateShaderResourceView(source, &srv,
-                                                     &compute_source_srv_))) {
-      return false;
-    }
-    compute_source_ = source;
-  }
-
-  D3D11_MAPPED_SUBRESOURCE mapped_params = {};
-  if (FAILED(d3d_context_->Map(compute_params_.Get(), 0,
-                               D3D11_MAP_WRITE_DISCARD, 0, &mapped_params))) {
-    return false;
-  }
-  ConvertParams* params = static_cast<ConvertParams*>(mapped_params.pData);
-  params->origin_x = static_cast<UINT>(rect.x1);
-  params->origin_y = static_cast<UINT>(rect.y1);
-  params->size_x = static_cast<UINT>(rect.width());
-  params->size_y = static_cast<UINT>(rect.height());
-  params->row_bytes = static_cast<UINT>(row_bytes);
-  params->luma_gain = static_cast<UINT>((adjust.brightness * 256) / 100);
-  params->chroma_gain = static_cast<UINT>((adjust.contrast * 256) / 50);
-  params->padding = 0;
-  d3d_context_->Unmap(compute_params_.Get(), 0);
-
-  ID3D11ShaderResourceView* srvs[] = {compute_source_srv_.Get()};
-  ID3D11UnorderedAccessView* uavs[] = {compute_output_uav_.Get()};
-  ID3D11Buffer* buffers[] = {compute_params_.Get()};
-
-  d3d_context_->CSSetShader(compute_shader_.Get(), nullptr, 0);
-  d3d_context_->CSSetShaderResources(0, 1, srvs);
-  d3d_context_->CSSetUnorderedAccessViews(0, 1, uavs, nullptr);
-  d3d_context_->CSSetConstantBuffers(0, 1, buffers);
-
-  /* One thread per pixel pair, groups of 8x8. */
-  const UINT groups_x = (static_cast<UINT>(rect.width() / 2) + 7) / 8;
-  const UINT groups_y = (static_cast<UINT>(rect.height()) + 7) / 8;
-  d3d_context_->Dispatch(groups_x, groups_y, 1);
-
-  /* Unbind so the buffer can be read; leaving a UAV bound blocks the copy. */
-  ID3D11ShaderResourceView* no_srv[] = {nullptr};
-  ID3D11UnorderedAccessView* no_uav[] = {nullptr};
-  d3d_context_->CSSetShaderResources(0, 1, no_srv);
-  d3d_context_->CSSetUnorderedAccessViews(0, 1, no_uav, nullptr);
-
-  /* Copy only the bytes actually produced, not the whole buffer. */
-  D3D11_BOX box = {};
-  box.left = 0;
-  box.right = static_cast<UINT>(needed);
-  box.top = 0;
-  box.bottom = 1;
-  box.front = 0;
-  box.back = 1;
-  d3d_context_->CopySubresourceRegion(compute_readback_.Get(), 0, 0, 0, 0,
-                                      compute_output_.Get(), 0, &box);
-
-  D3D11_MAPPED_SUBRESOURCE mapped = {};
-  if (FAILED(d3d_context_->Map(compute_readback_.Get(), 0, D3D11_MAP_READ, 0,
-                               &mapped))) {
-    return false;
-  }
-  memcpy(dst, mapped.pData, needed);
-  d3d_context_->Unmap(compute_readback_.Get(), 0);
-  return true;
-}
-
-void SwapChainProcessor::VerifyGpuAgainstCpu(ID3D11Texture2D* source,
-                                             const Rect& rect,
-                                             const PictureAdjust& adjust) {
-  const size_t row_bytes = static_cast<size_t>(rect.width()) * 2;
-  const size_t needed = row_bytes * rect.height();
-
-  std::vector<uint8_t> gpu(needed);
-  if (!ConvertOnGpu(source, rect, adjust, gpu.data(), gpu.size())) {
-    Log("verify: GPU conversion failed for %dx%d at (%d,%d)", rect.width(),
-        rect.height(), rect.x1, rect.y1);
-    return;
-  }
-
-  /* The staging texture has to cover the whole surface, not just the rect,
-   * because the CPU path indexes it with absolute coordinates. */
-  if (!EnsureStaging(static_cast<UINT>(verify_fb_width_),
-                     static_cast<UINT>(verify_fb_height_))) {
-    return;
-  }
-  D3D11_BOX box = {};
-  box.left = static_cast<UINT>(rect.x1);
-  box.top = static_cast<UINT>(rect.y1);
-  box.right = static_cast<UINT>(rect.x2);
-  box.bottom = static_cast<UINT>(rect.y2);
-  box.back = 1;
-  d3d_context_->CopySubresourceRegion(staging_.Get(), 0, box.left, box.top, 0,
-                                      source, 0, &box);
-
-  D3D11_MAPPED_SUBRESOURCE mapped = {};
-  if (FAILED(d3d_context_->Map(staging_.Get(), 0, D3D11_MAP_READ, 0,
-                               &mapped))) {
-    return;
-  }
-  std::vector<uint8_t> cpu(needed + kFrameOverhead);
-  const size_t produced = FrameRect(
-      cpu.data(), cpu.size(), static_cast<const uint8_t*>(mapped.pData),
-      mapped.RowPitch, verify_fb_width_, verify_fb_height_, rect, adjust);
-  d3d_context_->Unmap(staging_.Get(), 0);
-  if (produced == 0) {
-    return;
-  }
-
-  /* Ignore uniform frames: a black desktop matches trivially and would make
-   * a broken path look correct, which is exactly what happened before. */
-  bool uniform = true;
-  for (size_t i = 4; i < needed && uniform; i += 4) {
-    if (memcmp(&cpu[kFrameHeaderSize + i], &cpu[kFrameHeaderSize], 4) != 0) {
-      uniform = false;
-    }
-  }
-
-  int worst = 0;
-  size_t worst_at = 0;
-  for (size_t i = 0; i < needed; ++i) {
-    int diff = static_cast<int>(gpu[i]) -
-               static_cast<int>(cpu[kFrameHeaderSize + i]);
-    if (diff < 0) {
-      diff = -diff;
-    }
-    if (diff > worst) {
-      worst = diff;
-      worst_at = i;
-    }
-  }
-
-  if (!uniform && worst > 2) {
-    Log("verify: %dx%d at (%d,%d) worst=%d at byte %zu", rect.width(),
-        rect.height(), rect.x1, rect.y1, worst, worst_at);
-  }
-
-  if (!uniform) {
-    ++verify_content_frames_;
-    if (worst > 2) {
-      Log("verify: MISMATCH, falling back to the CPU path");
-      compute_ready_ = false;
-      compute_failed_ = true;
-      compute_verified_ = true;
-      return;
-    }
-    /* Only trust the GPU path once several frames with real content, at
-     * different offsets and sizes, have matched. */
-    if (verify_content_frames_ >= 8) {
-      Log("verify: GPU path matches the CPU reference over %u frames",
-          verify_content_frames_);
-      compute_verified_ = true;
-    }
-  }
 }
 
 bool SwapChainProcessor::ProcessFrame(
@@ -924,89 +654,16 @@ bool SwapChainProcessor::ProcessFrame(
     return false;
   }
 
-  bool converted = false;
-  bool used_gpu = false;
-
-  verify_fb_width_ = fb_width;
-  verify_fb_height_ = fb_height;
-
-  const size_t rect_pixels =
-      static_cast<size_t>(to_send.width()) * to_send.height();
-  const bool prefer_gpu = rect_pixels >= kGpuConversionMinPixels;
-
-  /* IddCx keeps the acquired surface valid until the next acquire, so holding
-   * it lets an idle refresh re-convert the current picture instead of
-   * resending something stale. */
-  last_source_ = source;
-  last_width_ = fb_width;
-  last_height_ = fb_height;
-
-  if (EnsureCompute()) {
-    /* Check the two paths agree before trusting the GPU one. */
-    if (!compute_verified_) {
-      VerifyGpuAgainstCpu(source.Get(), to_send, adjust);
-    }
-    if (compute_ready_ && prefer_gpu) {
-      converted = ConvertOnGpu(source.Get(), to_send, adjust,
-                               transfer->data() + kFrameHeaderSize,
-                               transfer->size() - kFrameOverhead);
-      used_gpu = converted;
-      if (!converted) {
-        Log("compute: conversion failed, falling back to the CPU path");
-        compute_ready_ = false;
-        compute_failed_ = true;
-      }
-    }
-  }
-
+  /* One conversion path only. A GPU compute shader was implemented and
+   * measured: it is slower than the threaded SIMD path for ordinary damage,
+   * about equal at full screen, and its output differs from the CPU path by
+   * one least significant bit. Choosing between them by damage size meant a
+   * region could be converted one way and then the other, which alternates
+   * the picture and is visible on antialiased text. Not worth the CPU saving.
+   */
   {
-    /* Keep a CPU copy of the desktop, updated region by region.
-     *
-     * IddCx only guarantees the acquired surface stays valid until the next
-     * call to ReleaseAndAcquireBuffer, so anything that needs the current
-     * picture outside that window, namely the idle refresh, cannot read it
-     * safely. Reading a surface the OS has since recycled paints whatever now
-     * occupies that memory, which appears as content briefly reverting.
-     *
-     * The cursor path, when enabled, also composites over this copy. */
-    if (EnsureStaging(source_desc.Width, source_desc.Height)) {
-      D3D11_BOX box = {};
-      box.left = static_cast<UINT>(to_send.x1);
-      box.top = static_cast<UINT>(to_send.y1);
-      box.front = 0;
-      box.right = static_cast<UINT>(to_send.x2);
-      box.bottom = static_cast<UINT>(to_send.y2);
-      box.back = 1;
-      d3d_context_->CopySubresourceRegion(staging_.Get(), 0, box.left, box.top,
-                                          0, source.Get(), 0, &box);
-
-      D3D11_MAPPED_SUBRESOURCE snapshot = {};
-      if (SUCCEEDED(d3d_context_->Map(staging_.Get(), 0, D3D11_MAP_READ, 0,
-                                      &snapshot))) {
-        std::lock_guard<std::mutex> lock(cursor_mutex_);
-        if (desktop_width_ != fb_width || desktop_height_ != fb_height) {
-          desktop_width_ = fb_width;
-          desktop_height_ = fb_height;
-          desktop_stride_ = static_cast<size_t>(fb_width) * 4;
-          desktop_copy_.assign(desktop_stride_ * fb_height, 0);
-        }
-        for (int y = to_send.y1; y < to_send.y2; ++y) {
-          memcpy(desktop_copy_.data() + static_cast<size_t>(y) *
-                                            desktop_stride_ +
-                     static_cast<size_t>(to_send.x1) * 4,
-                 static_cast<const uint8_t*>(snapshot.pData) +
-                     static_cast<size_t>(y) * snapshot.RowPitch +
-                     static_cast<size_t>(to_send.x1) * 4,
-                 static_cast<size_t>(to_send.width()) * 4);
-        }
-        d3d_context_->Unmap(staging_.Get(), 0);
-      }
-    }
-  }
-
-  if (!converted) {
-    /* CPU path: copy the damage out of the GPU, then convert while reading
-     * the mapped staging texture. */
+    /* Copy the damaged region out of the GPU, then convert while reading the
+     * mapped staging texture. */
     if (!EnsureStaging(source_desc.Width, source_desc.Height)) {
       sender_->Cancel(transfer);
       return false;
@@ -1036,20 +693,6 @@ bool SwapChainProcessor::ProcessFrame(
       sender_->Cancel(transfer);
       return false;
     }
-  } else {
-    /* The GPU wrote the pixels straight into the transfer buffer; the header
-     * and footer are still ours to add. */
-    FrameUpdateHeader header;
-    PutBe16(header.marker_be, kFrameMarker);
-    PutBe24(header.position,
-            ((static_cast<uint32_t>(to_send.x1) & 0xFFF) << 12) |
-                (static_cast<uint32_t>(to_send.y1) & 0xFFF));
-    PutBe24(header.dimensions,
-            ((static_cast<uint32_t>(to_send.width()) & 0xFFF) << 12) |
-                (static_cast<uint32_t>(to_send.height()) & 0xFFF));
-    memcpy(transfer->data(), &header, sizeof(header));
-    memcpy(transfer->data() + kFrameHeaderSize + pixel_bytes, kFrameFooter,
-           kFrameFooterSize);
   }
 
   QueryPerformanceCounter(&t_converted);
@@ -1059,8 +702,7 @@ bool SwapChainProcessor::ProcessFrame(
     if (phase_now - last_phase_log >= 30000) {
       last_phase_log = phase_now;
       const double to_us = 1000000.0 / qpc_freq.QuadPart;
-      Log("phases: %s convert=%.0fus  %dx%d (%zu bytes)",
-          used_gpu ? "gpu" : "cpu",
+      Log("phases: convert=%.0fus  %dx%d (%zu bytes)",
           (t_converted.QuadPart - t_begin.QuadPart) * to_us, to_send.width(),
           to_send.height(), length);
     }
@@ -1096,29 +738,16 @@ bool SwapChainProcessor::ProcessFrame(
 }
 
 bool SwapChainProcessor::SendRefresh(bool whole_screen) {
-  std::lock_guard<std::mutex> copy_lock(cursor_mutex_);
-  if (desktop_copy_.empty() || desktop_width_ <= 0 || desktop_height_ <= 0) {
+  (void)whole_screen;
+  if (!last_source_ || last_width_ <= 0 || last_height_ <= 0) {
     return false;
   }
-  last_width_ = desktop_width_;
-  last_height_ = desktop_height_;
 
   Rect full;
   full.x1 = 0;
   full.y1 = 0;
   full.x2 = last_width_;
   full.y2 = last_height_;
-
-  /* Tempting idea that does not work: send only a band, since keeping the
-   * panel awake just needs traffic and a full repaint costs eight vsync
-   * periods. The chip alternates between two frame buffers on every
-   * transfer, so a partial update lands in one of them and leaves the other
-   * holding older content for that region. The two then alternate on screen
-   * and the picture visibly flickers. Any partial update has to be tracked
-   * per buffer, which is what pending_damage_ is for, so a refresh that is
-   * meant to resynchronise everything sends the whole screen. */
-  (void)whole_screen;
-
   full = AlignDamageRect(full, last_width_, last_height_);
   if (full.empty()) {
     return false;
@@ -1130,196 +759,19 @@ bool SwapChainProcessor::SendRefresh(bool whole_screen) {
   if (!transfer) {
     return false;
   }
-  /* A full repaint covers whatever the displaced frame was carrying. */
-  (void)superseded;
 
-  PictureAdjust adjust;
-  if (ddc_) {
-    adjust.brightness = ddc_->brightness();
-    adjust.contrast = ddc_->contrast();
-  }
-
-  const size_t row_bytes = static_cast<size_t>(full.width()) * 2;
-  const size_t pixel_bytes = row_bytes * full.height();
-  const size_t length = pixel_bytes + kFrameOverhead;
-  if (transfer->size() < length) {
+  if (!EnsureStaging(static_cast<UINT>(last_width_),
+                     static_cast<UINT>(last_height_))) {
     sender_->Cancel(transfer);
     return false;
   }
+  d3d_context_->CopyResource(staging_.Get(), last_source_.Get());
 
-  /* Converted from our own copy, which is always valid, rather than from the
-   * acquired surface, which by now may have been recycled by the OS. */
-  const size_t produced =
-      FrameRect(transfer->data(), transfer->size(), desktop_copy_.data(),
-                desktop_stride_, desktop_width_, desktop_height_, full, adjust);
-  if (produced == 0) {
+  D3D11_MAPPED_SUBRESOURCE mapped = {};
+  if (FAILED(d3d_context_->Map(staging_.Get(), 0, D3D11_MAP_READ, 0,
+                               &mapped))) {
     sender_->Cancel(transfer);
     return false;
-  }
-
-  sender_->Submit(transfer, length, full);
-
-  std::lock_guard<std::mutex> damage_lock(damage_mutex_);
-  pending_damage_[0] = EmptyRect();
-  pending_damage_[1] = EmptyRect();
-  last_send_ms_ = GetTickCount64();
-  return true;
-}
-
-bool SwapChainProcessor::SetupCursor() {
-  if (!monitor_) {
-    return false;
-  }
-  /* Off by default. Taking the hardware cursor path does make the pointer
-   * noticeably quicker, because mouse movement no longer has to wait for the
-   * compositor to produce a whole new desktop frame. But it cannot currently
-   * be made stable: a cursor update is a standalone partial write, and the
-   * chip alternates between two frame buffers on every transfer, so the two
-   * end up holding the pointer in different places and alternate visibly.
-   *
-   * Transmitting each update twice so both buffers receive it does not fix
-   * it either, which suggests the chip's buffer alternation is not simply one
-   * per transfer, or that the cursor and frame paths interleave in a way the
-   * parity tracking cannot follow. Working that out needs a USB capture of
-   * the vendor driver moving a pointer, which is the tool called for in
-   * AGENT_PROMPT section 9.
-   *
-   * Set HardwareCursor to 1 under HKLM\SOFTWARE\winusbdisplay to experiment. */
-  if (ReadPolicyDword(L"HardwareCursor", 0) == 0) {
-    return false;
-  }
-
-  cursor_event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-  if (!cursor_event_) {
-    return false;
-  }
-
-  IDARG_IN_SETUP_HWCURSOR setup = {};
-  setup.CursorInfo.Size = sizeof(setup.CursorInfo);
-  setup.CursorInfo.AlphaCursorSupport = TRUE;
-  /* No XOR support: emulation asks the OS to resolve those shapes for us,
-   * which is what we want given there is no real cursor plane here. */
-  setup.CursorInfo.ColorXorCursorSupport = IDDCX_XOR_CURSOR_SUPPORT_EMULATION;
-  setup.CursorInfo.MaxX = 128;
-  setup.CursorInfo.MaxY = 128;
-  setup.hNewCursorDataAvailable = cursor_event_;
-
-  const NTSTATUS status = IddCxMonitorSetupHardwareCursor(monitor_, &setup);
-  if (!NT_SUCCESS(status)) {
-    Log("cursor: IddCxMonitorSetupHardwareCursor -> 0x%08X, leaving the "
-        "pointer to the compositor", status);
-    CloseHandle(cursor_event_);
-    cursor_event_ = nullptr;
-    return false;
-  }
-
-  cursor_shape_.resize(128 * 128 * 4);
-  cursor_active_ = true;
-  Log("cursor: hardware cursor active");
-  return true;
-}
-
-bool SwapChainProcessor::DrawCursor() {
-  IDARG_IN_QUERY_HWCURSOR in = {};
-  in.LastShapeId = cursor_shape_id_;
-  in.ShapeBufferSizeInBytes = static_cast<UINT>(cursor_shape_.size());
-  in.pShapeBuffer = cursor_shape_.data();
-
-  IDARG_OUT_QUERY_HWCURSOR out = {};
-  if (!NT_SUCCESS(IddCxMonitorQueryHardwareCursor(monitor_, &in, &out))) {
-    return false;
-  }
-
-  if (out.IsCursorShapeUpdated) {
-    cursor_shape_id_ = out.CursorShapeInfo.ShapeId;
-    cursor_width_ = static_cast<int>(out.CursorShapeInfo.Width);
-    cursor_height_ = static_cast<int>(out.CursorShapeInfo.Height);
-    cursor_is_alpha_ =
-        out.CursorShapeInfo.CursorType == IDDCX_CURSOR_SHAPE_TYPE_ALPHA;
-  }
-
-  std::lock_guard<std::mutex> lock(cursor_mutex_);
-  if (desktop_copy_.empty() || cursor_width_ <= 0 || cursor_height_ <= 0) {
-    return false;
-  }
-
-  /* Repaint where the pointer was, so it is erased, and where it now is. */
-  Rect now = EmptyRect();
-  if (out.IsCursorVisible) {
-    now.x1 = out.X;
-    now.y1 = out.Y;
-    now.x2 = out.X + cursor_width_;
-    now.y2 = out.Y + cursor_height_;
-  }
-
-  Rect region = MergeRects(cursor_previous_, now);
-  cursor_previous_ = now;
-  region = AlignDamageRect(region, desktop_width_, desktop_height_);
-  if (region.empty()) {
-    return false;
-  }
-
-  /* Start from the clean desktop, then lay the pointer over it. Working on a
-   * scratch copy keeps desktop_copy_ free of the cursor, so the next move can
-   * erase it simply by repainting from the copy. */
-  const size_t region_stride = static_cast<size_t>(region.width()) * 4;
-  cursor_scratch_.resize(region_stride * region.height());
-  for (int y = 0; y < region.height(); ++y) {
-    memcpy(cursor_scratch_.data() + static_cast<size_t>(y) * region_stride,
-           desktop_copy_.data() +
-               static_cast<size_t>(region.y1 + y) * desktop_stride_ +
-               static_cast<size_t>(region.x1) * 4,
-           region_stride);
-  }
-
-  if (out.IsCursorVisible) {
-    const uint8_t* shape = cursor_shape_.data();
-    for (int y = 0; y < cursor_height_; ++y) {
-      const int target_y = out.Y + y - region.y1;
-      if (target_y < 0 || target_y >= region.height()) {
-        continue;
-      }
-      for (int x = 0; x < cursor_width_; ++x) {
-        const int target_x = out.X + x - region.x1;
-        if (target_x < 0 || target_x >= region.width()) {
-          continue;
-        }
-        const uint8_t* src =
-            shape + (static_cast<size_t>(y) * cursor_width_ + x) * 4;
-        uint8_t* dst = cursor_scratch_.data() +
-                       static_cast<size_t>(target_y) * region_stride +
-                       static_cast<size_t>(target_x) * 4;
-        const unsigned alpha = cursor_is_alpha_ ? src[3] : 255u;
-        if (alpha == 0) {
-          continue;
-        }
-        if (alpha == 255) {
-          dst[0] = src[0];
-          dst[1] = src[1];
-          dst[2] = src[2];
-          continue;
-        }
-        /* Straight source-over blend; the shape is premultiplied. */
-        for (int c = 0; c < 3; ++c) {
-          dst[c] = static_cast<uint8_t>(src[c] + (dst[c] * (255 - alpha)) / 255);
-        }
-      }
-    }
-  }
-
-  Rect superseded = EmptyRect();
-  std::vector<uint8_t>* transfer =
-      sender_->AcquireBuffer(kBufferWaitMs, &superseded);
-  if (!transfer) {
-    /* Keep the region pending so the next move still erases the old pointer. */
-    cursor_previous_ = MergeRects(cursor_previous_, region);
-    return false;
-  }
-  if (!superseded.empty()) {
-    std::lock_guard<std::mutex> damage_lock(damage_mutex_);
-    frame_index_ = 1 - frame_index_;
-    pending_damage_[frame_index_] =
-        MergeRects(pending_damage_[frame_index_], superseded);
   }
 
   PictureAdjust adjust;
@@ -1327,51 +779,25 @@ bool SwapChainProcessor::DrawCursor() {
     adjust.brightness = ddc_->brightness();
     adjust.contrast = ddc_->contrast();
   }
-
-  Rect local;
-  local.x1 = 0;
-  local.y1 = 0;
-  local.x2 = region.width();
-  local.y2 = region.height();
-
-  const size_t length = FrameRect(transfer->data(), transfer->size(),
-                                  cursor_scratch_.data(), region_stride,
-                                  region.width(), region.height(), local,
-                                  adjust);
+  const size_t length =
+      FrameRect(transfer->data(), transfer->size(),
+                static_cast<const uint8_t*>(mapped.pData), mapped.RowPitch,
+                last_width_, last_height_, full, adjust);
+  d3d_context_->Unmap(staging_.Get(), 0);
   if (length == 0) {
     sender_->Cancel(transfer);
     return false;
   }
 
-  /* FrameRect writes a header for a rect at the origin, so patch in the real
-   * position on screen. */
-  FrameUpdateHeader header;
-  PutBe16(header.marker_be, kFrameMarker);
-  PutBe24(header.position,
-          ((static_cast<uint32_t>(region.x1) & 0xFFF) << 12) |
-              (static_cast<uint32_t>(region.y1) & 0xFFF));
-  PutBe24(header.dimensions,
-          ((static_cast<uint32_t>(region.width()) & 0xFFF) << 12) |
-              (static_cast<uint32_t>(region.height()) & 0xFFF));
-  memcpy(transfer->data(), &header, sizeof(header));
-
-  /* Sent twice, so both chip buffers receive it and neither is left owing
-   * this region. The parity is unchanged by an even number of transfers, so
-   * the frame path's tracking stays correct. */
-  sender_->Submit(transfer, length, region, true);
+  sender_->Submit(transfer, length, full);
+  {
+    /* A full repaint leaves nothing owed. */
+    std::lock_guard<std::mutex> damage_lock(damage_mutex_);
+    pending_damage_[0] = EmptyRect();
+    pending_damage_[1] = EmptyRect();
+  }
   last_send_ms_ = GetTickCount64();
   return true;
-}
-
-void SwapChainProcessor::CursorLoop() {
-  HANDLE waits[] = {cursor_event_, terminate_event_};
-  for (;;) {
-    const DWORD wait = WaitForMultipleObjects(2, waits, FALSE, INFINITE);
-    if (wait != WAIT_OBJECT_0) {
-      break;
-    }
-    DrawCursor();
-  }
 }
 
 void SwapChainProcessor::Run() {
@@ -1381,10 +807,6 @@ void SwapChainProcessor::Run() {
 
   Log("SwapChain: processing started, %u conversion thread(s)",
       ConversionThreads());
-
-  if (SetupCursor()) {
-    cursor_thread_ = std::thread(&SwapChainProcessor::CursorLoop, this);
-  }
 
   unsigned logged = 0;
   ULONGLONG last_report = GetTickCount64();

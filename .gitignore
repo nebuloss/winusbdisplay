@@ -1,9 +1,6 @@
 # Build output and anything regenerated from it.
 build/
 
-# Compiled shader header, produced by scripts/build-driver.bat from the .hlsl
-src/driver/convert_cs.h
-
 # Driver signing artefacts
 *.cat
 *.obj

@@ -30,7 +30,7 @@ desktop.
 | Pixels on the panel | working |
 | IddCx driver: monitor appears and shows the desktop | **working** |
 | Damage tracking, move regions, idle refresh | working |
-| GPU compute conversion (bit exact, CPU fallback) | working |
+| Fine text shimmer on the panel | **unresolved**, see docs/troubleshooting.md |
 | Brightness control | working, but not via DDC/CI (see below) |
 
 The test unit reports USB id `345F:9133` but carries an **MS912C** die running
@@ -58,10 +58,8 @@ damage: 20x22   at (268,332)  ->    896 bytes
 damage: 604x52  at (180,398)  -> 62,832 bytes
 ```
 
-Conversion runs on the GPU by default, verified bit exact against the CPU
-reference at runtime, with a threaded SIMD CPU path as automatic fallback.
-That halves CPU use; it does not change the frame rate, because the transfer
-was never waiting on the conversion.
+Conversion is threaded SIMD on the CPU, about 2.5x faster than scalar. It does
+not limit the frame rate: the transfer is never waiting on it.
 
 Full screen throughput is a hardware limit at 29.6 MB/s, confirmed three ways:
 the chip identifies as an MS912C, it has no BOS descriptor so the silicon is
