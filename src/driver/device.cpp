@@ -811,6 +811,13 @@ bool SwapChainProcessor::ProcessFrame(
   verify_fb_width_ = fb_width;
   verify_fb_height_ = fb_height;
 
+  /* IddCx keeps the acquired surface valid until the next acquire, so holding
+   * it lets an idle refresh re-convert the current picture instead of
+   * resending something stale. */
+  last_source_ = source;
+  last_width_ = fb_width;
+  last_height_ = fb_height;
+
   if (EnsureCompute()) {
     /* Check the two paths agree before trusting the GPU one. */
     if (!compute_verified_) {
@@ -913,16 +920,16 @@ bool SwapChainProcessor::ProcessFrame(
 }
 
 bool SwapChainProcessor::SendRefresh() {
-  if (!staging_ || staging_width_ == 0 || staging_height_ == 0) {
+  if (!last_source_ || last_width_ <= 0 || last_height_ <= 0) {
     return false;
   }
 
   Rect full;
   full.x1 = 0;
   full.y1 = 0;
-  full.x2 = static_cast<int>(staging_width_);
-  full.y2 = static_cast<int>(staging_height_);
-  full = AlignDamageRect(full, full.x2, full.y2);
+  full.x2 = last_width_;
+  full.y2 = last_height_;
+  full = AlignDamageRect(full, last_width_, last_height_);
   if (full.empty()) {
     return false;
   }
@@ -932,31 +939,65 @@ bool SwapChainProcessor::SendRefresh() {
     return false;
   }
 
-  D3D11_MAPPED_SUBRESOURCE mapped = {};
-  if (FAILED(d3d_context_->Map(staging_.Get(), 0, D3D11_MAP_READ, 0,
-                               &mapped))) {
-    sender_->Cancel(transfer);
-    return false;
-  }
-
   PictureAdjust adjust;
   if (ddc_) {
     adjust.brightness = ddc_->brightness();
     adjust.contrast = ddc_->contrast();
   }
-  const size_t length = FrameRect(
-      transfer->data(), transfer->size(),
-      static_cast<const uint8_t*>(mapped.pData), mapped.RowPitch, full.x2,
-      full.y2, full, adjust);
-  d3d_context_->Unmap(staging_.Get(), 0);
 
-  if (length == 0) {
+  const size_t row_bytes = static_cast<size_t>(full.width()) * 2;
+  const size_t pixel_bytes = row_bytes * full.height();
+  const size_t length = pixel_bytes + kFrameOverhead;
+  if (transfer->size() < length) {
     sender_->Cancel(transfer);
     return false;
   }
 
+  bool converted = false;
+  if (compute_ready_) {
+    converted = ConvertOnGpu(last_source_.Get(), full, adjust,
+                             transfer->data() + kFrameHeaderSize,
+                             transfer->size() - kFrameOverhead);
+    if (converted) {
+      FrameUpdateHeader header;
+      PutBe16(header.marker_be, kFrameMarker);
+      PutBe24(header.position, 0);
+      PutBe24(header.dimensions,
+              ((static_cast<uint32_t>(full.width()) & 0xFFF) << 12) |
+                  (static_cast<uint32_t>(full.height()) & 0xFFF));
+      memcpy(transfer->data(), &header, sizeof(header));
+      memcpy(transfer->data() + kFrameHeaderSize + pixel_bytes, kFrameFooter,
+             kFrameFooterSize);
+    }
+  }
+
+  if (!converted) {
+    if (!EnsureStaging(static_cast<UINT>(last_width_),
+                       static_cast<UINT>(last_height_))) {
+      sender_->Cancel(transfer);
+      return false;
+    }
+    d3d_context_->CopyResource(staging_.Get(), last_source_.Get());
+
+    D3D11_MAPPED_SUBRESOURCE mapped = {};
+    if (FAILED(d3d_context_->Map(staging_.Get(), 0, D3D11_MAP_READ, 0,
+                                 &mapped))) {
+      sender_->Cancel(transfer);
+      return false;
+    }
+    const size_t produced =
+        FrameRect(transfer->data(), transfer->size(),
+                  static_cast<const uint8_t*>(mapped.pData), mapped.RowPitch,
+                  last_width_, last_height_, full, adjust);
+    d3d_context_->Unmap(staging_.Get(), 0);
+    if (produced == 0) {
+      sender_->Cancel(transfer);
+      return false;
+    }
+  }
+
   sender_->Submit(transfer, length);
-  /* A refresh brings both chip buffers up to date. */
+  /* A full repaint brings both chip buffers up to date. */
   pending_damage_[0] = EmptyRect();
   pending_damage_[1] = EmptyRect();
   last_send_ms_ = GetTickCount64();

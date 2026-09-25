@@ -149,6 +149,11 @@ class SwapChainProcessor {
   bool compute_failed_ = false;
   bool compute_verified_ = false;
   unsigned verify_content_frames_ = 0;
+  /* Last acquired surface, held so the idle refresh has something current to
+   * convert from. */
+  Microsoft::WRL::ComPtr<ID3D11Texture2D> last_source_;
+  int last_width_ = 0;
+  int last_height_ = 0;
   int verify_fb_width_ = 0;
   int verify_fb_height_ = 0;
 
