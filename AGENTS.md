@@ -160,6 +160,11 @@ Each of these cost real investigation; the evidence is in
   normal desktop damage runs at the full 60 updates/s. Only full screen
   repaints are slow (8 periods, 7.5 fps). Re-measure with
   `msdisp benchsizes`.
+- **Always send the current frame's damage together with the previous
+  frame's.** The chip double buffers and alternates on each transfer, so a
+  region covered by only one transfer shows new content on one refresh and old
+  on the next. This is what `pending_damage_[2]` is for; dropping the union
+  was tried and regressed the picture.
 - **Any partial update must be tracked per chip buffer.** The chip alternates
   between two frame buffers on every transfer, so a partial write lands in one
   and leaves the other stale, and they flicker alternately on screen. This is
@@ -197,6 +202,15 @@ Each of these cost real investigation; the evidence is in
   monitor classified into the WMI path but there is still nothing behind it;
   the switch is kept as `ReportAsInternal` for anyone who adds a kernel
   filter later. Brightness is delivered by `msbright` instead.
+
+## Known unresolved
+
+Small text shimmers on the panel. Five plausible causes were implemented and
+measured away; `docs/troubleshooting.md` lists them so they are not retried.
+The remaining suspect is that the chip displays progressively during a
+transfer, which would make the occasional whole-screen update the OS asks for
+visible as a sweep. Settling it needs a USB capture of the vendor driver, per
+`AGENT_PROMPT.md` section 9.
 
 ## Rules that are easy to violate
 

@@ -194,3 +194,43 @@ hits.
 Teardown does cancel any USB transfer in flight rather than waiting for it, via
 `WinUsb_AbortPipe`. Without that, a full frame occupies the bus for over a
 hundred milliseconds and a stop request would genuinely block for that long.
+
+## Text shimmer: unresolved
+
+Small text, particularly in File Explorer, shimmers on the USB panel. The
+following were each implemented, measured and ruled out, so anyone picking
+this up can skip them:
+
+| Hypothesis | Test | Result |
+|---|---|---|
+| GPU and CPU conversion paths disagree | disabled the GPU path entirely | still shimmers |
+| SIMD and scalar disagree by rounding | unified all three paths to identical 15 bit arithmetic, verified byte-identical | still shimmers |
+| One transfer reaches only one of the chip's two frame buffers | sent every update twice | still shimmers |
+| The two buffers sit one update apart | restored the reference driver's union of current and previous damage | still shimmers |
+| The idle refresh paints a recycled surface | driver now keeps its own desktop copy | still shimmers |
+
+What was learned along the way, and is worth knowing:
+
+- `IddCxSwapChainGetDirtyRects` sometimes reports a single rectangle covering
+  the whole screen even when little has changed. Those updates cost 125 ms on
+  the wire, and the chip appears to display progressively as data arrives
+  rather than swapping a completed frame, so a full screen transfer is visible
+  as a sweep. This is the most likely remaining explanation and it is not
+  something the driver can avoid by tracking damage better.
+- The vendor protocol has a `TRIGGER_FRAME` sub-operation, `0x00`, taking a
+  buffer index and a delay. It is present in the vendor's own Linux driver but
+  commented out. If the chip can be told to hold display until a transfer
+  completes, that command is where to look.
+
+The tool for settling it is the one `AGENT_PROMPT.md` section 9 recommends and
+which has not been used here: capture the vendor driver's USB traffic while
+text redraws, and diff it against ours. That will show directly whether the
+vendor sends something we do not, most likely around `TRIGGER_FRAME`.
+
+## Recovering a wedged chip
+
+If a bulk transfer times out, the WinUSB pipe stays stalled and every later
+write fails with the same error, leaving the panel dark permanently. The
+driver now aborts and resets the pipe on any failed write, and reprograms the
+chip after three consecutive failures. Before that fix the only recovery was
+to replug the dongle.
