@@ -868,8 +868,7 @@ bool SwapChainProcessor::ProcessFrame(
       pending_damage_[0] = MergeRects(pending_damage_[0], damage);
       pending_damage_[1] = MergeRects(pending_damage_[1], damage);
     }
-    to_send =
-        AlignDamageRect(pending_damage_[frame_index_], fb_width, fb_height);
+    to_send = AlignDamageRect(pending_damage_[0], fb_width, fb_height);
   }
   if (to_send.empty()) {
     return true;
@@ -884,23 +883,12 @@ bool SwapChainProcessor::ProcessFrame(
   }
 
   if (!superseded.empty()) {
-    /* A queued frame was taken back before it reached the chip. Two things
-     * follow, and missing either shows up as the picture alternating between
-     * two versions of itself.
-     *
-     * The parity was advanced when that frame was submitted, on the
-     * assumption it would be transmitted. It never was, so the chip's next
-     * buffer is still the one that frame was meant to fill: step back.
-     *
-     * And the damage it carried was cleared from that buffer's pending set at
-     * the same time, so restore it, otherwise the region stays stale there
-     * forever. */
+    /* A queued frame was taken back before it reached the chip, so the region
+     * it covered is still stale there and this frame has to carry it too. */
     std::lock_guard<std::mutex> damage_lock(damage_mutex_);
-    frame_index_ = 1 - frame_index_;
-    pending_damage_[frame_index_] =
-        MergeRects(pending_damage_[frame_index_], superseded);
-    to_send =
-        AlignDamageRect(pending_damage_[frame_index_], fb_width, fb_height);
+    pending_damage_[0] = MergeRects(pending_damage_[0], superseded);
+    to_send = AlignDamageRect(MergeRects(to_send, superseded), fb_width,
+                              fb_height);
     if (to_send.empty()) {
       sender_->Cancel(transfer);
       return true;
@@ -1062,13 +1050,25 @@ bool SwapChainProcessor::ProcessFrame(
     }
   }
 
-  sender_->Submit(transfer, length, to_send);
+  /* Sent twice so both of the chip's frame buffers receive it.
+   *
+   * Tracking what each buffer owes separately and sending once, which is what
+   * the Linux driver does, keeps the two buffers permanently one update apart.
+   * That is invisible for a region that changes and then settles, but any
+   * region redrawn on consecutive frames, such as text being rendered, ends up
+   * holding two different versions that alternate on screen. Paying a second
+   * transfer removes the whole class of problem: after every update the two
+   * buffers are identical.
+   *
+   * The cost is real but small. Transfers are quantised to the chip's 60 Hz
+   * boundary, so an update that fits in one period now takes two, giving 30
+   * updates per second rather than 60. */
+  sender_->Submit(transfer, length, to_send, true);
 
   {
-    /* This buffer is now up to date; the other still owes the same damage. */
     std::lock_guard<std::mutex> damage_lock(damage_mutex_);
-    pending_damage_[frame_index_] = EmptyRect();
-    frame_index_ = 1 - frame_index_;
+    pending_damage_[0] = EmptyRect();
+    pending_damage_[1] = EmptyRect();
   }
   last_send_ms_ = now_ms;
 
@@ -1118,12 +1118,8 @@ bool SwapChainProcessor::SendRefresh(bool whole_screen) {
   if (!transfer) {
     return false;
   }
-  if (!superseded.empty()) {
-    /* The displaced frame's content is covered by a full repaint, but its
-     * transfer never happened, so the chip's buffer parity did not advance. */
-    std::lock_guard<std::mutex> damage_lock(damage_mutex_);
-    frame_index_ = 1 - frame_index_;
-  }
+  /* A full repaint covers whatever the displaced frame was carrying. */
+  (void)superseded;
 
   PictureAdjust adjust;
   if (ddc_) {
