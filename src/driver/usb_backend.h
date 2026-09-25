@@ -38,9 +38,17 @@ namespace ms912x {
 class WdfUsbBackend : public Transport {
  public:
   /* Creates the USB target for `device` and locates the bulk OUT pipe.
-   * Call from EvtDevicePrepareHardware. */
-  static std::unique_ptr<WdfUsbBackend> Create(WDFDEVICE device,
-                                               std::string* error);
+   * Call from EvtDevicePrepareHardware.
+   *
+   * Returns a distinct NTSTATUS per failure point, because that value is what
+   * surfaces in the DriverFrameworks-UserMode event log and is otherwise the
+   * only visibility into why a UMDF device refuses to start:
+   *   STATUS_DEVICE_CONFIGURATION_ERROR  target creation
+   *   STATUS_NO_SUCH_DEVICE              interface 0 unavailable
+   *   STATUS_INVALID_DEVICE_STATE        no configured pipes
+   *   STATUS_NOT_FOUND                   no bulk OUT pipe on endpoint 4 */
+  static NTSTATUS Create(WDFDEVICE device,
+                         std::unique_ptr<WdfUsbBackend>* out);
 
   std::string Describe() const override;
   bool HasDataPlane() const override { return bulk_pipe_ != nullptr; }

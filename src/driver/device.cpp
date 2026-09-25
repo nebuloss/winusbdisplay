@@ -503,10 +503,10 @@ NTSTATUS IndirectDevice::PrepareHardware() {
    * unique turns "problem code 10" into an exact diagnosis. */
 
   /* Data plane: the bulk pixel pipe on the interface we are bound to. */
-  std::unique_ptr<WdfUsbBackend> data =
-      WdfUsbBackend::Create(wdf_device_, &error);
-  if (!data) {
-    return STATUS_DEVICE_CONFIGURATION_ERROR; /* 0xC0000182 */
+  std::unique_ptr<WdfUsbBackend> data;
+  NTSTATUS usb_status = WdfUsbBackend::Create(wdf_device_, &data);
+  if (!NT_SUCCESS(usb_status)) {
+    return usb_status; /* already distinct per failure point */
   }
 
   /* Control plane: the sibling HID interface of the same physical dongle.

@@ -14,44 +14,35 @@ constexpr ULONG kBulkTimeoutMs = 5000;
 
 }  // namespace
 
-std::unique_ptr<WdfUsbBackend> WdfUsbBackend::Create(WDFDEVICE device,
-                                                     std::string* error) {
+NTSTATUS WdfUsbBackend::Create(WDFDEVICE device,
+                               std::unique_ptr<WdfUsbBackend>* out) {
   std::unique_ptr<WdfUsbBackend> backend(new WdfUsbBackend());
 
   WDF_USB_DEVICE_CREATE_CONFIG create_config;
   WDF_USB_DEVICE_CREATE_CONFIG_INIT(&create_config,
                                     USBD_CLIENT_CONTRACT_VERSION_602);
   NTSTATUS status = WdfUsbTargetDeviceCreateWithParameters(
-      device, &create_config, WDF_NO_OBJECT_ATTRIBUTES,
-      &backend->usb_device_);
+      device, &create_config, WDF_NO_OBJECT_ATTRIBUTES, &backend->usb_device_);
   if (!NT_SUCCESS(status)) {
-    if (error) {
-      char buf[96];
-      _snprintf_s(buf, sizeof(buf), _TRUNCATE,
-                  "WdfUsbTargetDeviceCreateWithParameters: 0x%08X", status);
-      *error = buf;
-    }
-    return nullptr;
+    return STATUS_DEVICE_CONFIGURATION_ERROR;
   }
 
-  WDF_USB_DEVICE_SELECT_CONFIG_PARAMS config_params;
-  WDF_USB_DEVICE_SELECT_CONFIG_PARAMS_INIT_SINGLE_INTERFACE(&config_params);
-  status = WdfUsbTargetDeviceSelectConfig(
-      backend->usb_device_, WDF_NO_OBJECT_ATTRIBUTES, &config_params);
-  if (!NT_SUCCESS(status)) {
-    if (error) {
-      char buf[96];
-      _snprintf_s(buf, sizeof(buf), _TRUNCATE,
-                  "WdfUsbTargetDeviceSelectConfig: 0x%08X", status);
-      *error = buf;
-    }
-    return nullptr;
+  /* Deliberately no WdfUsbTargetDeviceSelectConfig here. Under UMDF the
+   * WinUsb dispatcher has already selected the configuration and configured
+   * the pipes; a driver that calls SelectConfig itself fails to start. Just
+   * pick up the interface the framework configured for us. */
+  backend->usb_interface_ = WdfUsbTargetDeviceGetInterface(
+      backend->usb_device_, 0);
+  if (!backend->usb_interface_) {
+    return STATUS_NO_SUCH_DEVICE;
   }
-  backend->usb_interface_ =
-      config_params.Types.SingleInterface.ConfiguredUsbInterface;
 
   const BYTE pipe_count =
-      config_params.Types.SingleInterface.NumberConfiguredPipes;
+      WdfUsbInterfaceGetNumConfiguredPipes(backend->usb_interface_);
+  if (pipe_count == 0) {
+    return STATUS_INVALID_DEVICE_STATE;
+  }
+
   for (BYTE i = 0; i < pipe_count; ++i) {
     WDF_USB_PIPE_INFORMATION info;
     WDF_USB_PIPE_INFORMATION_INIT(&info);
@@ -76,16 +67,11 @@ std::unique_ptr<WdfUsbBackend> WdfUsbBackend::Create(WDFDEVICE device,
   }
 
   if (!backend->bulk_pipe_) {
-    if (error) {
-      char buf[96];
-      _snprintf_s(buf, sizeof(buf), _TRUNCATE,
-                  "no bulk OUT pipe on endpoint %u among %u pipes",
-                  kBulkOutEndpoint, pipe_count);
-      *error = buf;
-    }
-    return nullptr;
+    return STATUS_NOT_FOUND;
   }
-  return backend;
+
+  *out = std::move(backend);
+  return STATUS_SUCCESS;
 }
 
 std::string WdfUsbBackend::Describe() const {
