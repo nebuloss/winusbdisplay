@@ -758,62 +758,105 @@ bool SwapChainProcessor::ProcessFrame(
     return true;
   }
 
-  LARGE_INTEGER t_begin, t_copied, t_mapped, t_converted, qpc_freq;
+  LARGE_INTEGER t_begin, t_converted, qpc_freq;
   QueryPerformanceFrequency(&qpc_freq);
   QueryPerformanceCounter(&t_begin);
-
-  /* Copy only the damaged region out of the GPU. */
-  D3D11_BOX box = {};
-  box.left = static_cast<UINT>(to_send.x1);
-  box.top = static_cast<UINT>(to_send.y1);
-  box.front = 0;
-  box.right = static_cast<UINT>(to_send.x2);
-  box.bottom = static_cast<UINT>(to_send.y2);
-  box.back = 1;
-  d3d_context_->CopySubresourceRegion(staging_.Get(), 0, box.left, box.top, 0,
-                                      source.Get(), 0, &box);
-
-  QueryPerformanceCounter(&t_copied);
-
-  D3D11_MAPPED_SUBRESOURCE mapped = {};
-  if (FAILED(d3d_context_->Map(staging_.Get(), 0, D3D11_MAP_READ, 0,
-                               &mapped))) {
-    sender_->Cancel(transfer);
-    return false;
-  }
-  QueryPerformanceCounter(&t_mapped);
 
   PictureAdjust adjust;
   if (ddc_) {
     adjust.brightness = ddc_->brightness();
     adjust.contrast = ddc_->contrast();
   }
-  const size_t length =
-      FrameRect(transfer->data(), transfer->size(),
-                static_cast<const uint8_t*>(mapped.pData), mapped.RowPitch,
-                fb_width, fb_height, to_send, adjust);
-  QueryPerformanceCounter(&t_converted);
-  d3d_context_->Unmap(staging_.Get(), 0);
 
+  const size_t row_bytes = static_cast<size_t>(to_send.width()) * 2;
+  const size_t pixel_bytes = row_bytes * to_send.height();
+  const size_t length = pixel_bytes + kFrameOverhead;
+  if (transfer->size() < length) {
+    sender_->Cancel(transfer);
+    return false;
+  }
+
+  bool converted = false;
+  bool used_gpu = false;
+
+  if (EnsureCompute()) {
+    /* Check the two paths agree before trusting the GPU one. */
+    if (!compute_verified_) {
+      VerifyGpuAgainstCpu(source.Get(), to_send, adjust);
+    }
+    if (compute_ready_) {
+      converted = ConvertOnGpu(source.Get(), to_send, adjust,
+                               transfer->data() + kFrameHeaderSize,
+                               transfer->size() - kFrameOverhead);
+      used_gpu = converted;
+      if (!converted) {
+        Log("compute: conversion failed, falling back to the CPU path");
+        compute_ready_ = false;
+        compute_failed_ = true;
+      }
+    }
+  }
+
+  if (!converted) {
+    /* CPU path: copy the damage out of the GPU, then convert while reading
+     * the mapped staging texture. */
+    if (!EnsureStaging(source_desc.Width, source_desc.Height)) {
+      sender_->Cancel(transfer);
+      return false;
+    }
+    D3D11_BOX box = {};
+    box.left = static_cast<UINT>(to_send.x1);
+    box.top = static_cast<UINT>(to_send.y1);
+    box.front = 0;
+    box.right = static_cast<UINT>(to_send.x2);
+    box.bottom = static_cast<UINT>(to_send.y2);
+    box.back = 1;
+    d3d_context_->CopySubresourceRegion(staging_.Get(), 0, box.left, box.top,
+                                        0, source.Get(), 0, &box);
+
+    D3D11_MAPPED_SUBRESOURCE mapped = {};
+    if (FAILED(d3d_context_->Map(staging_.Get(), 0, D3D11_MAP_READ, 0,
+                                 &mapped))) {
+      sender_->Cancel(transfer);
+      return false;
+    }
+    const size_t produced =
+        FrameRect(transfer->data(), transfer->size(),
+                  static_cast<const uint8_t*>(mapped.pData), mapped.RowPitch,
+                  fb_width, fb_height, to_send, adjust);
+    d3d_context_->Unmap(staging_.Get(), 0);
+    if (produced == 0) {
+      sender_->Cancel(transfer);
+      return false;
+    }
+  } else {
+    /* The GPU wrote the pixels straight into the transfer buffer; the header
+     * and footer are still ours to add. */
+    FrameUpdateHeader header;
+    PutBe16(header.marker_be, kFrameMarker);
+    PutBe24(header.position,
+            ((static_cast<uint32_t>(to_send.x1) & 0xFFF) << 12) |
+                (static_cast<uint32_t>(to_send.y1) & 0xFFF));
+    PutBe24(header.dimensions,
+            ((static_cast<uint32_t>(to_send.width()) & 0xFFF) << 12) |
+                (static_cast<uint32_t>(to_send.height()) & 0xFFF));
+    memcpy(transfer->data(), &header, sizeof(header));
+    memcpy(transfer->data() + kFrameHeaderSize + pixel_bytes, kFrameFooter,
+           kFrameFooterSize);
+  }
+
+  QueryPerformanceCounter(&t_converted);
   {
-    /* Break the per-frame cost down: a fixed overhead that does not scale
-     * with the damage area points at the GPU readback, not the conversion. */
     static ULONGLONG last_phase_log = 0;
     const ULONGLONG phase_now = GetTickCount64();
     if (phase_now - last_phase_log >= 30000) {
       last_phase_log = phase_now;
       const double to_us = 1000000.0 / qpc_freq.QuadPart;
-      Log("phases: copy=%.0fus map=%.0fus convert=%.0fus  %dx%d (%zu bytes)",
-          (t_copied.QuadPart - t_begin.QuadPart) * to_us,
-          (t_mapped.QuadPart - t_copied.QuadPart) * to_us,
-          (t_converted.QuadPart - t_mapped.QuadPart) * to_us,
-          to_send.width(), to_send.height(), length);
+      Log("phases: %s convert=%.0fus  %dx%d (%zu bytes)",
+          used_gpu ? "gpu" : "cpu",
+          (t_converted.QuadPart - t_begin.QuadPart) * to_us, to_send.width(),
+          to_send.height(), length);
     }
-  }
-
-  if (length == 0) {
-    sender_->Cancel(transfer);
-    return false;
   }
 
   sender_->Submit(transfer, length);
