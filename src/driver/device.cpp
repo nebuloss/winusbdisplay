@@ -951,6 +951,46 @@ bool SwapChainProcessor::ProcessFrame(
     }
   }
 
+  if (cursor_active_) {
+    /* The cursor thread composites the pointer over a clean copy of the
+     * desktop, so it needs one that never has the pointer baked in. Keeping
+     * it here costs a copy of the damaged region per frame, which is far
+     * cheaper than routing every mouse movement through the compositor. */
+    if (EnsureStaging(source_desc.Width, source_desc.Height)) {
+      D3D11_BOX box = {};
+      box.left = static_cast<UINT>(to_send.x1);
+      box.top = static_cast<UINT>(to_send.y1);
+      box.front = 0;
+      box.right = static_cast<UINT>(to_send.x2);
+      box.bottom = static_cast<UINT>(to_send.y2);
+      box.back = 1;
+      d3d_context_->CopySubresourceRegion(staging_.Get(), 0, box.left, box.top,
+                                          0, source.Get(), 0, &box);
+
+      D3D11_MAPPED_SUBRESOURCE snapshot = {};
+      if (SUCCEEDED(d3d_context_->Map(staging_.Get(), 0, D3D11_MAP_READ, 0,
+                                      &snapshot))) {
+        std::lock_guard<std::mutex> lock(cursor_mutex_);
+        if (desktop_width_ != fb_width || desktop_height_ != fb_height) {
+          desktop_width_ = fb_width;
+          desktop_height_ = fb_height;
+          desktop_stride_ = static_cast<size_t>(fb_width) * 4;
+          desktop_copy_.assign(desktop_stride_ * fb_height, 0);
+        }
+        for (int y = to_send.y1; y < to_send.y2; ++y) {
+          memcpy(desktop_copy_.data() + static_cast<size_t>(y) *
+                                            desktop_stride_ +
+                     static_cast<size_t>(to_send.x1) * 4,
+                 static_cast<const uint8_t*>(snapshot.pData) +
+                     static_cast<size_t>(y) * snapshot.RowPitch +
+                     static_cast<size_t>(to_send.x1) * 4,
+                 static_cast<size_t>(to_send.width()) * 4);
+        }
+        d3d_context_->Unmap(staging_.Get(), 0);
+      }
+    }
+  }
+
   if (!converted) {
     /* CPU path: copy the damage out of the GPU, then convert while reading
      * the mapped staging texture. */
