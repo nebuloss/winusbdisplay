@@ -2,6 +2,8 @@
 
 #include "ms912x_convert.h"
 
+#include <emmintrin.h>
+
 #include <climits>
 #include <cstring>
 
@@ -78,7 +80,8 @@ Rect AlignDamageRect(const Rect& rect, int fb_width, int fb_height) {
   return out;
 }
 
-void ConvertRowXrgbToUyvy(uint8_t* dst, const uint8_t* src, int width) {
+void ConvertRowXrgbToUyvyScalar(uint8_t* dst, const uint8_t* src,
+                                int width) {
   for (int i = 0; i + 1 < width; i += 2) {
     const uint8_t* p1 = src + static_cast<size_t>(i) * 4;
     const uint8_t* p2 = p1 + 4;
@@ -166,6 +169,113 @@ void FillColourBars(uint8_t* dst, size_t stride, int width, int height) {
       row[x * 4 + 3] = 0xFF;
     }
   }
+}
+
+
+namespace {
+
+/* The scalar path uses 16-bit fixed point, but 32904 does not fit in the
+ * signed 16-bit lanes _mm_madd_epi16 needs, so the SIMD path halves every
+ * coefficient and shifts by 15 instead of 16. */
+constexpr int16_t kYb = 3196, kYg = 16452, kYr = 8382;
+constexpr int16_t kUb = 14336, kUg = -9498, kUr = -4838;
+constexpr int16_t kVb = -2332, kVg = -12005, kVr = 14336;
+
+/* Horizontal pairwise add: lanes 0 and 2 of the result hold the two dot
+ * products. SSE2 only, so no _mm_hadd_epi32. */
+inline __m128i PairSum(__m128i v) {
+  return _mm_add_epi32(v, _mm_shuffle_epi32(v, _MM_SHUFFLE(3, 3, 1, 1)));
+}
+
+inline void DotPair(__m128i pixels, __m128i coeff, int* out0, int* out1) {
+  __m128i summed = PairSum(_mm_madd_epi16(pixels, coeff));
+  alignas(16) int lanes[4];
+  _mm_store_si128(reinterpret_cast<__m128i*>(lanes), summed);
+  *out0 = lanes[0];
+  *out1 = lanes[2];
+}
+
+inline uint8_t Clamp8(int value) {
+  if (value < 0) {
+    return 0;
+  }
+  if (value > 255) {
+    return 255;
+  }
+  return static_cast<uint8_t>(value);
+}
+
+}  // namespace
+
+void ConvertRowXrgbToUyvySimd(uint8_t* dst, const uint8_t* src, int width) {
+  /* Memory order is B, G, R, X, so the coefficient lanes follow that order. */
+  const __m128i y_coeff = _mm_setr_epi16(kYb, kYg, kYr, 0, kYb, kYg, kYr, 0);
+  const __m128i u_coeff = _mm_setr_epi16(kUb, kUg, kUr, 0, kUb, kUg, kUr, 0);
+  const __m128i v_coeff = _mm_setr_epi16(kVb, kVg, kVr, 0, kVb, kVg, kVr, 0);
+  const __m128i zero = _mm_setzero_si128();
+
+  int i = 0;
+  for (; i + 3 < width; i += 4) {
+    __m128i raw = _mm_loadu_si128(
+        reinterpret_cast<const __m128i*>(src + static_cast<size_t>(i) * 4));
+    __m128i lo = _mm_unpacklo_epi8(raw, zero);  /* pixels 0 and 1 */
+    __m128i hi = _mm_unpackhi_epi8(raw, zero);  /* pixels 2 and 3 */
+
+    int y0, y1, y2, y3, u0, u1, u2, u3, v0, v1, v2, v3;
+    DotPair(lo, y_coeff, &y0, &y1);
+    DotPair(hi, y_coeff, &y2, &y3);
+    DotPair(lo, u_coeff, &u0, &u1);
+    DotPair(hi, u_coeff, &u2, &u3);
+    DotPair(lo, v_coeff, &v0, &v1);
+    DotPair(hi, v_coeff, &v2, &v3);
+
+    dst[0] = Clamp8(128 + (((u0 >> 15) + (u1 >> 15)) / 2));
+    dst[1] = Clamp8(16 + (y0 >> 15));
+    dst[2] = Clamp8(128 + (((v0 >> 15) + (v1 >> 15)) / 2));
+    dst[3] = Clamp8(16 + (y1 >> 15));
+    dst[4] = Clamp8(128 + (((u2 >> 15) + (u3 >> 15)) / 2));
+    dst[5] = Clamp8(16 + (y2 >> 15));
+    dst[6] = Clamp8(128 + (((v2 >> 15) + (v3 >> 15)) / 2));
+    dst[7] = Clamp8(16 + (y3 >> 15));
+    dst += 8;
+  }
+
+  if (i < width) {
+    ConvertRowXrgbToUyvyScalar(dst, src + static_cast<size_t>(i) * 4,
+                               width - i);
+  }
+}
+
+void ConvertRowXrgbToUyvy(uint8_t* dst, const uint8_t* src, int width) {
+  /* SSE2 is part of the x64 baseline, so no runtime check is needed. */
+  ConvertRowXrgbToUyvySimd(dst, src, width);
+}
+
+int ConvertSelfTest(int width, int iterations) {
+  std::vector<uint8_t> source(static_cast<size_t>(width) * 4);
+  std::vector<uint8_t> a(static_cast<size_t>(width) * 2);
+  std::vector<uint8_t> b(static_cast<size_t>(width) * 2);
+
+  uint32_t seed = 12345;
+  int worst = 0;
+  for (int iter = 0; iter < iterations; ++iter) {
+    for (size_t i = 0; i < source.size(); ++i) {
+      seed = seed * 1664525u + 1013904223u;
+      source[i] = static_cast<uint8_t>(seed >> 24);
+    }
+    ConvertRowXrgbToUyvyScalar(a.data(), source.data(), width);
+    ConvertRowXrgbToUyvySimd(b.data(), source.data(), width);
+    for (size_t i = 0; i < a.size(); ++i) {
+      int diff = static_cast<int>(a[i]) - static_cast<int>(b[i]);
+      if (diff < 0) {
+        diff = -diff;
+      }
+      if (diff > worst) {
+        worst = diff;
+      }
+    }
+  }
+  return worst;
 }
 
 }  // namespace ms912x

@@ -44,9 +44,23 @@ size_t FrameRect(uint8_t* dst, size_t dst_capacity, const uint8_t* src,
                  size_t src_stride, int fb_width, int fb_height,
                  const Rect& rect);
 
-/* Scalar reference conversion of one row. Exposed so an optimised path can be
- * diffed against it. */
+/* Converts one row. Dispatches to the SIMD path when the CPU supports it.
+ *
+ * A scalar loop cannot keep up at 1080p: it costs tens of milliseconds per
+ * full frame on the IddCx processing thread, which shows up directly as lag. */
 void ConvertRowXrgbToUyvy(uint8_t* dst, const uint8_t* src, int width);
+
+/* Scalar reference implementation, kept so the optimised path can be diffed
+ * against it. See ConvertSelfTest. */
+void ConvertRowXrgbToUyvyScalar(uint8_t* dst, const uint8_t* src, int width);
+
+/* SSE2 implementation. Uses coefficients halved to fit the 16-bit multiply,
+ * so results may differ from the scalar path by one least significant bit. */
+void ConvertRowXrgbToUyvySimd(uint8_t* dst, const uint8_t* src, int width);
+
+/* Compares the two paths over pseudo-random pixels. Returns the largest
+ * absolute difference found, and 0 when they agree exactly. */
+int ConvertSelfTest(int width, int iterations);
 
 /* Fills a full-frame XRGB8888 buffer with SMPTE-ish colour bars. */
 void FillColourBars(uint8_t* dst, size_t stride, int width, int height);
