@@ -101,7 +101,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Inf Include="..\..\inf\ms912x_iddcx.inf" />
+    <Inf Include="..\..\inf\ms912xidd.inf" />
   </ItemGroup>
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
