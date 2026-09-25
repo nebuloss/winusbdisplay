@@ -336,7 +336,11 @@ size_t FrameRect(uint8_t* dst, size_t dst_capacity, const uint8_t* src,
         }
       });
 
-  memcpy(out, kFrameFooter, kFrameFooterSize);
+  /* The footer sits immediately after the pixel data. `out` is deliberately
+   * const now that rows are written by index, so compute the end explicitly
+   * rather than relying on a pointer the loop used to advance. */
+  memcpy(out + row_bytes * static_cast<size_t>(rect.height()), kFrameFooter,
+         kFrameFooterSize);
   return needed;
 }
 
