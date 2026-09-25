@@ -92,8 +92,9 @@ void main(uint3 id : SV_DispatchThreadID)
     int y0 = AdjustLuma(RgbToY(first));
     int y1 = AdjustLuma(RgbToY(second));
     // U and V are averaged across the pair, matching the CPU path.
-    int u = AdjustChroma((RgbToU(first) + RgbToU(second)) / 2);
-    int v = AdjustChroma((RgbToV(first) + RgbToV(second)) / 2);
+    // Unsigned halving, matching the CPU path and avoiding a signed divide.
+    int u = AdjustChroma(int((uint(RgbToU(first)) + uint(RgbToU(second))) >> 1));
+    int v = AdjustChroma(int((uint(RgbToV(first)) + uint(RgbToV(second))) >> 1));
 
     // Little endian byte order in the dword gives U Y0 V Y1 in memory.
     uint packed = uint(u) | (uint(y0) << 8) | (uint(v) << 16) | (uint(y1) << 24);
