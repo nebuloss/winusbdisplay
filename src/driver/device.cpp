@@ -1050,20 +1050,11 @@ bool SwapChainProcessor::ProcessFrame(
     }
   }
 
-  /* Sent twice so both of the chip's frame buffers receive it.
-   *
-   * Tracking what each buffer owes separately and sending once, which is what
-   * the Linux driver does, keeps the two buffers permanently one update apart.
-   * That is invisible for a region that changes and then settles, but any
-   * region redrawn on consecutive frames, such as text being rendered, ends up
-   * holding two different versions that alternate on screen. Paying a second
-   * transfer removes the whole class of problem: after every update the two
-   * buffers are identical.
-   *
-   * The cost is real but small. Transfers are quantised to the chip's 60 Hz
-   * boundary, so an update that fits in one period now takes two, giving 30
-   * updates per second rather than 60. */
-  sender_->Submit(transfer, length, to_send, true);
+  /* Once is enough. Sending every update twice, so both of the chip's frame
+   * buffers hold identical content, was tried and did not remove the text
+   * shimmer, so whatever the chip does with its second buffer is not the
+   * cause and the extra transfer was pure cost. */
+  sender_->Submit(transfer, length, to_send);
 
   {
     std::lock_guard<std::mutex> damage_lock(damage_mutex_);

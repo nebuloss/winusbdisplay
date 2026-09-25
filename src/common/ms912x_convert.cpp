@@ -17,16 +17,40 @@
 namespace ms912x {
 namespace {
 
+/* Fixed point BT.601 limited range, in 15 bit rather than the 16 bit the
+ * reference implementations use.
+ *
+ * The reason is consistency rather than precision. _mm_madd_epi16 needs
+ * coefficients to fit in a signed 16 bit lane and 32904 does not, so the SIMD
+ * path has to halve them and shift by 15. Leaving the scalar path on the
+ * original 16 bit constants makes the two disagree by one least significant
+ * bit, and since the SIMD path handles whole groups of eight pixels while the
+ * scalar path handles the remainder, which pixels fall to which depends on the
+ * width of the damage rectangle. A region redrawn at slightly different widths
+ * then alternates between two values, and on text that is visible as a shimmer.
+ *
+ * Every path here, scalar, SIMD and the compute shader, now uses exactly these
+ * constants, so the same pixel always converts to the same bytes. */
+constexpr int kYr = 8382, kYg = 16452, kYb = 3196;
+constexpr int kUr = -4838, kUg = -9498, kUb = 14336;
+constexpr int kVr = 14336, kVg = -12005, kVb = -2332;
+
 inline unsigned RgbToY(unsigned r, unsigned g, unsigned b) {
-  return ((16u << 16) + 16763u * r + 32904u * g + 6391u * b) >> 16;
+  return static_cast<unsigned>(
+      16 + ((kYr * static_cast<int>(r) + kYg * static_cast<int>(g) +
+             kYb * static_cast<int>(b)) >> 15));
 }
 
 inline unsigned RgbToU(unsigned r, unsigned g, unsigned b) {
-  return ((128u << 16) - 9676u * r - 18996u * g + 28672u * b) >> 16;
+  return static_cast<unsigned>(
+      128 + ((kUr * static_cast<int>(r) + kUg * static_cast<int>(g) +
+              kUb * static_cast<int>(b)) >> 15));
 }
 
 inline unsigned RgbToV(unsigned r, unsigned g, unsigned b) {
-  return ((128u << 16) + 28672u * r - 24009u * g - 4663u * b) >> 16;
+  return static_cast<unsigned>(
+      128 + ((kVr * static_cast<int>(r) + kVg * static_cast<int>(g) +
+              kVb * static_cast<int>(b)) >> 15));
 }
 
 /* The chip wants the horizontal extent on a multiple of four pixels and the
@@ -383,9 +407,7 @@ namespace {
 /* The scalar path uses 16-bit fixed point, but 32904 does not fit in the
  * signed 16-bit lanes _mm_madd_epi16 needs, so the SIMD path halves every
  * coefficient and shifts by 15 instead of 16. */
-constexpr int16_t kYb = 3196, kYg = 16452, kYr = 8382;
-constexpr int16_t kUb = 14336, kUg = -9498, kUr = -4838;
-constexpr int16_t kVb = -2332, kVg = -12005, kVr = 14336;
+/* Same constants as the scalar path above, narrowed for the 16 bit lanes. */
 
 /* Horizontally adds the two dot products in a madd result and returns them in
  * lanes 0 and 1. Staying in registers matters: an earlier version wrote the
@@ -412,9 +434,18 @@ inline __m128i ScaleAndBias(__m128i value, int bias) {
 
 void ConvertRowXrgbToUyvySimd(uint8_t* dst, const uint8_t* src, int width) {
   /* Memory order is B, G, R, X, so the coefficient lanes follow that order. */
-  const __m128i y_coeff = _mm_setr_epi16(kYb, kYg, kYr, 0, kYb, kYg, kYr, 0);
-  const __m128i u_coeff = _mm_setr_epi16(kUb, kUg, kUr, 0, kUb, kUg, kUr, 0);
-  const __m128i v_coeff = _mm_setr_epi16(kVb, kVg, kVr, 0, kVb, kVg, kVr, 0);
+  const __m128i y_coeff = _mm_setr_epi16(
+      static_cast<int16_t>(kYb), static_cast<int16_t>(kYg),
+      static_cast<int16_t>(kYr), 0, static_cast<int16_t>(kYb),
+      static_cast<int16_t>(kYg), static_cast<int16_t>(kYr), 0);
+  const __m128i u_coeff = _mm_setr_epi16(
+      static_cast<int16_t>(kUb), static_cast<int16_t>(kUg),
+      static_cast<int16_t>(kUr), 0, static_cast<int16_t>(kUb),
+      static_cast<int16_t>(kUg), static_cast<int16_t>(kUr), 0);
+  const __m128i v_coeff = _mm_setr_epi16(
+      static_cast<int16_t>(kVb), static_cast<int16_t>(kVg),
+      static_cast<int16_t>(kVr), 0, static_cast<int16_t>(kVb),
+      static_cast<int16_t>(kVg), static_cast<int16_t>(kVr), 0);
   const __m128i zero = _mm_setzero_si128();
   const __m128i ones = _mm_set1_epi16(1);
 
