@@ -97,7 +97,8 @@ class SwapChainProcessor {
  public:
   SwapChainProcessor(IDDCX_SWAPCHAIN swapchain, LUID render_adapter,
                      HANDLE new_frame_event, Device* device,
-                     FrameSender* sender, const Mode& mode, DdcCiSlave* ddc);
+                     FrameSender* sender, const Mode& mode, DdcCiSlave* ddc,
+                     IDDCX_MONITOR monitor);
   ~SwapChainProcessor();
 
   /* D3D is initialised on the calling thread, so a failure can be reported
@@ -132,6 +133,21 @@ class SwapChainProcessor {
    * panel blanks if it stops receiving data, and when the desktop is static
    * the OS stops presenting entirely, so no frame ever arrives to trigger a
    * normal update. */
+  /* Cursor handling.
+   *
+   * By default Windows draws the pointer into the desktop image, so every
+   * mouse movement has to travel the whole path: composite, present, acquire,
+   * convert, transmit. Taking the hardware cursor path stops that. Windows
+   * then leaves the pointer out of the image and reports its position on a
+   * separate event, which a dedicated thread can act on immediately.
+   *
+   * The chip has no cursor overlay, so the pointer is still composited here,
+   * but only over the small region it occupies, and without waiting for the
+   * compositor to produce a new desktop frame. */
+  bool SetupCursor();
+  void CursorLoop();
+  bool DrawCursor();
+
   /* Re-sends the picture from the last acquired surface. The panel blanks if
    * it stops receiving data, and when the desktop is static the OS stops
    * presenting, so nothing else would keep it alive. Always sends the whole
@@ -190,6 +206,25 @@ class SwapChainProcessor {
 
   std::thread thread_;
   HANDLE terminate_event_ = nullptr;
+
+  IDDCX_MONITOR monitor_ = nullptr;
+  std::thread cursor_thread_;
+  HANDLE cursor_event_ = nullptr;
+  std::vector<uint8_t> cursor_shape_;
+  std::vector<uint8_t> cursor_scratch_;
+  /* Guards the cached desktop copy the cursor thread composites over. */
+  std::mutex cursor_mutex_;
+  std::vector<uint8_t> desktop_copy_;
+  int desktop_width_ = 0;
+  int desktop_height_ = 0;
+  size_t desktop_stride_ = 0;
+  UINT cursor_shape_id_ = 0;
+  int cursor_width_ = 0;
+  int cursor_height_ = 0;
+  bool cursor_is_alpha_ = false;
+  /* Where the pointer was last drawn, so it can be erased. */
+  Rect cursor_previous_;
+  bool cursor_active_ = false;
 };
 
 /* Per-WDFDEVICE state. */
