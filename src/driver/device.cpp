@@ -26,19 +26,36 @@ const uint16_t kCvbsModes[][3] = {{720, 480, 60}, {720, 576, 50}};
 const uint16_t kYPbPrModes[][3] = {
     {1280, 720, 60}, {1920, 1080, 60}, {720, 480, 60}, {720, 576, 50}};
 
+/* Blanking intervals, roughly CVT reduced blanking. The exact numbers do not
+ * have to match the panel, but the whole structure has to be internally
+ * consistent: pixelRate must equal totalSize.cx * totalSize.cy * vSyncFreq,
+ * and hSyncFreq must equal pixelRate / totalSize.cx. Reporting totalSize
+ * equal to activeSize, as an earlier version did, makes those identities
+ * false and the OS rejects the resulting topology. */
+constexpr UINT32 kHorizontalBlanking = 160;
+constexpr UINT32 kVerticalBlanking = 45;
+
 DISPLAYCONFIG_VIDEO_SIGNAL_INFO MakeSignalInfo(uint16_t width, uint16_t height,
                                                uint16_t hz) {
+  const UINT32 h_total = width + kHorizontalBlanking;
+  const UINT32 v_total = height + kVerticalBlanking;
+
   DISPLAYCONFIG_VIDEO_SIGNAL_INFO info = {};
-  info.totalSize.cx = info.activeSize.cx = width;
-  info.totalSize.cy = info.activeSize.cy = height;
-  info.AdditionalSignalInfo.vSyncFreqDivider = 1;
-  info.AdditionalSignalInfo.videoStandard = 255;
+  info.activeSize.cx = width;
+  info.activeSize.cy = height;
+  info.totalSize.cx = static_cast<UINT32>(h_total);
+  info.totalSize.cy = static_cast<UINT32>(v_total);
+
   info.vSyncFreq.Numerator = hz;
   info.vSyncFreq.Denominator = 1;
-  info.hSyncFreq.Numerator = static_cast<UINT32>(hz) * height;
+  /* Lines per second. */
+  info.hSyncFreq.Numerator = static_cast<UINT32>(hz) * v_total;
   info.hSyncFreq.Denominator = 1;
+  info.pixelRate = static_cast<UINT64>(h_total) * v_total * hz;
+
+  info.AdditionalSignalInfo.videoStandard = 255; /* other */
+  info.AdditionalSignalInfo.vSyncFreqDivider = 1;
   info.scanLineOrdering = DISPLAYCONFIG_SCANLINE_ORDERING_PROGRESSIVE;
-  info.pixelRate = static_cast<UINT64>(hz) * width * height;
   return info;
 }
 
@@ -58,13 +75,12 @@ IDDCX_TARGET_MODE MakeTargetMode(const Mode& mode) {
   out.Size = sizeof(out);
   out.TargetVideoSignalInfo.targetVideoSignalInfo =
       MakeSignalInfo(mode.width, mode.height, mode.hz);
-  /* A vSyncFreqDivider above 1 looks like the right way to tell the OS to
-   * compose less often than the panel refreshes, but Windows then rejects the
-   * whole topology (SetDisplayConfig fails with ERROR_GEN_FAILURE and the
-   * path disappears). Pacing is therefore handled by dropping frames in
-   * FrameSender instead, and by offering genuine low-refresh modes below. */
+  /* The panel runs at vSyncFreq while the OS composes the desktop at
+   * vSyncFreq / vSyncFreqDivider, which is how a link that cannot carry full
+   * rate frames asks for fewer of them. Only valid on target modes; monitor
+   * modes require zero here. */
   out.TargetVideoSignalInfo.targetVideoSignalInfo.AdditionalSignalInfo
-      .vSyncFreqDivider = 1;
+      .vSyncFreqDivider = SyncDividerForMode(mode);
   return out;
 }
 
