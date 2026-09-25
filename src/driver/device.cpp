@@ -2,6 +2,8 @@
 
 #include "device.h"
 
+#include <objbase.h>
+
 #include "log.h"
 
 #include <algorithm>
@@ -630,6 +632,12 @@ void IndirectDevice::CreateMonitor() {
   info.MonitorDescription.Type = IDDCX_MONITOR_DESCRIPTION_TYPE_EDID;
   info.MonitorDescription.DataSize = static_cast<UINT>(edid_.size());
   info.MonitorDescription.pData = edid_.data();
+  /* Also mandatory: IddCxMonitorCreate returns STATUS_INVALID_PARAMETER if the
+   * container id is left as an all-zero GUID. */
+  if (FAILED(CoCreateGuid(&info.MonitorContainerId))) {
+    Log("CreateMonitor: CoCreateGuid failed");
+    return;
+  }
 
   IDARG_IN_MONITORCREATE create = {};
   create.ObjectAttributes = nullptr;
