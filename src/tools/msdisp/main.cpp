@@ -61,6 +61,7 @@ void PrintUsage() {
       "        [--depth N] [--chunk KB]\n"
       "  benchsizes              transfer cost against rect size\n"
       "  flickertest             isolate the chip's partial update behaviour\n"
+      "  staticpattern [--hold N] send fine detail once, then stay silent\n"
       "                          measure sustained bulk throughput\n"
       "  image --mode WxH@Hz --bmp FILE [--no-modeset]\n"
       "                          push a 24 or 32 bit BMP, letterboxed\n"
@@ -683,6 +684,98 @@ int CmdSelfTest() {
  * Phase 2 writes the same block twice before moving on. If phase 1 flickers
  * and phase 2 does not, the two buffer theory is confirmed and the fix is to
  * repeat every partial update. */
+/* Decisive test for where the shimmer comes from.
+ *
+ * Fine one pixel detail, which stresses chroma subsampling exactly the way
+ * antialiased text does, is sent once and then nothing further is
+ * transmitted. If it shimmers with the link completely silent, the chip or
+ * the panel is responsible and no amount of damage tracking will help. If it
+ * is rock steady, the shimmer comes from how the driver repeats updates. */
+int CmdStaticPattern(int argc, char** argv) {
+  int hold_seconds = 20;
+  for (int i = 0; i < argc; ++i) {
+    if (strcmp(argv[i], "--hold") == 0 && i + 1 < argc) {
+      hold_seconds = atoi(argv[++i]);
+    }
+  }
+
+  std::string control_error, data_error;
+  std::unique_ptr<HidTransport> control = HidTransport::Open(&control_error);
+  std::unique_ptr<WinUsbTransport> data = WinUsbTransport::Open(&data_error);
+  if (!control || !data) {
+    fprintf(stderr, "error: %s\n",
+            control ? data_error.c_str() : control_error.c_str());
+    fprintf(stderr, "hint: disable the display driver first\n");
+    return 1;
+  }
+  Device device(std::unique_ptr<Transport>(
+      new CompositeTransport(std::move(control), std::move(data))));
+
+  const Mode* mode = FindMode(1920, 1080, 60);
+  if (!device.PowerOn() || !device.SetResolution(*mode)) {
+    fprintf(stderr, "error: %s\n", device.last_error().c_str());
+    return 1;
+  }
+
+  const size_t stride = static_cast<size_t>(mode->width) * 4;
+  std::vector<uint8_t> framebuffer(stride * mode->height);
+
+  /* Bands of increasingly fine vertical stripes, then a checkerboard. The
+   * one pixel stripes are the worst case for 4:2:2 chroma, which is what
+   * makes coloured text fringe. */
+  for (int y = 0; y < mode->height; ++y) {
+    uint8_t* row = framebuffer.data() + static_cast<size_t>(y) * stride;
+    const int band = y / 135;
+    const int period = band < 4 ? (1 << band) : 1;
+    for (int x = 0; x < mode->width; ++x) {
+      bool on;
+      if (band < 4) {
+        on = ((x / period) & 1) != 0;
+      } else if (band < 6) {
+        on = (((x + y) / period) & 1) != 0;  /* checkerboard */
+      } else {
+        /* Coloured subpixel stripes, closest to how ClearType looks. */
+        const int phase = x % 3;
+        row[x * 4 + 0] = phase == 0 ? 255 : 0;
+        row[x * 4 + 1] = phase == 1 ? 255 : 0;
+        row[x * 4 + 2] = phase == 2 ? 255 : 0;
+        row[x * 4 + 3] = 255;
+        continue;
+      }
+      const uint8_t v = on ? 235 : 16;
+      row[x * 4 + 0] = row[x * 4 + 1] = row[x * 4 + 2] = v;
+      row[x * 4 + 3] = 255;
+    }
+  }
+
+  Rect full;
+  full.x1 = 0;
+  full.y1 = 0;
+  full.x2 = mode->width;
+  full.y2 = mode->height;
+
+  std::vector<uint8_t> transfer(kMaxTransferLen);
+  const size_t length =
+      FrameRect(transfer.data(), transfer.size(), framebuffer.data(), stride,
+                mode->width, mode->height, full);
+  if (!length || !device.SendFrame(transfer.data(), length)) {
+    fprintf(stderr, "error: %s\n", device.last_error().c_str());
+    return 1;
+  }
+
+  printf("Pattern sent once. Nothing further will be transmitted.\n");
+  printf("Watch the panel for %d seconds.\n\n", hold_seconds);
+  printf("  shimmering  -> the chip or panel causes it, not the driver\n");
+  printf("  rock steady -> the driver's repeated updates cause it\n\n");
+  for (int i = hold_seconds; i > 0; --i) {
+    printf("\r  %2d seconds remaining, link silent ", i);
+    fflush(stdout);
+    Sleep(1000);
+  }
+  printf("\r  done                                \n");
+  return 0;
+}
+
 int CmdFlickerTest() {
   std::string control_error, data_error;
   std::unique_ptr<HidTransport> control = HidTransport::Open(&control_error);
@@ -1061,6 +1154,9 @@ int main(int argc, char** argv) {
   }
   if (strcmp(command, "selftest") == 0) {
     return CmdSelfTest();
+  }
+  if (strcmp(command, "staticpattern") == 0) {
+    return CmdStaticPattern(rest_argc, rest_argv);
   }
   if (strcmp(command, "flickertest") == 0) {
     return CmdFlickerTest();
