@@ -52,9 +52,18 @@ function Get-KitTool([string]$name) {
 Assert-Elevated
 
 $root    = Split-Path -Parent $PSScriptRoot
-$infDir  = Join-Path $root 'inf'
-$infPath = Join-Path $infDir 'ms912x_winusb.inf'
+$infPath = Join-Path $root 'inf\ms912x_winusb.inf'
 if (-not (Test-Path $infPath)) { throw "missing $infPath" }
+
+# Inf2Cat processes an entire directory, so the INF has to be staged alone.
+# Pointing it at inf\ would also pick up the IddCx package, whose binary is
+# not there, and the whole run would fail.
+$infDir = Join-Path $root 'build\package-winusb'
+if (Test-Path $infDir) { Remove-Item $infDir -Recurse -Force }
+New-Item -ItemType Directory -Path $infDir | Out-Null
+Copy-Item $infPath $infDir
+$stagedInf = Join-Path $infDir 'ms912x_winusb.inf'
+Write-Host "==> staged package in $infDir"
 
 $testSigning = (bcdedit /enum '{current}' | Select-String 'testsigning\s+Yes')
 if ($testSigning) {
