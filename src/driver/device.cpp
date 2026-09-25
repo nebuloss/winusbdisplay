@@ -1121,6 +1121,7 @@ bool SwapChainProcessor::SendRefresh(bool whole_screen) {
   if (!superseded.empty()) {
     /* The displaced frame's content is covered by a full repaint, but its
      * transfer never happened, so the chip's buffer parity did not advance. */
+    std::lock_guard<std::mutex> damage_lock(damage_mutex_);
     frame_index_ = 1 - frame_index_;
   }
 
@@ -1183,6 +1184,7 @@ bool SwapChainProcessor::SendRefresh(bool whole_screen) {
 
   sender_->Submit(transfer, length, full);
 
+  std::lock_guard<std::mutex> damage_lock(damage_mutex_);
   /* Only the buffer that was just written is up to date. Clearing both, as an
    * earlier version did, left the other one stale and it would reappear on
    * the next flip. Advance the index so successive refreshes bring both
