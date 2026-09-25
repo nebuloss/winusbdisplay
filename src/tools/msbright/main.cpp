@@ -75,6 +75,11 @@ constexpr int kContrastIndex = 1;
 NOTIFYICONDATAW g_tray = {};
 HWND g_window = nullptr;
 int g_dragging = -1;
+/* When the flyout is open and the tray icon is clicked, Windows deactivates
+ * the flyout before delivering the click. Without remembering when that
+ * happened, the handler would see a hidden window and reopen it immediately,
+ * so the icon would never close the flyout. */
+ULONGLONG g_hidden_at = 0;
 int g_dpi = 96;
 ULONG_PTR g_gdiplus_token = 0;
 
@@ -415,6 +420,9 @@ void HideFlyout() {
     ReleaseCapture();
     g_dragging = -1;
   }
+  if (IsWindowVisible(g_window)) {
+    g_hidden_at = GetTickCount64();
+  }
   ShowWindow(g_window, SW_HIDE);
 }
 
@@ -445,7 +453,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam,
       if (LOWORD(lparam) == WM_LBUTTONUP) {
         if (IsWindowVisible(window)) {
           HideFlyout();
-        } else {
+        } else if (GetTickCount64() - g_hidden_at > 250) {
           ShowFlyout();
         }
       } else if (LOWORD(lparam) == WM_RBUTTONUP) {
