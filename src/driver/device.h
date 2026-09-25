@@ -157,29 +157,15 @@ class SwapChainProcessor {
   UINT staging_width_ = 0;
   UINT staging_height_ = 0;
 
-  Microsoft::WRL::ComPtr<ID3D11ComputeShader> compute_shader_;
-  Microsoft::WRL::ComPtr<ID3D11Buffer> compute_output_;
-  Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> compute_output_uav_;
-  Microsoft::WRL::ComPtr<ID3D11Buffer> compute_readback_;
-  Microsoft::WRL::ComPtr<ID3D11Buffer> compute_params_;
-  /* The acquired surface is a different texture most frames, so the view is
-   * cached against the texture it was made for. */
-  Microsoft::WRL::ComPtr<ID3D11Texture2D> compute_source_;
-  Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> compute_source_srv_;
-  bool compute_ready_ = false;
-  bool compute_failed_ = false;
-  bool compute_verified_ = false;
-  unsigned verify_content_frames_ = 0;
-  /* Last acquired surface, held so the idle refresh has something current to
-   * convert from. */
+  /* Last acquired surface, held so the idle refresh has a current picture to
+   * convert from when the desktop is static and no new frame is arriving. */
   Microsoft::WRL::ComPtr<ID3D11Texture2D> last_source_;
   int last_width_ = 0;
   int last_height_ = 0;
-  int verify_fb_width_ = 0;
-  int verify_fb_height_ = 0;
 
-  /* The chip holds two frame buffers and alternates between them, so damage
-   * has to be tracked per buffer: new damage accumulates into both, and only
+  Microsoft::WRL::ComPtr<ID3D11ComputeShader> compute_shader_;
+  Microsoft::WRL::ComPtr<ID3D11Buffer> compute_output_;
+  Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> compute_output_uav_;
    * the buffer actually written is cleared. Tracking a single rectangle makes
    * each buffer miss half the updates, which shows up as ghosting and as the
    * picture flickering between two different images. */
@@ -202,24 +188,6 @@ class SwapChainProcessor {
   IDDCX_MONITOR monitor_ = nullptr;
   std::thread cursor_thread_;
   HANDLE cursor_event_ = nullptr;
-  std::vector<uint8_t> cursor_shape_;
-  std::vector<uint8_t> cursor_scratch_;
-  /* Guards the cached desktop copy the cursor thread composites over. */
-  std::mutex cursor_mutex_;
-  std::vector<uint8_t> desktop_copy_;
-  int desktop_width_ = 0;
-  int desktop_height_ = 0;
-  size_t desktop_stride_ = 0;
-  UINT cursor_shape_id_ = 0;
-  int cursor_width_ = 0;
-  int cursor_height_ = 0;
-  bool cursor_is_alpha_ = false;
-  /* Where the pointer was last drawn, so it can be erased. */
-  Rect cursor_previous_;
-  bool cursor_active_ = false;
-};
-
-/* Per-WDFDEVICE state. */
 class IndirectDevice {
  public:
   explicit IndirectDevice(WDFDEVICE wdf_device);
