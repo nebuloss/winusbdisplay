@@ -309,6 +309,23 @@ bool WinUsbTransport::BulkWrite(const uint8_t* data, size_t len) {
   return true;
 }
 
+bool WinUsbTransport::EnableRawIo(size_t max_transfer_bytes) {
+  auto handle = static_cast<WINUSB_INTERFACE_HANDLE>(winusb_handle_);
+
+  ULONG transfer_size = static_cast<ULONG>(max_transfer_bytes);
+  WinUsb_SetPipePolicy(handle, bulk_out_pipe_id_, MAXIMUM_TRANSFER_SIZE,
+                       sizeof(transfer_size), &transfer_size);
+
+  UCHAR on = TRUE;
+  if (!WinUsb_SetPipePolicy(handle, bulk_out_pipe_id_, RAW_IO, sizeof(on),
+                            &on)) {
+    SetWin32Error("WinUsb_SetPipePolicy(RAW_IO)", GetLastError());
+    return false;
+  }
+  raw_io_ = true;
+  return true;
+}
+
 bool WinUsbTransport::DumpDescriptors(std::string* out) {
   auto handle = static_cast<WINUSB_INTERFACE_HANDLE>(winusb_handle_);
   char line[256];
