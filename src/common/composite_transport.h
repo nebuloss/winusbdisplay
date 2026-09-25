@@ -32,10 +32,6 @@ class CompositeTransport : public Transport {
   CompositeTransport(std::unique_ptr<Transport> control,
                      std::unique_ptr<Transport> data);
 
-  /* Opens the HID control interface and the WinUSB data interface. Returns
-   * null if either is unavailable. */
-  static std::unique_ptr<CompositeTransport> Open(std::string* error);
-
   std::string Describe() const override;
   bool HasDataPlane() const override;
   bool ControlSetReport(const uint8_t* data, size_t len) override;
