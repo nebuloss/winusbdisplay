@@ -70,14 +70,18 @@ function Invoke-Elevated([hashtable]$payload) {
         Start-Sleep -Milliseconds 150
     }
 
+    # Emit the command output to the pipeline and pass the exit code back out
+    # of band. Returning both would merge them into one array at the call
+    # site, which silently swallows all the output.
     $outFile = Join-Path $spool "$id.out"
     if (Test-Path $outFile) { Get-Content $outFile }
     $codeFile = Join-Path $spool "$id.code"
-    $code = 0
-    if (Test-Path $codeFile) { $code = [int]((Get-Content $codeFile -Raw).Trim()) }
+    $script:LastElevCode = 0
+    if (Test-Path $codeFile) {
+        $script:LastElevCode = [int]((Get-Content $codeFile -Raw).Trim())
+    }
 
     Remove-Item $done, $outFile, $codeFile -Force -ErrorAction SilentlyContinue
-    return $code
 }
 
 if ($Status) {
@@ -97,13 +101,13 @@ if ($Script) {
         $argArray = [System.Management.Automation.PSParser]::Tokenize($Arguments, [ref]$null) |
             ForEach-Object { $_.Content }
     }
-    $code = Invoke-Elevated @{ Kind = 'script'; Path = $Script; Args = $argArray }
-    exit $code
+    Invoke-Elevated @{ Kind = 'script'; Path = $Script; Args = $argArray }
+    exit $script:LastElevCode
 }
 
 if ($Command) {
-    $code = Invoke-Elevated @{ Kind = 'command'; Command = $Command }
-    exit $code
+    Invoke-Elevated @{ Kind = 'command'; Command = $Command }
+    exit $script:LastElevCode
 }
 
 Write-Output 'nothing to do; pass -Start, -Stop, -Status, -Script or -Command'
