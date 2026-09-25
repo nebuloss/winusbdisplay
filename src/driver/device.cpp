@@ -252,8 +252,10 @@ void FrameSender::Stop() {
   }
 }
 
-std::vector<uint8_t>* FrameSender::AcquireBuffer(DWORD wait_ms) {
+std::vector<uint8_t>* FrameSender::AcquireBuffer(DWORD wait_ms,
+                                                 Rect* superseded) {
   std::unique_lock<std::mutex> lock(mutex_);
+  *superseded = EmptyRect();
 
   /* Prefer a slot that is completely free. */
   for (Slot& slot : slots_) {
@@ -275,6 +277,7 @@ std::vector<uint8_t>* FrameSender::AcquireBuffer(DWORD wait_ms) {
   for (Slot& slot : slots_) {
     if (slot.queued && !slot.in_flight) {
       slot.queued = false;
+      *superseded = slot.damage;
       ++frames_superseded_;
       return &slot.data;
     }
@@ -298,12 +301,14 @@ std::vector<uint8_t>* FrameSender::AcquireBuffer(DWORD wait_ms) {
   return nullptr;
 }
 
-void FrameSender::Submit(std::vector<uint8_t>* buffer, size_t length) {
+void FrameSender::Submit(std::vector<uint8_t>* buffer, size_t length,
+                         const Rect& damage) {
   {
     std::lock_guard<std::mutex> lock(mutex_);
     for (Slot& slot : slots_) {
       if (&slot.data == buffer) {
         slot.length = length;
+        slot.damage = damage;
         slot.queued = true;
         break;
       }
@@ -831,10 +836,27 @@ bool SwapChainProcessor::ProcessFrame(
     return true;
   }
 
-  std::vector<uint8_t>* transfer = sender_->AcquireBuffer(kBufferWaitMs);
+  Rect superseded = EmptyRect();
+  std::vector<uint8_t>* transfer =
+      sender_->AcquireBuffer(kBufferWaitMs, &superseded);
   if (!transfer) {
     /* Dropped, but the damage stays pending so a later frame still sends it. */
     return true;
+  }
+
+  if (!superseded.empty()) {
+    /* A queued frame was taken back before it reached the chip, so the region
+     * it covered is still stale there. Fold it into this frame, and do not
+     * advance the buffer parity for it: the chip only alternates buffers on a
+     * transfer it actually receives. */
+    pending_damage_[frame_index_] =
+        MergeRects(pending_damage_[frame_index_], superseded);
+    to_send = AlignDamageRect(
+        MergeRects(to_send, superseded), fb_width, fb_height);
+    if (to_send.empty()) {
+      sender_->Cancel(transfer);
+      return true;
+    }
   }
 
   LARGE_INTEGER t_begin, t_converted, qpc_freq;
@@ -952,7 +974,7 @@ bool SwapChainProcessor::ProcessFrame(
     }
   }
 
-  sender_->Submit(transfer, length);
+  sender_->Submit(transfer, length, to_send);
 
   /* This buffer is now up to date; the other one still owes the same damage. */
   pending_damage_[frame_index_] = EmptyRect();
@@ -999,10 +1021,14 @@ bool SwapChainProcessor::SendRefresh(bool whole_screen) {
     return false;
   }
 
-  std::vector<uint8_t>* transfer = sender_->AcquireBuffer(kBufferWaitMs);
+  Rect superseded = EmptyRect();
+  std::vector<uint8_t>* transfer =
+      sender_->AcquireBuffer(kBufferWaitMs, &superseded);
   if (!transfer) {
     return false;
   }
+  /* A refresh repaints everything, so anything it displaced is covered. */
+  (void)superseded;
 
   PictureAdjust adjust;
   if (ddc_) {
@@ -1061,7 +1087,7 @@ bool SwapChainProcessor::SendRefresh(bool whole_screen) {
     }
   }
 
-  sender_->Submit(transfer, length);
+  sender_->Submit(transfer, length, full);
 
   /* Only the buffer that was just written is up to date. Clearing both, as an
    * earlier version did, left the other one stale and it would reappear on

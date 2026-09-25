@@ -43,12 +43,18 @@ class FrameSender {
   void Start();
   void Stop();
 
-  /* Returns the buffer to convert into, or nullptr if both are busy and the
-   * caller should drop this frame. */
-  std::vector<uint8_t>* AcquireBuffer(DWORD wait_ms);
+  /* Returns the buffer to convert into, or nullptr if both are on the wire
+   * and the caller should drop this frame.
+   *
+   * If a frame that had been queued but not yet started is taken back, the
+   * damage it was carrying is written to `superseded` so the caller can fold
+   * it back into what still needs sending. That damage never reached the
+   * chip, so forgetting it would leave the region stale. */
+  std::vector<uint8_t>* AcquireBuffer(DWORD wait_ms, Rect* superseded);
 
-  /* Hands the buffer previously returned by AcquireBuffer to the worker. */
-  void Submit(std::vector<uint8_t>* buffer, size_t length);
+  /* Hands the buffer previously returned by AcquireBuffer to the worker,
+   * along with the damage it covers. */
+  void Submit(std::vector<uint8_t>* buffer, size_t length, const Rect& damage);
 
   /* Returns a buffer to the pool without sending it. */
   void Cancel(std::vector<uint8_t>* buffer);
@@ -67,6 +73,8 @@ class FrameSender {
     size_t length = 0;
     bool in_flight = false;
     bool queued = false;
+    /* What this frame repaints, so it can be recovered if superseded. */
+    Rect damage;
   };
 
   Device* device_;
