@@ -657,6 +657,27 @@ void SwapChainProcessor::VerifyGpuAgainstCpu(ID3D11Texture2D* source,
     }
   }
 
+  {
+    /* Cost of each path on this exact rect, so the crossover can be found. */
+    const size_t pixels = static_cast<size_t>(rect.width()) * rect.height();
+    LARGE_INTEGER freq, a, b, c;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&a);
+    ConvertOnGpu(source, rect, adjust, gpu.data(), gpu.size());
+    QueryPerformanceCounter(&b);
+    if (SUCCEEDED(d3d_context_->Map(staging_.Get(), 0, D3D11_MAP_READ, 0,
+                                    &mapped))) {
+      FrameRect(cpu.data(), cpu.size(),
+                static_cast<const uint8_t*>(mapped.pData), mapped.RowPitch,
+                verify_fb_width_, verify_fb_height_, rect, adjust);
+      d3d_context_->Unmap(staging_.Get(), 0);
+    }
+    QueryPerformanceCounter(&c);
+    const double to_us = 1000000.0 / freq.QuadPart;
+    Log("crossover: %6zu px  gpu=%6.0fus cpu=%6.0fus", pixels,
+        (b.QuadPart - a.QuadPart) * to_us, (c.QuadPart - b.QuadPart) * to_us);
+  }
+
   if (!uniform && worst > 2) {
     Log("verify: %dx%d at (%d,%d) worst=%d at byte %zu", rect.width(),
         rect.height(), rect.x1, rect.y1, worst, worst_at);
