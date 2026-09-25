@@ -59,6 +59,7 @@ void PrintUsage() {
       "                          modeset then push one full frame\n"
       "  bench [--mode WxH@Hz] [--frames N] [--rawio]\n"
       "        [--depth N] [--chunk KB]\n"
+      "  benchsizes              transfer cost against rect size\n"
       "                          measure sustained bulk throughput\n"
       "  image --mode WxH@Hz --bmp FILE [--no-modeset]\n"
       "                          push a 24 or 32 bit BMP, letterboxed\n"
@@ -668,6 +669,87 @@ int CmdSelfTest() {
   return 0;
 }
 
+/* Measures cost against transfer size. A large fixed cost per transfer would
+ * mean many small updates are dominated by overhead rather than by pixels,
+ * which is what interactive use actually looks like. */
+int CmdBenchSizes() {
+  std::string control_error, data_error;
+  std::unique_ptr<HidTransport> control = HidTransport::Open(&control_error);
+  std::unique_ptr<WinUsbTransport> data = WinUsbTransport::Open(&data_error);
+  if (!control || !data) {
+    fprintf(stderr, "error: %s\n",
+            control ? data_error.c_str() : control_error.c_str());
+    fprintf(stderr, "hint: disable the driver first, it holds the pipe\n");
+    return 1;
+  }
+  printf("transport: %s\n\n", data->Describe().c_str());
+
+  Device device(std::unique_ptr<Transport>(
+      new CompositeTransport(std::move(control), std::move(data))));
+
+  const Mode* mode = FindMode(1920, 1080, 60);
+  if (!device.PowerOn() || !device.SetResolution(*mode)) {
+    fprintf(stderr, "error: %s\n", device.last_error().c_str());
+    return 1;
+  }
+
+  const size_t stride = static_cast<size_t>(mode->width) * 4;
+  std::vector<uint8_t> framebuffer(stride * mode->height);
+  FillColourBars(framebuffer.data(), stride, mode->width, mode->height);
+  std::vector<uint8_t> transfer(kMaxTransferLen);
+
+  struct Size {
+    int width;
+    int height;
+  };
+  const Size sizes[] = {{64, 64},    {128, 128},  {256, 256}, {512, 512},
+                        {640, 480},  {1024, 768}, {1280, 720}, {1920, 540},
+                        {1920, 1080}};
+
+  printf("  %-12s %10s %9s %9s %10s\n", "rect", "bytes", "ms", "MB/s",
+         "updates/s");
+  for (const Size& size : sizes) {
+    Rect rect;
+    rect.x1 = 0;
+    rect.y1 = 0;
+    rect.x2 = size.width;
+    rect.y2 = size.height;
+    rect = AlignDamageRect(rect, mode->width, mode->height);
+
+    const size_t length =
+        FrameRect(transfer.data(), transfer.size(), framebuffer.data(), stride,
+                  mode->width, mode->height, rect);
+    if (length == 0) {
+      continue;
+    }
+
+    /* Enough repeats that the timer resolution does not matter. */
+    const int repeats = length > 1000000 ? 20 : 100;
+    LARGE_INTEGER freq, start, end;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&start);
+    for (int i = 0; i < repeats; ++i) {
+      if (!device.SendFrame(transfer.data(), length)) {
+        fprintf(stderr, "error: %s\n", device.last_error().c_str());
+        return 1;
+      }
+    }
+    QueryPerformanceCounter(&end);
+
+    const double seconds =
+        static_cast<double>(end.QuadPart - start.QuadPart) / freq.QuadPart;
+    const double per_transfer_ms = seconds * 1000.0 / repeats;
+    char label[32];
+    _snprintf_s(label, sizeof(label), _TRUNCATE, "%dx%d", rect.width(),
+                rect.height());
+    printf("  %-12s %10zu %9.2f %9.1f %10.0f\n", label, length,
+           per_transfer_ms,
+           length / (1024.0 * 1024.0) / (per_transfer_ms / 1000.0),
+           1000.0 / per_transfer_ms);
+  }
+  return 0;
+}
+
 int CmdBench(int argc, char** argv) {
   const char* spec = "1920x1080@60";
   int frames = 20;
@@ -839,6 +921,9 @@ int main(int argc, char** argv) {
   }
   if (strcmp(command, "selftest") == 0) {
     return CmdSelfTest();
+  }
+  if (strcmp(command, "benchsizes") == 0) {
+    return CmdBenchSizes();
   }
   if (strcmp(command, "bench") == 0) {
     return CmdBench(rest_argc, rest_argv);
