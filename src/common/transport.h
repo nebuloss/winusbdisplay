@@ -47,6 +47,15 @@ struct DeviceLocation {
   uint16_t pid = 0;
   std::wstring path;      /* device interface path */
   std::wstring instance;  /* human readable instance id, best effort */
+  /* Same value for every interface of one physical dongle, which is how the
+   * HID control interface is matched to the right USB data interface when
+   * more than one adapter is plugged in. */
+  GUID container_id = {};
+  bool has_container_id = false;
 };
+
+/* Reads DEVPKEY_Device_ContainerId for a device interface path. */
+bool GetContainerIdForInterface(const std::wstring& interface_path,
+                                const GUID& interface_class, GUID* container);
 
 }  // namespace ms912x
