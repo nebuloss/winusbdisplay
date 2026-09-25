@@ -35,6 +35,8 @@ const uint16_t kYPbPrModes[][3] = {
 constexpr UINT32 kHorizontalBlanking = 160;
 constexpr UINT32 kVerticalBlanking = 45;
 
+DWORD ReadPolicyDword(const wchar_t* name, DWORD fallback);
+
 DISPLAYCONFIG_VIDEO_SIGNAL_INFO MakeSignalInfo(uint16_t width, uint16_t height,
                                                uint16_t hz) {
   const UINT32 h_total = width + kHorizontalBlanking;
@@ -80,7 +82,8 @@ IDDCX_TARGET_MODE MakeTargetMode(const Mode& mode) {
    * rate frames asks for fewer of them. Only valid on target modes; monitor
    * modes require zero here. */
   out.TargetVideoSignalInfo.targetVideoSignalInfo.AdditionalSignalInfo
-      .vSyncFreqDivider = SyncDividerForMode(mode);
+      .vSyncFreqDivider =
+      ReadPolicyDword(L"SyncDivider", 0) != 0 ? SyncDividerForMode(mode) : 1;
   return out;
 }
 
