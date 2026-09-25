@@ -17,6 +17,7 @@
 #include <string>
 #include <vector>
 
+#include "composite_transport.h"
 #include "file_transport.h"
 #include "hid_transport.h"
 #include "ms912x_convert.h"
@@ -28,7 +29,7 @@ using namespace ms912x;
 
 namespace {
 
-enum class TransportKind { kAuto, kHid, kWinUsb, kFile };
+enum class TransportKind { kAuto, kHid, kWinUsb, kFile, kComposite };
 
 struct GlobalOptions {
   TransportKind transport = TransportKind::kAuto;
@@ -41,8 +42,8 @@ void PrintUsage() {
   printf(
       "msdisp - MacroSilicon USB display bring-up tool\n"
       "\n"
-      "usage: msdisp [--transport hid|winusb|file] [--dump-dir DIR]"
-      " <command> [options]\n"
+      "usage: msdisp [--transport auto|hid|winusb|composite|file]"
+      " [--dump-dir DIR] <command> [options]\n"
       "\n"
       "commands:\n"
       "  list                    interfaces visible to Windows\n"
@@ -58,9 +59,9 @@ void PrintUsage() {
       "  image --mode WxH@Hz --bmp FILE [--no-modeset]\n"
       "                          push a 24 or 32 bit BMP, letterboxed\n"
       "\n"
-      "Without --transport, WinUSB is used when the display interface is\n"
-      "bound to it, otherwise the HID control plane is used. The HID plane\n"
-      "cannot send pixels.\n");
+      "The control plane lives on the HID interface and the bulk pixel pipe\n"
+      "on the WinUSB one, so the default 'auto' transport opens both. Pass\n"
+      "--transport hid to stay read-only with no driver installed at all.\n");
 }
 
 void HexDump(const uint8_t* data, size_t len) {
