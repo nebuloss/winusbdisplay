@@ -489,7 +489,6 @@ bool SwapChainProcessor::ProcessFrame(
   /* Report how much of the screen each transfer actually covers: if damage
    * tracking is working this should be far smaller than the full frame. */
   static ULONGLONG last_rect_log = 0;
-  ULONGLONG now_ms = GetTickCount64();
   if (now_ms - last_rect_log >= 2000) {
     Log("damage: %dx%d at (%d,%d) rects=%u moves=%u -> %zu bytes",
         to_send.width(), to_send.height(), to_send.x1, to_send.y1,
