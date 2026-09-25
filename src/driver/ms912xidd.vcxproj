@@ -95,7 +95,7 @@
     <ClCompile Include="..\common\ms912x_convert.cpp" />
     <ClCompile Include="..\common\ms912x_device.cpp" />
     <ClCompile Include="..\common\transport.cpp" />
-    <ClCompile Include="usb_backend.cpp" />
+    <ClCompile Include="..\common\winusb_transport.cpp" />
     <ClCompile Include="device.cpp" />
     <ClCompile Include="driver.cpp" />
   </ItemGroup>
@@ -105,7 +105,7 @@
     <ClInclude Include="..\common\ms912x_convert.h" />
     <ClInclude Include="..\common\ms912x_device.h" />
     <ClInclude Include="..\common\transport.h" />
-    <ClInclude Include="usb_backend.h" />
+    <ClInclude Include="..\common\winusb_transport.h" />
     <ClInclude Include="device.h" />
   </ItemGroup>
 

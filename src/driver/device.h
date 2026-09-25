@@ -25,7 +25,7 @@
 
 #include "ms912x_convert.h"
 #include "ms912x_device.h"
-#include "usb_backend.h"
+#include "winusb_transport.h"
 
 namespace ms912x {
 

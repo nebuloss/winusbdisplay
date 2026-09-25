@@ -60,6 +60,12 @@ AddReg = Dev_AddReg
 [Dev_AddReg]
 ; Must match kDeviceInterfaceGuid in src/common/winusb_transport.cpp.
 HKR,,DeviceInterfaceGUIDs,0x10000,"{6C2C4F1E-3B7A-4D4F-9F2E-5A1B8C7D3E90}"
+; The indirect display driver runs in WUDFHost as LOCAL SERVICE, which the
+; default WinUSB interface ACL does not cover. Grant it access explicitly,
+; plus SYSTEM, Administrators and authenticated users so the msdisp tool
+; still works from an ordinary shell.
+HKR,,DeviceCharacteristics,0x10001,0x0100
+HKR,,Security,,"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;LS)(A;;GA;;;AU)"
 
 [Strings]
 ProviderName     = "winusbdisplay"

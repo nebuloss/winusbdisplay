@@ -496,39 +496,26 @@ IndirectDevice::~IndirectDevice() {
 }
 
 NTSTATUS IndirectDevice::PrepareHardware() {
+  /* Both planes are opened from user mode, which is possible because UMDF
+   * hosts are user mode processes. This is the same pairing the msdisp tool
+   * uses and is known to drive the panel:
+   *   control -> the dongle's HID interface, owned by hidusb
+   *   data    -> the WinUSB interface bound by inf/ms912x_winusb.inf
+   *
+   * Distinct failure codes per step: PrepareHardware's return value appears
+   * verbatim in the DriverFrameworks-UserMode event log, and is otherwise the
+   * only visibility into why a UMDF device refuses to start. */
   std::string error;
 
-  /* Distinct failure codes per step: PrepareHardware's return value shows up
-   * verbatim in the DriverFrameworks-UserMode event log, so making each exit
-   * unique turns "problem code 10" into an exact diagnosis. */
-
-  /* Data plane: the bulk pixel pipe on the interface we are bound to. */
-  std::unique_ptr<WdfUsbBackend> data;
-  NTSTATUS usb_status = WdfUsbBackend::Create(wdf_device_, &data);
-  if (!NT_SUCCESS(usb_status)) {
-    return usb_status; /* already distinct per failure point */
-  }
-
-  /* Control plane: the sibling HID interface of the same physical dongle.
-   * See usb_backend.h for why it cannot go through the USB target. */
-  WDF_DEVICE_PROPERTY_DATA property;
-  WDF_DEVICE_PROPERTY_DATA_INIT(&property, &DEVPKEY_Device_ContainerId);
-  GUID container = {};
-  ULONG required = 0;
-  DEVPROPTYPE type = 0;
-  NTSTATUS status = WdfDeviceQueryPropertyEx(
-      wdf_device_, &property, sizeof(container), &container, &required, &type);
-  if (!NT_SUCCESS(status)) {
-    return STATUS_OBJECT_NAME_NOT_FOUND; /* 0xC0000034: container id query */
-  }
-  if (type != DEVPROP_TYPE_GUID) {
-    return STATUS_OBJECT_TYPE_MISMATCH; /* 0xC0000024: unexpected prop type */
-  }
-
-  std::unique_ptr<HidTransport> control =
-      HidTransport::OpenForContainer(container, &error);
+  std::unique_ptr<HidTransport> control = HidTransport::Open(&error);
   if (!control) {
-    return STATUS_ACCESS_DENIED; /* 0xC0000022: cannot open HID sibling */
+    return STATUS_ACCESS_DENIED; /* 0xC0000022: no HID control interface */
+  }
+
+  std::unique_ptr<WinUsbTransport> data = WinUsbTransport::Open(&error);
+  if (!data) {
+    /* 0xC0000225: the WinUSB package is probably not installed. */
+    return STATUS_NOT_FOUND;
   }
 
   ms_device_.reset(new Device(std::unique_ptr<Transport>(
