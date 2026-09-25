@@ -30,20 +30,42 @@ constexpr uint16_t kHidReportIndex = 0;      /* interface 0, not the display one
 constexpr size_t kControlPayloadSize = 8;
 
 /* Registers. */
+constexpr uint16_t kRegSdramType = 0x0030;
 constexpr uint16_t kRegVideoPort = 0x0031;
-constexpr uint16_t kRegDisplayStatus = 0x0032;
+constexpr uint16_t kRegDisplayStatus = 0x0032; /* hot plug detect */
 constexpr uint16_t kRegEdidBase = 0xC000;
-constexpr uint16_t kRegModeSequence0 = 0x0030;
+constexpr uint16_t kRegModeSequence0 = kRegSdramType;
 constexpr uint16_t kRegModeSequence1 = 0x0033;
 constexpr uint16_t kRegModeSequence2 = 0xC620;
 
-/* Commands, written with kReqTypeWrite6Bytes. */
-constexpr uint8_t kCmdResolution = 0x01;
-constexpr uint8_t kCmdMode = 0x02;
-constexpr uint8_t kCmdUnknown1 = 0x03;
-constexpr uint8_t kCmdUnknown2 = 0x04;
-constexpr uint8_t kCmdOutputEnable = 0x05;
+/* Sub-operations of kReqTypeWrite6Bytes (the vendor calls this op VIDEO).
+ * The names come from the vendor's own GPL Linux HAL; the ms912x driver only
+ * knew them by number. */
+constexpr uint8_t kCmdTriggerFrame = 0x00;
+constexpr uint8_t kCmdVideoInInfo = 0x01;   /* source resolution and format */
+constexpr uint8_t kCmdVideoOutInfo = 0x02;  /* output timing index */
+constexpr uint8_t kCmdSetTransMode = 0x03;
+constexpr uint8_t kCmdTransferEnable = 0x04;
+constexpr uint8_t kCmdVideoEnable = 0x05;
 constexpr uint8_t kCmdPower = 0x07;
+
+/* Legacy aliases matching the reverse engineered naming. */
+constexpr uint8_t kCmdResolution = kCmdVideoInInfo;
+constexpr uint8_t kCmdMode = kCmdVideoOutInfo;
+constexpr uint8_t kCmdOutputEnable = kCmdVideoEnable;
+
+/* Transfer modes for kCmdSetTransMode. The driver uses manual block, which is
+ * what makes partial (damage rectangle) updates possible. */
+constexpr uint8_t kTransModeFrame = 0;
+constexpr uint8_t kTransModeFixBlockMN = 1;
+constexpr uint8_t kTransModeFixBlockWH = 2;
+constexpr uint8_t kTransModeManualBlock = 3;
+constexpr uint8_t kTransModeBypassFrame = 4;
+constexpr uint8_t kTransModeBypassManualBlock = 5;
+
+/* A single register read request can return up to four consecutive bytes,
+ * which makes reading a 128 byte EDID block 32 round trips instead of 128. */
+constexpr uint8_t kMaxRegisterReadCount = 4;
 
 /* Chip identification and custom timing storage in flash. */
 constexpr uint16_t kReg913xChipId = 0xFF00;
@@ -106,11 +128,13 @@ const Mode* FindMode(uint16_t width, uint16_t height, uint16_t hz);
 
 #pragma pack(push, 1)
 
-/* kReqTypeReadByte / response. addr is big endian. */
+/* kReqTypeReadByte / response. addr is big endian, and up to four data bytes
+ * come back even though the reverse engineered driver only ever read one. */
 struct RegisterRequest {
   uint8_t type;
   uint8_t addr_be[2];
-  uint8_t data[5];
+  uint8_t data[4];
+  uint8_t reserved;
 };
 static_assert(sizeof(RegisterRequest) == kControlPayloadSize, "");
 
