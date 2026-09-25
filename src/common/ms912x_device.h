@@ -77,7 +77,8 @@ class Device {
   bool ReadChipInfo(ChipInfo* info);
   bool ReadCustomTimings(std::vector<CustomMode>* modes);
 
-  /* Data plane. Sends one already-framed transfer. */
+  /* Data plane. Sends one already-framed transfer, terminates it with the
+   * zero length packet the chip expects, and enables output on first use. */
   bool SendFrame(const uint8_t* data, size_t len);
 
   const std::string& last_error() const { return last_error_; }
@@ -89,6 +90,7 @@ class Device {
   std::unique_ptr<Transport> transport_;
   std::mutex ctrl_mutex_;
   std::string last_error_;
+  bool output_enabled_ = false;
 };
 
 bool EdidBlockChecksumOk(const uint8_t* block);
