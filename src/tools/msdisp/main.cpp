@@ -206,6 +206,19 @@ int CmdDump() {
     return 1;
   }
   fputs(text.c_str(), stdout);
+
+  /* A USB 3 capable device carries a BOS descriptor advertising SuperSpeed
+   * even while it is connected at high speed. Its presence distinguishes
+   * "the silicon is USB 2" from "the silicon is USB 3 but the port, cable or
+   * hub in the path is not". */
+  std::string bos;
+  if (transport->DumpBosDescriptor(&bos)) {
+    fputs(bos.c_str(), stdout);
+  } else {
+    printf(
+        "bos:       none -> the device is USB 2 silicon, so ~30 MB/s is its\n"
+        "           ceiling regardless of which port it is plugged into\n");
+  }
   return 0;
 }
 

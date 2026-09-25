@@ -437,6 +437,56 @@ bool WinUsbTransport::BulkWritePipelined(const uint8_t* data, size_t len) {
   return true;
 }
 
+bool WinUsbTransport::DumpBosDescriptor(std::string* out) {
+  auto handle = static_cast<WINUSB_INTERFACE_HANDLE>(winusb_handle_);
+  constexpr UCHAR kBosDescriptorType = 0x0F;
+  constexpr UCHAR kSuperSpeedCapability = 0x03;
+
+  uint8_t header[5] = {0};
+  ULONG transferred = 0;
+  if (!WinUsb_GetDescriptor(handle, kBosDescriptorType, 0, 0, header,
+                            sizeof(header), &transferred) ||
+      transferred < sizeof(header)) {
+    return false;
+  }
+
+  const uint16_t total = static_cast<uint16_t>(header[2] | (header[3] << 8));
+  if (total < sizeof(header) || total > 512) {
+    return false;
+  }
+
+  std::vector<uint8_t> bos(total);
+  if (!WinUsb_GetDescriptor(handle, kBosDescriptorType, 0, 0, bos.data(),
+                            total, &transferred) ||
+      transferred < total) {
+    return false;
+  }
+
+  char line[200];
+  _snprintf_s(line, sizeof(line), _TRUNCATE,
+              "bos:       present, %u byte(s), %u capability descriptor(s)\n",
+              total, bos[4]);
+  *out = line;
+
+  for (size_t i = 5; i + 2 < bos.size(); i += bos[i]) {
+    if (bos[i] == 0) {
+      break;
+    }
+    if (bos[i + 1] == 0x10 && bos[i + 2] == kSuperSpeedCapability) {
+      const uint16_t speeds =
+          static_cast<uint16_t>(bos[i + 4] | (bos[i + 5] << 8));
+      _snprintf_s(line, sizeof(line), _TRUNCATE,
+                  "  SuperSpeed capability: speed mask 0x%04X%s\n", speeds,
+                  (speeds & 0x08) ? " (5 Gbps supported)" : "");
+      *out += line;
+      *out +=
+          "  -> the silicon is USB 3 capable. Connecting at high speed means\n"
+          "     the port, cable or hub in the path is limiting it.\n";
+    }
+  }
+  return true;
+}
+
 bool WinUsbTransport::DumpDescriptors(std::string* out) {
   auto handle = static_cast<WINUSB_INTERFACE_HANDLE>(winusb_handle_);
   char line[256];

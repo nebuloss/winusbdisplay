@@ -36,6 +36,10 @@ class WinUsbTransport : public Transport {
    * the enumerate phase to record what the hardware actually exposes. */
   bool DumpDescriptors(std::string* out);
 
+  /* Reads the Binary Object Store descriptor, which only USB 3 capable
+   * devices have. Returns false when the device has none. */
+  bool DumpBosDescriptor(std::string* out);
+
   /* Turns on pipelined transfers: the frame is split into chunks and several
    * are kept in flight at once, so the host controller always has data queued
    * and the bus does not idle between transfers. A single synchronous write
