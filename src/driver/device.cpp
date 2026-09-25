@@ -862,13 +862,23 @@ bool SwapChainProcessor::ProcessFrame(
   }
 
   Rect to_send;
+  Rect covered;
   {
     std::lock_guard<std::mutex> damage_lock(damage_mutex_);
     if (have_new_damage) {
       pending_damage_[0] = MergeRects(pending_damage_[0], damage);
-      pending_damage_[1] = MergeRects(pending_damage_[1], damage);
     }
-    to_send = AlignDamageRect(pending_damage_[0], fb_width, fb_height);
+
+    /* Send this frame's damage together with the previous frame's, which is
+     * what the Linux driver does and what the chip's double buffering
+     * requires. Each transfer lands in one of two frame buffers and they
+     * alternate on screen, so a region touched by only one transfer shows the
+     * new content on one refresh and the old on the next. Covering two
+     * consecutive frames' damage every time guarantees both buffers receive
+     * every change. Dropping this is what makes redrawn text shimmer. */
+    covered = pending_damage_[0];
+    to_send = AlignDamageRect(MergeRects(covered, pending_damage_[1]),
+                              fb_width, fb_height);
   }
   if (to_send.empty()) {
     return true;
@@ -886,7 +896,7 @@ bool SwapChainProcessor::ProcessFrame(
     /* A queued frame was taken back before it reached the chip, so the region
      * it covered is still stale there and this frame has to carry it too. */
     std::lock_guard<std::mutex> damage_lock(damage_mutex_);
-    pending_damage_[0] = MergeRects(pending_damage_[0], superseded);
+    covered = MergeRects(covered, superseded);
     to_send = AlignDamageRect(MergeRects(to_send, superseded), fb_width,
                               fb_height);
     if (to_send.empty()) {
@@ -1057,9 +1067,11 @@ bool SwapChainProcessor::ProcessFrame(
   sender_->Submit(transfer, length, to_send);
 
   {
+    /* [1] remembers what this frame covered, so the next transfer repeats it
+     * for the other chip buffer. [0] starts accumulating again from empty. */
     std::lock_guard<std::mutex> damage_lock(damage_mutex_);
+    pending_damage_[1] = covered;
     pending_damage_[0] = EmptyRect();
-    pending_damage_[1] = EmptyRect();
   }
   last_send_ms_ = now_ms;
 
