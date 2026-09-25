@@ -160,8 +160,17 @@ Each of these cost real investigation; the evidence is in
   for host-side throughput wins; there are none. `msdisp bench` re-measures.
 - **There is no cheaper pixel format.** The chip offers RGB565, RGB888,
   YUV422 and YUV444. We already send the cheapest at 16 bpp.
-- **`vSyncFreqDivider` above 1 breaks the topology.** Windows rejects the
-  path with `ERROR_GEN_FAILURE`. Pacing is done by dropping frames.
+- **`vSyncFreqDivider` above 1 breaks the topology**, even with correct
+  timings. Windows returns `ERROR_GEN_FAILURE`; behind the `SyncDivider`
+  switch, default off. Pacing is done by dropping frames instead.
+- **Mode timings must be self consistent**: `pixelRate` equals
+  `totalSize.cx * totalSize.cy * vSyncFreq` and `hSyncFreq` equals
+  `pixelRate / totalSize.cx`, with `totalSize` including blanking. Setting
+  `totalSize` equal to `activeSize` breaks those identities.
+- **Conversion reads mapped GPU memory, which is slow.** Most of the cost is
+  memory, not arithmetic, which is why it is threaded. Re-measure with the
+  phase timers in `ProcessFrame` before changing it, and check correctness
+  with `msdisp selftest`.
 - **Windows never calls the IddCx I2C callbacks**, so DDC/CI cannot work for
   an indirect display. Microsoft documents this, and it was measured: the
   callbacks never fire and `dxva2` returns `ERROR_NOT_SUPPORTED`.

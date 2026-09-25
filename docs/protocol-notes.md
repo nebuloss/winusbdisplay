@@ -407,3 +407,72 @@ The slave is kept because it is correct and costs nothing if this ever
 changes. Brightness is delivered instead through a registry value the driver
 polls, applied during colour conversion so it genuinely dims the picture. See
 `scripts/brightness.ps1`.
+
+---
+
+## Performance audit
+
+Measured with per-phase timers inside the driver, not estimated. One full
+1080p frame, before any optimisation:
+
+| Phase | Cost | What it is |
+|---|---|---|
+| `CopySubresourceRegion` | 0.02 ms | GPU side, negligible |
+| `Map` | 4.6 ms | GPU to CPU synchronisation |
+| convert | 10.6 ms | RGB to UYVY on the CPU |
+| USB transfer | 133.6 ms | hardware ceiling |
+
+The conversion number was the surprise. The same conversion over ordinary RAM
+measures 3.98 ms, so roughly 6.6 ms of the 10.6 was the cost of *reading* the
+mapped staging texture. Mapped GPU memory is far slower to read than normal
+memory, and at 1080p the source is 8.3 MB.
+
+Two fixes, both verified against the scalar reference with `msdisp selftest`:
+
+1. **The SIMD inner loop had a store forwarding stall.** It computed each dot
+   product, wrote the vector lanes to a stack array and read them back, six
+   times per four pixels. Rewritten to stay in registers and emit one 16 byte
+   UYVY store per eight pixels. About 2x on its own.
+2. **Rows are now converted on a small persistent thread pool.** This helps
+   more than the arithmetic saving suggests, because several threads keep more
+   cache misses outstanding against the slow mapped memory at once.
+
+Result:
+
+| | Before | After |
+|---|---|---|
+| Convert, full 1080p frame | 10.6 ms | 2.5 ms |
+| Convert, typical 532x402 damage | 0.75 ms | 0.29 ms |
+| CPU per full frame | 15.2 ms | 7.0 ms |
+
+End to end this is a few percent, because USB still dominates at 133 ms. What
+it buys is a much more responsive acquire loop and less CPU burnt per frame.
+
+The remaining CPU cost is the 4.5 ms `Map`. Removing it means converting on
+the GPU with a compute shader and reading back UYVY, which would also halve
+the readback from 8.3 MB to 4.1 MB. That is the optimisation `AGENT_PROMPT`
+§4.5 suggests and it is the obvious next step, worth perhaps another 4 ms.
+
+## The ERROR_GEN_FAILURE was real, and partly our fault
+
+`SetDisplayConfig` was failing with `ERROR_GEN_FAILURE` (31) whenever
+`vSyncFreqDivider` was set above 1. Two separate problems were tangled here.
+
+**The mode timings were wrong.** `MakeSignalInfo` reported `totalSize` equal
+to `activeSize`, so there was no blanking interval, and computed `pixelRate`
+and `hSyncFreq` from the active area. Those fields have to satisfy:
+
+```
+pixelRate = totalSize.cx * totalSize.cy * vSyncFreq
+hSyncFreq = pixelRate / totalSize.cx
+```
+
+With `totalSize == activeSize` they did not. This is now fixed with roughly
+CVT reduced blanking (160 pixels horizontal, 45 lines vertical) and the
+identities hold. This was a genuine correctness bug worth fixing on its own.
+
+**The divider is still rejected.** With the timings corrected and the divider
+left at 1, `SetDisplayConfig` returns 0 and the display comes up. Set the
+divider to 2 or more and it returns 31 again, so Windows is refusing the
+divider itself rather than reacting to malformed timings. It is left behind
+the `SyncDivider` registry switch, default off.
