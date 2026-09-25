@@ -591,17 +591,20 @@ bool SwapChainProcessor::ConvertOnGpu(ID3D11Texture2D* source,
 void SwapChainProcessor::VerifyGpuAgainstCpu(ID3D11Texture2D* source,
                                              const Rect& rect,
                                              const PictureAdjust& adjust) {
-  compute_verified_ = true;
-
   const size_t row_bytes = static_cast<size_t>(rect.width()) * 2;
   const size_t needed = row_bytes * rect.height();
+
   std::vector<uint8_t> gpu(needed);
   if (!ConvertOnGpu(source, rect, adjust, gpu.data(), gpu.size())) {
-    Log("compute: verification could not run");
+    Log("verify: GPU conversion failed for %dx%d at (%d,%d)", rect.width(),
+        rect.height(), rect.x1, rect.y1);
     return;
   }
 
-  if (!EnsureStaging(staging_width_, staging_height_)) {
+  /* The staging texture has to cover the whole surface, not just the rect,
+   * because the CPU path indexes it with absolute coordinates. */
+  if (!EnsureStaging(static_cast<UINT>(verify_fb_width_),
+                     static_cast<UINT>(verify_fb_height_))) {
     return;
   }
   D3D11_BOX box = {};
@@ -619,15 +622,25 @@ void SwapChainProcessor::VerifyGpuAgainstCpu(ID3D11Texture2D* source,
     return;
   }
   std::vector<uint8_t> cpu(needed + kFrameOverhead);
-  const size_t produced =
-      FrameRect(cpu.data(), cpu.size(), static_cast<const uint8_t*>(mapped.pData),
-                mapped.RowPitch, rect.x2, rect.y2, rect, adjust);
+  const size_t produced = FrameRect(
+      cpu.data(), cpu.size(), static_cast<const uint8_t*>(mapped.pData),
+      mapped.RowPitch, verify_fb_width_, verify_fb_height_, rect, adjust);
   d3d_context_->Unmap(staging_.Get(), 0);
   if (produced == 0) {
     return;
   }
 
+  /* Ignore uniform frames: a black desktop matches trivially and would make
+   * a broken path look correct, which is exactly what happened before. */
+  bool uniform = true;
+  for (size_t i = 4; i < needed && uniform; i += 4) {
+    if (memcmp(&cpu[kFrameHeaderSize + i], &cpu[kFrameHeaderSize], 4) != 0) {
+      uniform = false;
+    }
+  }
+
   int worst = 0;
+  size_t worst_at = 0;
   for (size_t i = 0; i < needed; ++i) {
     int diff = static_cast<int>(gpu[i]) -
                static_cast<int>(cpu[kFrameHeaderSize + i]);
@@ -636,18 +649,34 @@ void SwapChainProcessor::VerifyGpuAgainstCpu(ID3D11Texture2D* source,
     }
     if (diff > worst) {
       worst = diff;
+      worst_at = i;
     }
   }
-  Log("compute: GPU vs CPU over %zu bytes, largest difference %d", needed,
-      worst);
-  if (worst > 2) {
-    Log("compute: difference too large, falling back to the CPU path");
-    compute_ready_ = false;
-    compute_failed_ = true;
+
+  Log("verify: %dx%d at (%d,%d) %s worst=%d at byte %zu", rect.width(),
+      rect.height(), rect.x1, rect.y1, uniform ? "[uniform]" : "[content]",
+      worst, worst_at);
+
+  if (!uniform) {
+    ++verify_content_frames_;
+    if (worst > 2) {
+      Log("verify: MISMATCH, falling back to the CPU path");
+      compute_ready_ = false;
+      compute_failed_ = true;
+      compute_verified_ = true;
+      return;
+    }
+    /* Only trust the GPU path once several frames with real content, at
+     * different offsets and sizes, have matched. */
+    if (verify_content_frames_ >= 8) {
+      Log("verify: GPU path agrees over %u content frames, verification done",
+          verify_content_frames_);
+      compute_verified_ = true;
+    }
   }
 }
 
-bool SwapChainProcessor::ProcessFrame(
+bool SwapChainProcessor::ProcessFrame(bool SwapChainProcessor::ProcessFrame(
     const IDARG_OUT_RELEASEANDACQUIREBUFFER& buffer) {
   const IDDCX_METADATA& meta = buffer.MetaData;
   if (!meta.pSurface) {
@@ -778,6 +807,9 @@ bool SwapChainProcessor::ProcessFrame(
 
   bool converted = false;
   bool used_gpu = false;
+
+  verify_fb_width_ = fb_width;
+  verify_fb_height_ = fb_height;
 
   if (EnsureCompute()) {
     /* Check the two paths agree before trusting the GPU one. */

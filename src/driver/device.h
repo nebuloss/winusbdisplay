@@ -148,6 +148,9 @@ class SwapChainProcessor {
   bool compute_ready_ = false;
   bool compute_failed_ = false;
   bool compute_verified_ = false;
+  unsigned verify_content_frames_ = 0;
+  int verify_fb_width_ = 0;
+  int verify_fb_height_ = 0;
 
   /* The chip holds two frame buffers and alternates between them, so damage
    * has to be tracked per buffer: new damage accumulates into both, and only
