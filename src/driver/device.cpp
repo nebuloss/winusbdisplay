@@ -325,24 +325,8 @@ void FrameSender::WorkerMain() {
     }
 
     ULONGLONG start = GetTickCount64();
-    const ULONGLONG waited = start - slot->queued_at;
     bool ok = device_->SendFrame(slot->data.data(), slot->length);
-    if (ok && slot->twice) {
-      /* Same bytes again so the chip's other frame buffer matches. */
-      ok = device_->SendFrame(slot->data.data(), slot->length);
-    }
     ULONGLONG cost = GetTickCount64() - start;
-    {
-      /* Split the delay a frame sees into time spent waiting behind the
-       * previous transfer and time on the wire. */
-      static ULONGLONG last_latency_log = 0;
-      const ULONGLONG now = GetTickCount64();
-      if (now - last_latency_log >= 2000) {
-        last_latency_log = now;
-        Log("latency: queued %llums, on the wire %llums, %zu bytes", waited,
-            cost, slot->length);
-      }
-    }
     if (!ok) {
       Log("FrameSender: send failed after %llums: %s", cost,
           device_->last_error().c_str());
@@ -561,7 +545,6 @@ bool SwapChainProcessor::ProcessFrame(
     have_new_damage = !damage.empty();
   }
 
-  Rect to_send;
   if (have_new_damage) {
     /* Both of the chip's frame buffers now owe this region. */
     pending_damage_[0] = MergeRects(pending_damage_[0], damage);
