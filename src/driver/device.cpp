@@ -58,10 +58,13 @@ IDDCX_TARGET_MODE MakeTargetMode(const Mode& mode) {
   out.Size = sizeof(out);
   out.TargetVideoSignalInfo.targetVideoSignalInfo =
       MakeSignalInfo(mode.width, mode.height, mode.hz);
-  /* Let the panel run at its real refresh rate but ask the OS to compose new
-   * content only as fast as the USB link can carry it. */
+  /* A vSyncFreqDivider above 1 looks like the right way to tell the OS to
+   * compose less often than the panel refreshes, but Windows then rejects the
+   * whole topology (SetDisplayConfig fails with ERROR_GEN_FAILURE and the
+   * path disappears). Pacing is therefore handled by dropping frames in
+   * FrameSender instead, and by offering genuine low-refresh modes below. */
   out.TargetVideoSignalInfo.targetVideoSignalInfo.AdditionalSignalInfo
-      .vSyncFreqDivider = SyncDividerForMode(mode);
+      .vSyncFreqDivider = 1;
   return out;
 }
 
