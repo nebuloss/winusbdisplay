@@ -16,6 +16,24 @@ and it is expensive to reverse.
 but wrong in several specific places; `docs/protocol-notes.md` records every
 correction with evidence. When they conflict, the protocol notes win.
 
+## Version control
+
+This is a git repository. **Commit each change separately, as soon as it is
+verified.** Several regressions during development were only caught by the
+user noticing the display had broken, and with no history there was no way to
+bisect or revert cleanly; everything had to be reasoned back by hand.
+
+Specifically:
+
+- One commit per logical change, with the measurement or observation that
+  justified it in the message.
+- Commit before starting an experiment, so reverting is one command.
+- Experiments that did not work are worth committing too, then reverting, so
+  the reasoning survives. `docs/troubleshooting.md` lists several ruled-out
+  hypotheses that would otherwise be retried.
+- `build/` and the generated `src/driver/convert_cs.h` are ignored, as are the
+  vendor archives, which are large and separately redistributable.
+
 ## Commands
 
 ```
