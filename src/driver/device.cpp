@@ -274,7 +274,15 @@ SwapChainProcessor::SwapChainProcessor(IDDCX_SWAPCHAIN swapchain,
       mode_(mode),
       previous_damage_(EmptyRect()) {
   terminate_event_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+}
+
+bool SwapChainProcessor::Start() {
+  if (!EnsureD3D()) {
+    Log("SwapChain: D3D init failed");
+    return false;
+  }
   thread_ = std::thread(&SwapChainProcessor::Run, this);
+  return true;
 }
 
 SwapChainProcessor::~SwapChainProcessor() {
@@ -453,14 +461,6 @@ void SwapChainProcessor::Run() {
    * hung if we fall too far behind on the acquire loop. */
   SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
 
-  if (!EnsureD3D()) {
-    /* Delete the swapchain so the OS knows to build a new one and try again.
-     * Simply returning leaves the monitor attached to a dead swapchain. */
-    Log("SwapChain: D3D init failed, releasing swapchain");
-    WdfObjectDelete(swapchain_);
-    swapchain_ = nullptr;
-    return;
-  }
   Log("SwapChain: processing started");
 
   unsigned logged = 0;
@@ -748,11 +748,20 @@ NTSTATUS IndirectDevice::AssignSwapChain(const IDARG_IN_SETSWAPCHAIN* args) {
     Log("AssignSwapChain: device not ready");
     return STATUS_DEVICE_NOT_READY;
   }
-  processor_.reset(new SwapChainProcessor(args->hSwapChain,
-                                          args->RenderAdapterLuid,
-                                          args->hNextSurfaceAvailable,
-                                          ms_device_.get(), sender_.get(),
-                                          active_mode_));
+  std::unique_ptr<SwapChainProcessor> processor(new SwapChainProcessor(
+      args->hSwapChain, args->RenderAdapterLuid, args->hNextSurfaceAvailable,
+      ms_device_.get(), sender_.get(), active_mode_));
+
+  if (!processor->Start()) {
+    /* Delete the swapchain so the OS builds a new one and tries again. This
+     * has to happen here, on the OS's own thread, while the object is still
+     * ours to delete. */
+    Log("AssignSwapChain: releasing unusable swapchain");
+    WdfObjectDelete(args->hSwapChain);
+    return STATUS_SUCCESS;
+  }
+
+  processor_ = std::move(processor);
   return STATUS_SUCCESS;
 }
 

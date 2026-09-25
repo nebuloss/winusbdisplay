@@ -88,6 +88,12 @@ class SwapChainProcessor {
                      FrameSender* sender, const Mode& mode);
   ~SwapChainProcessor();
 
+  /* D3D is initialised on the calling thread, so a failure can be reported
+   * before any worker exists. Doing it on the worker instead means the worker
+   * may still be running when the OS reclaims the swapchain, and deleting it
+   * from there is a use-after-free that takes the whole UMDF host down. */
+  bool Start();
+
   void Terminate();
 
  private:
