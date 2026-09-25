@@ -151,6 +151,7 @@ class IndirectDevice {
   const std::vector<uint8_t>& edid() const { return edid_; }
 
   Device* device() { return ms_device_.get(); }
+  DdcCiSlave* ddc() { return &ddc_; }
   IDDCX_ADAPTER adapter() const { return adapter_; }
   IDDCX_MONITOR monitor() const { return monitor_; }
 
@@ -165,6 +166,10 @@ class IndirectDevice {
   std::unique_ptr<Device> ms_device_;
   std::unique_ptr<FrameSender> sender_;
   std::unique_ptr<SwapChainProcessor> processor_;
+
+  /* Makes the monitor answer DDC/CI, so the Windows Monitor Configuration
+   * API (and tools built on it, such as Twinkle Tray) can drive brightness. */
+  DdcCiSlave ddc_;
 
   VideoPort port_ = VideoPort::kUnknown;
   std::vector<uint8_t> edid_;

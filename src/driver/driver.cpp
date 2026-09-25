@@ -49,6 +49,8 @@ EVT_IDD_CX_MONITOR_GET_DEFAULT_DESCRIPTION_MODES
     EvtIddCxMonitorGetDefaultModes;
 EVT_IDD_CX_MONITOR_QUERY_TARGET_MODES EvtIddCxMonitorQueryModes;
 EVT_IDD_CX_MONITOR_ASSIGN_SWAPCHAIN EvtIddCxMonitorAssignSwapChain;
+EVT_IDD_CX_MONITOR_I2C_TRANSMIT EvtIddCxMonitorI2CTransmit;
+EVT_IDD_CX_MONITOR_I2C_RECEIVE EvtIddCxMonitorI2CReceive;
 EVT_IDD_CX_MONITOR_UNASSIGN_SWAPCHAIN EvtIddCxMonitorUnassignSwapChain;
 
 void EvtDeviceContextCleanup(WDFOBJECT object) {
@@ -263,6 +265,36 @@ NTSTATUS EvtIddCxMonitorAssignSwapChain(IDDCX_MONITOR monitor,
   return device->AssignSwapChain(args);
 }
 
+/* DDC/CI lives on I2C address 0x37. Everything else is refused so that a
+ * probe cannot mistake us for a device we are not. */
+NTSTATUS EvtIddCxMonitorI2CTransmit(IDDCX_MONITOR monitor,
+                                    const IDARG_IN_I2C_TRANSMIT* args) {
+  IndirectDevice* device = DeviceFrom(monitor);
+  if (!device) {
+    return STATUS_DEVICE_NOT_READY;
+  }
+  if (!device->ddc()->Transmit(args->SevenBitI2CAddress,
+                               static_cast<const uint8_t*>(args->pData),
+                               args->DataSizeInBytes)) {
+    return STATUS_NOT_SUPPORTED;
+  }
+  return STATUS_SUCCESS;
+}
+
+NTSTATUS EvtIddCxMonitorI2CReceive(IDDCX_MONITOR monitor,
+                                   const IDARG_IN_I2C_RECEIVE* args) {
+  IndirectDevice* device = DeviceFrom(monitor);
+  if (!device) {
+    return STATUS_DEVICE_NOT_READY;
+  }
+  if (!device->ddc()->Receive(args->SevenBitI2CAddress,
+                              static_cast<uint8_t*>(args->pData),
+                              args->DataSizeInBytes)) {
+    return STATUS_NOT_SUPPORTED;
+  }
+  return STATUS_SUCCESS;
+}
+
 NTSTATUS EvtIddCxMonitorUnassignSwapChain(IDDCX_MONITOR monitor) {
   IndirectDevice* device = DeviceFrom(monitor);
   if (device) {
@@ -286,6 +318,8 @@ NTSTATUS EvtDriverDeviceAdd(WDFDRIVER, PWDFDEVICE_INIT device_init) {
   config.EvtIddCxMonitorQueryTargetModes = EvtIddCxMonitorQueryModes;
   config.EvtIddCxMonitorAssignSwapChain = EvtIddCxMonitorAssignSwapChain;
   config.EvtIddCxMonitorUnassignSwapChain = EvtIddCxMonitorUnassignSwapChain;
+  config.EvtIddCxMonitorI2CTransmit = EvtIddCxMonitorI2CTransmit;
+  config.EvtIddCxMonitorI2CReceive = EvtIddCxMonitorI2CReceive;
 
   NTSTATUS status = IddCxDeviceInitConfig(device_init, &config);
   if (!NT_SUCCESS(status)) {
