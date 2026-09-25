@@ -497,19 +497,41 @@ IndirectDevice::~IndirectDevice() {
 
 NTSTATUS IndirectDevice::PrepareHardware() {
   std::string error;
-  std::unique_ptr<WdfUsbBackend> backend =
+
+  /* Data plane: the bulk pixel pipe on the interface we are bound to. */
+  std::unique_ptr<WdfUsbBackend> data =
       WdfUsbBackend::Create(wdf_device_, &error);
-  if (!backend) {
+  if (!data) {
     return STATUS_DEVICE_CONFIGURATION_ERROR;
   }
 
-  ms_device_.reset(new Device(std::move(backend)));
+  /* Control plane: the sibling HID interface of the same physical dongle.
+   * See usb_backend.h for why it cannot go through the USB target. */
+  WDF_DEVICE_PROPERTY_DATA property;
+  WDF_DEVICE_PROPERTY_DATA_INIT(&property, &DEVPKEY_Device_ContainerId);
+  GUID container = {};
+  ULONG required = 0;
+  DEVPROPTYPE type = 0;
+  NTSTATUS status = WdfDeviceQueryPropertyEx(
+      wdf_device_, &property, sizeof(container), &container, &required, &type);
+  if (!NT_SUCCESS(status) || type != DEVPROP_TYPE_GUID) {
+    return STATUS_DEVICE_CONFIGURATION_ERROR;
+  }
+
+  std::unique_ptr<HidTransport> control =
+      HidTransport::OpenForContainer(container, &error);
+  if (!control) {
+    return STATUS_DEVICE_CONFIGURATION_ERROR;
+  }
+
+  ms_device_.reset(new Device(std::unique_ptr<Transport>(
+      new CompositeTransport(std::move(control), std::move(data)))));
 
   if (!ms_device_->ReadVideoPort(&port_)) {
     port_ = VideoPort::kUnknown;
   }
 
-  /* Reading EDID is 128 control round trips, so do it once here and cache. */
+  /* Reading EDID is 32 control round trips, so do it once here and cache. */
   edid_valid_ = false;
   if (port_ == VideoPort::kHdmi || port_ == VideoPort::kVga ||
       port_ == VideoPort::kDigital) {
@@ -525,13 +547,6 @@ NTSTATUS IndirectDevice::PrepareHardware() {
   }
 
   BuildModeList();
-
-  /* The Linux driver does a modeset at probe time because the chip otherwise
-   * behaves erratically before the first one. */
-  if (!modes_.empty()) {
-    ms_device_->PowerOn();
-    ms_device_->SetResolution(modes_.front());
-  }
 
   sender_.reset(new FrameSender(ms_device_.get()));
   sender_->Start();
