@@ -165,7 +165,11 @@ bool Device::EnableOutput(bool enable) {
   uint8_t data[6];
   memset(data, 0, sizeof(data));
   data[0] = enable ? 1 : 0;
-  return WriteCommand(kCmdVideoEnable, data);
+  if (!WriteCommand(kCmdVideoEnable, data)) {
+    return false;
+  }
+  output_enabled_ = enable;
+  return true;
 }
 
 bool Device::ReadVideoPort(VideoPort* port) {
@@ -356,6 +360,17 @@ bool Device::SendFrame(const uint8_t* data, size_t len) {
   }
   if (!transport_->BulkWrite(data, len)) {
     return FailTransport("bulk write");
+  }
+  /* The vendor driver terminates every frame with a zero length bulk packet.
+   * Without it the chip can sit waiting for more data and the panel stays
+   * dark even though every transfer reported success. */
+  if (!transport_->BulkWrite(nullptr, 0)) {
+    return FailTransport("end of frame packet");
+  }
+  if (!output_enabled_) {
+    /* Only light the panel once a frame has actually landed, otherwise the
+     * user sees whatever garbage was left in the chip's memory. */
+    output_enabled_ = EnableOutput(true);
   }
   return true;
 }
