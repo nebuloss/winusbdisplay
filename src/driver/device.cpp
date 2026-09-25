@@ -958,11 +958,16 @@ bool SwapChainProcessor::ProcessFrame(
     }
   }
 
-  if (cursor_active_) {
-    /* The cursor thread composites the pointer over a clean copy of the
-     * desktop, so it needs one that never has the pointer baked in. Keeping
-     * it here costs a copy of the damaged region per frame, which is far
-     * cheaper than routing every mouse movement through the compositor. */
+  {
+    /* Keep a CPU copy of the desktop, updated region by region.
+     *
+     * IddCx only guarantees the acquired surface stays valid until the next
+     * call to ReleaseAndAcquireBuffer, so anything that needs the current
+     * picture outside that window, namely the idle refresh, cannot read it
+     * safely. Reading a surface the OS has since recycled paints whatever now
+     * occupies that memory, which appears as content briefly reverting.
+     *
+     * The cursor path, when enabled, also composites over this copy. */
     if (EnsureStaging(source_desc.Width, source_desc.Height)) {
       D3D11_BOX box = {};
       box.left = static_cast<UINT>(to_send.x1);
@@ -1090,9 +1095,12 @@ bool SwapChainProcessor::ProcessFrame(
 }
 
 bool SwapChainProcessor::SendRefresh(bool whole_screen) {
-  if (!last_source_ || last_width_ <= 0 || last_height_ <= 0) {
+  std::lock_guard<std::mutex> copy_lock(cursor_mutex_);
+  if (desktop_copy_.empty() || desktop_width_ <= 0 || desktop_height_ <= 0) {
     return false;
   }
+  last_width_ = desktop_width_;
+  last_height_ = desktop_height_;
 
   Rect full;
   full.x1 = 0;
@@ -1138,47 +1146,14 @@ bool SwapChainProcessor::SendRefresh(bool whole_screen) {
     return false;
   }
 
-  bool converted = false;
-  if (compute_ready_) {
-    converted = ConvertOnGpu(last_source_.Get(), full, adjust,
-                             transfer->data() + kFrameHeaderSize,
-                             transfer->size() - kFrameOverhead);
-    if (converted) {
-      FrameUpdateHeader header;
-      PutBe16(header.marker_be, kFrameMarker);
-      PutBe24(header.position, 0);
-      PutBe24(header.dimensions,
-              ((static_cast<uint32_t>(full.width()) & 0xFFF) << 12) |
-                  (static_cast<uint32_t>(full.height()) & 0xFFF));
-      memcpy(transfer->data(), &header, sizeof(header));
-      memcpy(transfer->data() + kFrameHeaderSize + pixel_bytes, kFrameFooter,
-             kFrameFooterSize);
-    }
-  }
-
-  if (!converted) {
-    if (!EnsureStaging(static_cast<UINT>(last_width_),
-                       static_cast<UINT>(last_height_))) {
-      sender_->Cancel(transfer);
-      return false;
-    }
-    d3d_context_->CopyResource(staging_.Get(), last_source_.Get());
-
-    D3D11_MAPPED_SUBRESOURCE mapped = {};
-    if (FAILED(d3d_context_->Map(staging_.Get(), 0, D3D11_MAP_READ, 0,
-                                 &mapped))) {
-      sender_->Cancel(transfer);
-      return false;
-    }
-    const size_t produced =
-        FrameRect(transfer->data(), transfer->size(),
-                  static_cast<const uint8_t*>(mapped.pData), mapped.RowPitch,
-                  last_width_, last_height_, full, adjust);
-    d3d_context_->Unmap(staging_.Get(), 0);
-    if (produced == 0) {
-      sender_->Cancel(transfer);
-      return false;
-    }
+  /* Converted from our own copy, which is always valid, rather than from the
+   * acquired surface, which by now may have been recycled by the OS. */
+  const size_t produced =
+      FrameRect(transfer->data(), transfer->size(), desktop_copy_.data(),
+                desktop_stride_, desktop_width_, desktop_height_, full, adjust);
+  if (produced == 0) {
+    sender_->Cancel(transfer);
+    return false;
   }
 
   /* Sent twice, so both of the chip's frame buffers end up holding this
