@@ -931,23 +931,15 @@ bool SwapChainProcessor::SendRefresh(bool whole_screen) {
   full.x2 = last_width_;
   full.y2 = last_height_;
 
-  if (!whole_screen) {
-    /* Keeping the panel awake only needs traffic, not a whole picture. A
-     * full repaint costs eight vsync periods, during which no real update
-     * can go out, so send a band that fits in one period instead. The band
-     * walks down the screen so any accumulated error still gets corrected. */
-    const int rows = static_cast<int>(kBytesPerVsyncPeriod /
-                                      (static_cast<uint32_t>(last_width_) * 2));
-    if (rows > 0 && rows < last_height_) {
-      full.y1 = refresh_band_row_;
-      full.y2 = refresh_band_row_ + rows;
-      if (full.y2 > last_height_) {
-        full.y1 = 0;
-        full.y2 = rows;
-      }
-      refresh_band_row_ = full.y2 >= last_height_ ? 0 : full.y2;
-    }
-  }
+  /* Tempting idea that does not work: send only a band, since keeping the
+   * panel awake just needs traffic and a full repaint costs eight vsync
+   * periods. The chip alternates between two frame buffers on every
+   * transfer, so a partial update lands in one of them and leaves the other
+   * holding older content for that region. The two then alternate on screen
+   * and the picture visibly flickers. Any partial update has to be tracked
+   * per buffer, which is what pending_damage_ is for, so a refresh that is
+   * meant to resynchronise everything sends the whole screen. */
+  (void)whole_screen;
 
   full = AlignDamageRect(full, last_width_, last_height_);
   if (full.empty()) {
@@ -1017,10 +1009,13 @@ bool SwapChainProcessor::SendRefresh(bool whole_screen) {
   }
 
   sender_->Submit(transfer, length);
-  if (whole_screen) {
-    pending_damage_[0] = EmptyRect();
-    pending_damage_[1] = EmptyRect();
-  }
+
+  /* Only the buffer that was just written is up to date. Clearing both, as an
+   * earlier version did, left the other one stale and it would reappear on
+   * the next flip. Advance the index so successive refreshes bring both
+   * buffers current. */
+  pending_damage_[frame_index_] = EmptyRect();
+  frame_index_ = 1 - frame_index_;
   last_send_ms_ = GetTickCount64();
   return true;
 }
