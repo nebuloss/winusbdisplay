@@ -99,8 +99,18 @@ NTSTATUS EvtDeviceD0Entry(WDFDEVICE wdf_device, WDF_POWER_DEVICE_STATE) {
   caps.EndPointDiagnostics.pEndPointFriendlyName = L"MacroSilicon USB Display";
   caps.EndPointDiagnostics.pEndPointManufacturerName = L"MacroSilicon";
   caps.EndPointDiagnostics.pEndPointModelName = L"MS912x/MS913x";
-  caps.EndPointDiagnostics.pFirmwareVersion = nullptr;
-  caps.EndPointDiagnostics.pHardwareVersion = nullptr;
+  /* These two are not optional: IddCxAdapterInitAsync rejects the caps with
+   * STATUS_INVALID_PARAMETER if either version pointer is null. */
+  IDDCX_ENDPOINT_VERSION hardware_version = {};
+  hardware_version.Size = sizeof(hardware_version);
+  hardware_version.MajorVer = 1;
+
+  IDDCX_ENDPOINT_VERSION firmware_version = {};
+  firmware_version.Size = sizeof(firmware_version);
+  firmware_version.MajorVer = 1;
+
+  caps.EndPointDiagnostics.pHardwareVersion = &hardware_version;
+  caps.EndPointDiagnostics.pFirmwareVersion = &firmware_version;
 
   WDF_OBJECT_ATTRIBUTES attributes;
   WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&attributes,
