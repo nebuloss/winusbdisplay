@@ -2,8 +2,15 @@
 #
 # Stages, signs and installs the IddCx indirect display driver.
 #
-# Requires an elevated shell and test signing:
-#     bcdedit /set testsigning on      (then reboot; Secure Boot must be off)
+# Requires an elevated shell. It does NOT require test signing or a reboot.
+# The only kernel binaries this package pulls in are WUDFRd.sys and
+# IndirectKmd.sys, both Microsoft signed and in-box; our own binary runs in
+# user mode under WUDFHost. So kernel driver signature enforcement never
+# applies. PnP only needs the catalog to chain to a certificate in the Trusted
+# Publisher store, which this script creates. Works with Secure Boot enabled.
+#
+# If installation is refused anyway, see docs/troubleshooting.md for the test
+# signing fallback.
 #
 # This replaces the vendor driver on the dongle's display interface. Reverse
 # with scripts\uninstall-driver.ps1.
@@ -68,9 +75,8 @@ Copy-Item $inf $stage
 Write-Host "==> staged package in $stage"
 
 $testSigning = (bcdedit /enum '{current}' | Select-String 'testsigning\s+Yes')
-if (-not $testSigning) {
-    Write-Warning 'Test signing does not appear to be enabled. Installation will likely fail.'
-    Write-Warning 'Run: bcdedit /set testsigning on   then reboot (Secure Boot must be off).'
+if ($testSigning) {
+    Write-Host 'note: test signing is on. Not required, but harmless.'
 }
 
 Write-Host '==> generating catalog'
@@ -78,13 +84,15 @@ $osTarget = if ($Platform -eq 'ARM64') { '10_ARM64' } else { '10_x64' }
 & (Get-KitTool 'Inf2Cat.exe') /driver:$stage /os:$osTarget /verbose
 if ($LASTEXITCODE -ne 0) { throw 'Inf2Cat failed' }
 
-Write-Host '==> ensuring a test signing certificate exists'
+Write-Host '==> ensuring a code signing certificate exists'
 $subject = 'CN=winusbdisplay test signing'
 $cert = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.Subject -eq $subject } |
     Select-Object -First 1
 if (-not $cert) {
     $cert = New-SelfSignedCertificate -Subject $subject -Type CodeSigningCert `
         -CertStoreLocation Cert:\LocalMachine\My -NotAfter (Get-Date).AddYears(5)
+    # Root makes the chain valid; TrustedPublisher is what lets PnP install
+    # without prompting. Both take effect immediately, no reboot.
     foreach ($store in 'Root', 'TrustedPublisher') {
         $target = New-Object System.Security.Cryptography.X509Certificates.X509Store($store, 'LocalMachine')
         $target.Open('ReadWrite')
