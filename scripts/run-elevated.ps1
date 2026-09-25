@@ -1,22 +1,32 @@
-# Runs another script elevated via UAC and tees its output to a log file, so
-# the non-elevated caller can read the result.
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# Runs another script elevated via UAC, with no visible window, capturing all
+# output streams to a log file that the unelevated caller then prints.
+#
+# The elevated window is hidden on purpose: an interactive window here just
+# shows a blank console while the script works, which looks like a hang.
+
 param(
     [Parameter(Mandatory = $true)][string]$Script,
     [string]$LogFile,
-    [string[]]$Arguments = @()
+    [string]$Arguments = ''
 )
 
 $ErrorActionPreference = 'Stop'
+
 if (-not $LogFile) { $LogFile = Join-Path $PSScriptRoot 'elevated.log' }
 if (Test-Path $LogFile) { Remove-Item $LogFile -Force }
 
-$inner = @(
-    '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
-    ('& { try { & "' + $Script + '" ' + ($Arguments -join ' ') +
-     ' *>&1 | Tee-Object -FilePath "' + $LogFile + '" } catch { $_ | Out-String | Tee-Object -FilePath "' +
-     $LogFile + '" -Append } ; "EXITCODE=$LASTEXITCODE" | Out-File -Append "' + $LogFile + '" }')
-)
+# *> captures output, error, warning, verbose and information streams.
+$command = "& '$Script' $Arguments *> '$LogFile'"
 
-$p = Start-Process -FilePath 'powershell.exe' -ArgumentList $inner -Verb RunAs -Wait -PassThru
-Write-Output ("elevated process exit: " + $p.ExitCode)
-if (Test-Path $LogFile) { Get-Content $LogFile }
+$p = Start-Process -FilePath 'powershell.exe' `
+    -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $command) `
+    -Verb RunAs -WindowStyle Hidden -Wait -PassThru
+
+if (Test-Path $LogFile) {
+    Get-Content $LogFile
+} else {
+    Write-Output "(no output captured)"
+}
+Write-Output ("[elevated exit code: " + $p.ExitCode + "]")
