@@ -702,8 +702,11 @@ int CmdBenchSizes() {
     int width;
     int height;
   };
-  const Size sizes[] = {{64, 64},    {128, 128},  {256, 256}, {512, 512},
-                        {640, 480},  {1024, 768}, {1280, 720}, {1920, 540},
+  /* Clustered around the point where a transfer stops fitting in one vsync
+   * period, which is what actually decides the interactive update rate. */
+  const Size sizes[] = {{512, 512},  {1920, 128}, {1920, 136}, {1920, 144},
+                        {1920, 152}, {1920, 160}, {1920, 176}, {1920, 192},
+                        {1920, 208}, {1920, 256}, {1920, 320}, {1920, 540},
                         {1920, 1080}};
 
   /* Prime with a full frame: the chip appears to want one after a modeset
