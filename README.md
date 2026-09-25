@@ -24,13 +24,22 @@ and MacroSilicon's own GPL-2.0 Linux sources.
 | Control plane: chip id, connector, display status | **verified on hardware** |
 | EDID read and checksum | **verified on hardware** |
 | Flash read / custom timings | works (none programmed on the test unit) |
-| Modeset sequence | runs clean; visual result unverified |
-| Colour conversion and frame framing | **verified byte for byte** offline |
-| Pixels on the panel | blocked on driver installation |
-| IddCx driver | builds clean; not yet installed |
+| Modeset sequence | **verified on hardware** |
+| Colour conversion and frame framing | **verified byte for byte** |
+| Pixels on the panel | **working: colour bars and solid colours at 1080p and 720p** |
+| IddCx driver: installs, starts, reads EDID, builds mode list | working |
+| IddCx driver: monitor appears in Windows | **not yet** (see below) |
+
+The protocol half of this project is finished and proven. `msdisp` drives the
+panel end to end.
+
+The indirect display driver installs and starts cleanly, opens both transports,
+reads the monitor's EDID and builds its mode list, but `IddCxMonitorArrival`
+returns `STATUS_DEVICE_NOT_READY`, so no extra monitor appears in Settings yet.
+Investigation so far is written up in `docs/troubleshooting.md`.
 
 The test hardware is a dongle with USB id `345F:9133` that turns out to carry
-an **MS912C** die. See `docs/protocol-notes.md`.
+an **MS912C** die running at USB 2.0 high speed. See `docs/protocol-notes.md`.
 
 ## Quick start
 
@@ -52,31 +61,31 @@ build\msdisp.exe --transport file testpattern --mode 1920x1080@60 --bars
 
 ## Sending pixels
 
-The data plane needs the dongle's display interface bound to WinUSB, which
-means test signing:
+No reboot and no test signing are needed: neither package loads a third-party
+kernel binary, so all that is required is a trusted code signing certificate,
+which the install scripts create for you. It works with Secure Boot enabled.
 
 ```
-bcdedit /set testsigning on      :: then reboot, Secure Boot must be off
-```
+powershell -ExecutionPolicy Bypass -File scripts\elev.ps1 -Start
+powershell -ExecutionPolicy Bypass -File scripts\elev.ps1 ^
+    -Script %CD%\scripts\install-all.ps1
 
-Then, from an elevated prompt:
-
-```
-powershell -ExecutionPolicy Bypass -File scripts\install-winusb.ps1
 build\msdisp.exe testpattern --mode 1920x1080@60 --bars
+powershell -ExecutionPolicy Bypass -File scripts\visual-check.ps1
 ```
 
-## Installing the display driver
+`elev.ps1` starts one hidden elevated worker, so you get a single UAC prompt
+for the whole session instead of one per step.
+
+The WinUSB pixel pipe is exclusive, so the tool and the driver cannot both use
+it. To use the tool while the driver is installed, disable the driver first:
 
 ```
-powershell -ExecutionPolicy Bypass -File scripts\install-driver.ps1
+powershell -File scripts\elev.ps1 -Command ^
+    "Disable-PnpDevice -InstanceId 'ROOT\DISPLAY\0000' -Confirm:$false"
 ```
 
-An extra monitor should appear in Settings > System > Display. Reverse with
-`scripts\uninstall-driver.ps1`.
-
-`install-winusb.ps1` and `install-driver.ps1` claim the same interface, so
-install one or the other, not both.
+Remove everything with `scripts\purge.ps1`.
 
 ## Layout
 

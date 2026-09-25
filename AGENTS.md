@@ -19,12 +19,24 @@ correction with evidence. When they conflict, the protocol notes win.
 ## Commands
 
 ```
-scripts\build-tool.bat                      # msdisp console tool -> build\msdisp.exe
-scripts\build-driver.bat [Config] [Plat]    # IddCx driver -> build\driver\<plat>\<config>\
-scripts\install-winusb.ps1                  # bind WinUSB for the tool   (elevated)
-scripts\install-driver.ps1                  # install the display driver (elevated)
-scripts\uninstall-winusb.ps1 / uninstall-driver.ps1
+scripts\build-tool.bat                    # msdisp console tool -> build\msdisp.exe
+scripts\build-driver.bat [Config] [Plat]  # IddCx driver -> build\driver\<plat>\<config>\
+
+scripts\elev.ps1 -Start                   # elevated worker, ONE UAC prompt per session
+scripts\elev.ps1 -Script <abs path>       # run a script elevated, no prompt
+scripts\elev.ps1 -Command '<powershell>'  # run a command elevated, no prompt
+scripts\elev.ps1 -Stop
+
+scripts\install-all.ps1                   # both packages + root device node
+scripts\purge.ps1                         # remove every package and the device node
+scripts\diagnose-driver.ps1               # restart device, decode failure status
+scripts\visual-check.ps1                  # colour sweep on the panel
 ```
+
+Administrative steps go through `elev.ps1`, which starts one hidden elevated
+worker and then services commands over a spool directory. Without it every
+`pnputil` call is a separate UAC prompt. Read the security note at the top of
+`elevated-worker.ps1` before leaving it running.
 
 `build-tool.bat` compiles with `/W4 /WX`; the tool build must stay
 warning-clean. The driver project is `/W4` without `/WX` because the WDK
@@ -44,6 +56,16 @@ build\msdisp.exe --transport file testpattern --bars    # offline pipeline check
 - Toolchain present: VS 2022 **Build Tools** (no IDE), MSVC 14.44, WDK
   10.0.26100. ARM64 driver builds fail — the ARM64 toolset component is not
   installed.
+- Driver installation needs **no reboot and no test signing**. Neither package
+  loads a third-party kernel binary, so driver signature enforcement never
+  engages; PnP only needs the catalog to chain to a cert in Trusted Publisher,
+  which the install scripts create. It works with Secure Boot on.
+- `Inf2Cat.exe` ships **x86 only**, and its OS names are case sensitive with no
+  plain `10_ARM64` (use `10_RS3_ARM64`).
+- `signtool` needs `/sm` to see a certificate in the machine store.
+- `pnputil` silently keeps the old binary if the INF's `DriverVer` has not
+  changed. Always install the **build-stamped** INF from `build/driver/...`,
+  not the source one in `inf/`.
 - The shell here is a Bash-compatible interpreter on Windows with a **minimal
   coreutils set**. `grep`, `sed`, `head`, `tail` and `wc` are *not* available.
   Use the Grep/View tools, or PowerShell (`Select-String`, `Get-Content`).
@@ -77,11 +99,25 @@ src/common/     transport-agnostic protocol + frame pipeline (shared by both bin
   ms912x_device.*   all device logic. Owns the control lock.
   ms912x_convert.*  XRGB8888 -> UYVY, damage rect alignment, frame framing
 src/tools/msdisp/ console tool
-src/driver/       IddCx UMDF2 driver
-  usb_backend.*     Transport implemented over the WDF USB target
+src/driver/       IddCx UMDF2 driver (root-enumerated software device)
   device.*          IddCx adapter/monitor, swapchain thread, frame sender
   driver.*          DriverEntry and the IddCx callbacks
+  log.*             file logger, see below
 ```
+
+**The two planes live on different USB interfaces.** Control transfers are
+class requests aimed at interface 0 (the HID collection); the bulk pixel pipe
+is on MI_03. Windows gives those interfaces to different drivers and WinUSB
+will not proxy a control request to an interface it does not own. So both the
+tool and the driver use a `CompositeTransport`: `HidTransport` for control,
+`WinUsbTransport` for data. That pipe is exclusive, so the tool and the driver
+cannot run at the same time.
+
+The driver is **root-enumerated**, not bound to the USB interface, because
+IddCx's `IndirectKmd` upper filter is incompatible with
+`UmdfDispatcher = WinUsb`. It reaches the dongle through user-mode handles,
+which is fine because UMDF hosts are user-mode processes. Both INF packages
+must be installed. See docs/troubleshooting.md.
 
 Data flow, driver side:
 
@@ -98,6 +134,17 @@ The `Transport` split is the most important structural decision: it is what
 lets the control plane run over HID during bring-up and the frame pipeline be
 validated against disk dumps. Keep new device logic in `Device`, not in a
 transport.
+
+## Debugging the driver
+
+WDF collapses initialisation failures into one generic status, so the driver
+writes its own log to `C:\Windows\Temp\ms912xidd.log` recording the exact
+`NTSTATUS` of every IddCx call. Always read that first; the event log will
+only say "problem code 10". `Log()` is in `src/driver/log.h`.
+
+Returning a **distinct** `NTSTATUS` per failure point is also worth keeping:
+`PrepareHardware`'s return value is one of the few things that surfaces
+verbatim in the UMDF event log.
 
 ## Rules that are easy to violate
 
