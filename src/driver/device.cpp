@@ -739,15 +739,18 @@ void SwapChainProcessor::VerifyGpuAgainstCpu(ID3D11Texture2D* source,
     }
   }
 
-  if (!uniform) {
-    Log("verify: %dx%d at (%d,%d) worst=%d at byte %zu", rect.width(),
-        rect.height(), rect.x1, rect.y1, worst, worst_at);
-  }
+  (void)worst_at;
 
   if (!uniform) {
     ++verify_content_frames_;
-    if (worst > 2) {
-      Log("verify: MISMATCH, falling back to the CPU path");
+    /* Exact, not close. The two paths are used for different damage sizes, so
+     * a region converted by one and later by the other must produce the same
+     * bytes or the picture alternates between two versions of itself. A
+     * single least significant bit is enough to be visible on antialiased
+     * text, which is where this showed up. */
+    if (worst != 0) {
+      Log("verify: GPU differs from CPU by %d, using the CPU path only",
+          worst);
       compute_ready_ = false;
       compute_failed_ = true;
       compute_verified_ = true;
