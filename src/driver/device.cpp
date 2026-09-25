@@ -255,66 +255,31 @@ void FrameSender::Stop() {
   }
 }
 
-std::vector<uint8_t>* FrameSender::AcquireBuffer(DWORD wait_ms,
-                                                 Rect* superseded) {
+std::vector<uint8_t>* FrameSender::AcquireBuffer(DWORD wait_ms) {
   std::unique_lock<std::mutex> lock(mutex_);
-  *superseded = EmptyRect();
+  Slot& slot = slots_[next_slot_];
 
-  /* Prefer a slot that is completely free. */
-  for (Slot& slot : slots_) {
-    if (!slot.in_flight && !slot.queued) {
-      return &slot.data;
+  if (slot.in_flight || slot.queued) {
+    /* Wait briefly, then give up. Queueing without limit would build latency
+     * and eventually stall the compositor's acquire loop, which Windows
+     * treats as a hung display. */
+    if (!free_cv_.wait_for(lock, std::chrono::milliseconds(wait_ms),
+                           [&] { return !slot.in_flight && !slot.queued; })) {
+      ++frames_dropped_;
+      return nullptr;
     }
   }
-
-  /* Otherwise take back a slot that is queued but has not started yet. Its
-   * contents are already out of date, and the caller is about to write
-   * something newer over them.
-   *
-   * This is what keeps the cursor feeling attached to the mouse. The chip
-   * completes a transfer on its own 60 Hz boundary, so allowing a second
-   * frame to sit in the queue behind the one on the wire puts two whole
-   * periods, about 33 ms, between a movement and it appearing. Replacing the
-   * waiting frame instead keeps that to a single period and means what is
-   * sent is always the most recent picture rather than a stale one. */
-  for (Slot& slot : slots_) {
-    if (slot.queued && !slot.in_flight) {
-      slot.queued = false;
-      *superseded = slot.damage;
-      ++frames_superseded_;
-      return &slot.data;
-    }
-  }
-
-  /* Everything is genuinely on the wire. Wait briefly for one to land, then
-   * give up: queueing without limit would stall the compositor's acquire
-   * loop, which Windows treats as a hung display. */
-  if (!free_cv_.wait_for(lock, std::chrono::milliseconds(wait_ms), [&] {
-        return !slots_[0].in_flight || !slots_[1].in_flight;
-      })) {
-    ++frames_dropped_;
-    return nullptr;
-  }
-  for (Slot& slot : slots_) {
-    if (!slot.in_flight && !slot.queued) {
-      return &slot.data;
-    }
-  }
-  ++frames_dropped_;
-  return nullptr;
+  return &slot.data;
 }
 
-void FrameSender::Submit(std::vector<uint8_t>* buffer, size_t length,
-                         const Rect& damage, bool twice) {
+void FrameSender::Submit(std::vector<uint8_t>* buffer, size_t length) {
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    for (Slot& slot : slots_) {
-      if (&slot.data == buffer) {
-        slot.length = length;
-        slot.damage = damage;
-        slot.queued = true;
-        slot.twice = twice;
-        slot.queued_at = GetTickCount64();
+    for (size_t i = 0; i < 2; ++i) {
+      if (&slots_[i].data == buffer) {
+        slots_[i].length = length;
+        slots_[i].queued = true;
+        next_slot_ = 1 - i;
         break;
       }
     }
@@ -565,19 +530,20 @@ bool SwapChainProcessor::ProcessFrame(
       IDARG_OUT_GETMOVEREGIONS out = {};
       if (NT_SUCCESS(IddCxSwapChainGetMoveRegions(swapchain_, &in, &out))) {
         for (UINT i = 0; i < out.MoveRegionOutCount; ++i) {
-          /* Only the destination. A move says content relocated from one
-           * place to another; a driver that can blit would copy it, and one
-           * that cannot, like this chip, repaints the destination instead.
-           * Anything the move uncovered arrives separately as a dirty rect.
-           *
-           * Merging the source as well looks safer but is badly wrong here,
-           * because everything is reduced to a single bounding rectangle:
-           * dragging a window across the screen puts the source and the
-           * destination far apart and the union swells to most of the
-           * display. Measured, that turned a 75 KB update into 3.2 MB, and
-           * 15 ms on the wire into 109 ms, which is precisely the lag that
-           * shows up while dragging. */
-          damage = MergeRects(damage, FromRECT(moves[i].DestRect));
+          /* A move relocates content, so both ends change: the destination
+           * gains it and the source is uncovered. Sending only the
+           * destination is cheaper, because the union of the two swells to
+           * span the whole drag, but it relies on the OS reporting the
+           * uncovered area as a dirty rect, which it does not always do. */
+          const RECT& dest = moves[i].DestRect;
+          damage = MergeRects(damage, FromRECT(dest));
+
+          Rect source;
+          source.x1 = moves[i].SourcePoint.x;
+          source.y1 = moves[i].SourcePoint.y;
+          source.x2 = source.x1 + (dest.right - dest.left);
+          source.y2 = source.y1 + (dest.bottom - dest.top);
+          damage = MergeRects(damage, source);
         }
       } else {
         query_failed = true;
@@ -596,47 +562,22 @@ bool SwapChainProcessor::ProcessFrame(
   }
 
   Rect to_send;
-  Rect covered;
-  {
-    std::lock_guard<std::mutex> damage_lock(damage_mutex_);
-    if (have_new_damage) {
-      pending_damage_[0] = MergeRects(pending_damage_[0], damage);
-    }
-
-    /* Send this frame's damage together with the previous frame's, which is
-     * what the Linux driver does and what the chip's double buffering
-     * requires. Each transfer lands in one of two frame buffers and they
-     * alternate on screen, so a region touched by only one transfer shows the
-     * new content on one refresh and the old on the next. Covering two
-     * consecutive frames' damage every time guarantees both buffers receive
-     * every change. Dropping this is what makes redrawn text shimmer. */
-    covered = pending_damage_[0];
-    to_send = AlignDamageRect(MergeRects(covered, pending_damage_[1]),
-                              fb_width, fb_height);
+  if (have_new_damage) {
+    /* Both of the chip's frame buffers now owe this region. */
+    pending_damage_[0] = MergeRects(pending_damage_[0], damage);
+    pending_damage_[1] = MergeRects(pending_damage_[1], damage);
   }
+
+  Rect to_send =
+      AlignDamageRect(pending_damage_[frame_index_], fb_width, fb_height);
   if (to_send.empty()) {
     return true;
   }
 
-  Rect superseded = EmptyRect();
-  std::vector<uint8_t>* transfer =
-      sender_->AcquireBuffer(kBufferWaitMs, &superseded);
+  std::vector<uint8_t>* transfer = sender_->AcquireBuffer(kBufferWaitMs);
   if (!transfer) {
     /* Dropped, but the damage stays pending so a later frame still sends it. */
     return true;
-  }
-
-  if (!superseded.empty()) {
-    /* A queued frame was taken back before it reached the chip, so the region
-     * it covered is still stale there and this frame has to carry it too. */
-    std::lock_guard<std::mutex> damage_lock(damage_mutex_);
-    covered = MergeRects(covered, superseded);
-    to_send = AlignDamageRect(MergeRects(to_send, superseded), fb_width,
-                              fb_height);
-    if (to_send.empty()) {
-      sender_->Cancel(transfer);
-      return true;
-    }
   }
 
   LARGE_INTEGER t_begin, t_converted, qpc_freq;
@@ -715,15 +656,12 @@ bool SwapChainProcessor::ProcessFrame(
    * buffers hold identical content, was tried and did not remove the text
    * shimmer, so whatever the chip does with its second buffer is not the
    * cause and the extra transfer was pure cost. */
-  sender_->Submit(transfer, length, to_send);
+  sender_->Submit(transfer, length);
 
-  {
-    /* [1] remembers what this frame covered, so the next transfer repeats it
-     * for the other chip buffer. [0] starts accumulating again from empty. */
-    std::lock_guard<std::mutex> damage_lock(damage_mutex_);
-    pending_damage_[1] = covered;
-    pending_damage_[0] = EmptyRect();
-  }
+  /* This buffer is up to date now; the other still owes the same damage, and
+   * will get it on the next transfer. */
+  pending_damage_[frame_index_] = EmptyRect();
+  frame_index_ = 1 - frame_index_;
   last_send_ms_ = now_ms;
 
   /* Report how much of the screen each transfer actually covers: if damage
@@ -756,9 +694,7 @@ bool SwapChainProcessor::SendRefresh(bool whole_screen) {
     return false;
   }
 
-  Rect superseded = EmptyRect();
-  std::vector<uint8_t>* transfer =
-      sender_->AcquireBuffer(kBufferWaitMs, &superseded);
+  std::vector<uint8_t>* transfer = sender_->AcquireBuffer(kBufferWaitMs);
   if (!transfer) {
     return false;
   }
@@ -792,13 +728,10 @@ bool SwapChainProcessor::SendRefresh(bool whole_screen) {
     return false;
   }
 
-  sender_->Submit(transfer, length, full);
-  {
-    /* A full repaint leaves nothing owed. */
-    std::lock_guard<std::mutex> damage_lock(damage_mutex_);
-    pending_damage_[0] = EmptyRect();
-    pending_damage_[1] = EmptyRect();
-  }
+  sender_->Submit(transfer, length);
+  /* A full repaint brings this buffer fully up to date. */
+  pending_damage_[frame_index_] = EmptyRect();
+  frame_index_ = 1 - frame_index_;
   last_send_ms_ = GetTickCount64();
   return true;
 }

@@ -43,32 +43,18 @@ class FrameSender {
   void Start();
   void Stop();
 
-  /* Returns the buffer to convert into, or nullptr if both are on the wire
-   * and the caller should drop this frame.
-   *
-   * If a frame that had been queued but not yet started is taken back, the
-   * damage it was carrying is written to `superseded` so the caller can fold
-   * it back into what still needs sending. That damage never reached the
-   * chip, so forgetting it would leave the region stale. */
-  std::vector<uint8_t>* AcquireBuffer(DWORD wait_ms, Rect* superseded);
+  /* Returns the buffer to convert into, or nullptr if both are busy and the
+   * caller should drop this frame. */
+  std::vector<uint8_t>* AcquireBuffer(DWORD wait_ms);
 
-  /* Hands the buffer previously returned by AcquireBuffer to the worker,
-   * along with the damage it covers. */
-  /* `twice` transmits the same bytes back to back. The chip alternates
-   * between two frame buffers on every transfer, so a standalone partial
-   * update otherwise lands in one of them and the other keeps older content,
-   * which alternates visibly on screen. Sending it twice puts it in both. */
-  void Submit(std::vector<uint8_t>* buffer, size_t length, const Rect& damage,
-              bool twice = false);
+  /* Hands the buffer previously returned by AcquireBuffer to the worker. */
+  void Submit(std::vector<uint8_t>* buffer, size_t length);
 
   /* Returns a buffer to the pool without sending it. */
   void Cancel(std::vector<uint8_t>* buffer);
 
   uint64_t frames_sent() const { return frames_sent_; }
   uint64_t frames_dropped() const { return frames_dropped_; }
-  /* Frames replaced before they reached the wire. Not a loss: it means a
-   * newer picture went out in place of a stale one. */
-  uint64_t frames_superseded() const { return frames_superseded_; }
 
  private:
   void WorkerMain();
@@ -78,14 +64,11 @@ class FrameSender {
     size_t length = 0;
     bool in_flight = false;
     bool queued = false;
-    /* What this frame repaints, so it can be recovered if superseded. */
-    Rect damage;
-    unsigned long long queued_at = 0;
-    bool twice = false;
   };
 
   Device* device_;
   Slot slots_[2];
+  size_t next_slot_ = 0;
 
   std::mutex mutex_;
   std::condition_variable free_cv_;
@@ -95,7 +78,6 @@ class FrameSender {
 
   std::atomic<uint64_t> frames_sent_{0};
   std::atomic<uint64_t> frames_dropped_{0};
-  std::atomic<uint64_t> frames_superseded_{0};
 };
 
 /* Drives one IddCx swapchain on its own thread. */
@@ -201,10 +183,10 @@ class SwapChainProcessor {
    * the buffer actually written is cleared. Tracking a single rectangle makes
    * each buffer miss half the updates, which shows up as ghosting and as the
    * picture flickering between two different images. */
-  /* Damage owed by each chip buffer, and which buffer the next transfer will
-   * land in. Touched by both the swapchain thread and the cursor thread, so
-   * everything that reads or writes them holds damage_mutex_. */
-  std::mutex damage_mutex_;
+  /* Damage owed by each of the chip's two frame buffers, and which one the
+   * next transfer lands in. The chip alternates on every transfer, so a
+   * region written once appears on one refresh and not the next unless both
+   * are tracked. */
   Rect pending_damage_[2];
   int frame_index_ = 0;
   bool force_full_frame_ = true;
