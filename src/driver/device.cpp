@@ -920,7 +920,7 @@ bool SwapChainProcessor::ProcessFrame(
   return true;
 }
 
-bool SwapChainProcessor::SendRefresh() {
+bool SwapChainProcessor::SendRefresh(bool whole_screen) {
   if (!last_source_ || last_width_ <= 0 || last_height_ <= 0) {
     return false;
   }
@@ -930,6 +930,25 @@ bool SwapChainProcessor::SendRefresh() {
   full.y1 = 0;
   full.x2 = last_width_;
   full.y2 = last_height_;
+
+  if (!whole_screen) {
+    /* Keeping the panel awake only needs traffic, not a whole picture. A
+     * full repaint costs eight vsync periods, during which no real update
+     * can go out, so send a band that fits in one period instead. The band
+     * walks down the screen so any accumulated error still gets corrected. */
+    const int rows = static_cast<int>(kBytesPerVsyncPeriod /
+                                      (static_cast<uint32_t>(last_width_) * 2));
+    if (rows > 0 && rows < last_height_) {
+      full.y1 = refresh_band_row_;
+      full.y2 = refresh_band_row_ + rows;
+      if (full.y2 > last_height_) {
+        full.y1 = 0;
+        full.y2 = rows;
+      }
+      refresh_band_row_ = full.y2 >= last_height_ ? 0 : full.y2;
+    }
+  }
+
   full = AlignDamageRect(full, last_width_, last_height_);
   if (full.empty()) {
     return false;
@@ -998,9 +1017,10 @@ bool SwapChainProcessor::SendRefresh() {
   }
 
   sender_->Submit(transfer, length);
-  /* A full repaint brings both chip buffers up to date. */
-  pending_damage_[0] = EmptyRect();
-  pending_damage_[1] = EmptyRect();
+  if (whole_screen) {
+    pending_damage_[0] = EmptyRect();
+    pending_damage_[1] = EmptyRect();
+  }
   last_send_ms_ = GetTickCount64();
   return true;
 }

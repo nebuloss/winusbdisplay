@@ -120,7 +120,12 @@ class SwapChainProcessor {
    * panel blanks if it stops receiving data, and when the desktop is static
    * the OS stops presenting entirely, so no frame ever arrives to trigger a
    * normal update. */
-  bool SendRefresh();
+  /* Re-sends the picture from the last acquired surface. The panel blanks if
+   * it stops receiving data, and when the desktop is static the OS stops
+   * presenting, so nothing else would keep it alive. Passing false sends only
+   * a band, which is enough to keep the link busy without costing the eight
+   * vsync periods a full repaint would. */
+  bool SendRefresh(bool whole_screen);
 
   IDDCX_SWAPCHAIN swapchain_;
   LUID render_adapter_;
@@ -170,6 +175,7 @@ class SwapChainProcessor {
    * when the desktop has not changed. */
   unsigned long long last_send_ms_ = 0;
   unsigned long long last_settings_poll_ms_ = 0;
+  int refresh_band_row_ = 0;
 
   std::thread thread_;
   HANDLE terminate_event_ = nullptr;

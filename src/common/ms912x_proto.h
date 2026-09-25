@@ -126,6 +126,19 @@ extern const size_t kModeListLen;
 
 const Mode* FindMode(uint16_t width, uint16_t height, uint16_t hz);
 
+/* The chip completes bulk transfers on its own 60 Hz vsync boundary, so the
+ * cost of an update is quantised: anything that fits in one period costs one
+ * period, and the next byte costs a whole extra one. Measured on an MS912C:
+ *
+ *   491 KB -> 16.7 ms (1 period, 60 updates/s)
+ *   552 KB -> 33.2 ms (2 periods, 30 updates/s)
+ *   4.1 MB -> 133  ms (8 periods, 7.5 updates/s)
+ *
+ * So the headline "7.5 fps" only applies to full screen updates. Ordinary
+ * desktop damage is far below this threshold and runs at the full 60. */
+constexpr uint32_t kBytesPerVsyncPeriod = 520u * 1024u;
+constexpr uint32_t kVsyncPeriodMicroseconds = 16667;
+
 /* Sustained bulk throughput of the chip, measured on an MS912C at 1080p.
  * Deliberately conservative: it is the figure used to decide how often the
  * OS should be allowed to present, and over-promising produces judder. */
