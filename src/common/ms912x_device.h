@@ -81,6 +81,9 @@ class Device {
    * zero length packet the chip expects, and enables output on first use. */
   bool SendFrame(const uint8_t* data, size_t len);
 
+  /* Aborts a transfer in flight so teardown does not block on the bus. */
+  void CancelTransfers() { transport_->CancelTransfers(); }
+
   const std::string& last_error() const { return last_error_; }
 
  private:

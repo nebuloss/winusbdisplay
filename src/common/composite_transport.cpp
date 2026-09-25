@@ -33,6 +33,12 @@ bool CompositeTransport::ControlGetReport(uint8_t* data, size_t len) {
   return true;
 }
 
+void CompositeTransport::CancelTransfers() {
+  if (data_) {
+    data_->CancelTransfers();
+  }
+}
+
 bool CompositeTransport::BulkWrite(const uint8_t* data, size_t len) {
   if (!data_->BulkWrite(data, len)) {
     SetError(data_->last_error());

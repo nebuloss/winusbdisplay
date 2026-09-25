@@ -34,6 +34,12 @@ class Transport {
 
   virtual bool BulkWrite(const uint8_t* data, size_t len) = 0;
 
+  /* Cancels any transfer in flight. A full frame occupies the bus for over a
+   * hundred milliseconds, and PnP stop or a surprise unplug must not sit and
+   * wait for it: the framework reports a driver that does as hung and takes
+   * the device offline. Safe to call from another thread. */
+  virtual void CancelTransfers() {}
+
   /* Human readable reason for the last failure. */
   const std::string& last_error() const { return last_error_; }
 

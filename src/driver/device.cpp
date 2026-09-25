@@ -223,12 +223,16 @@ void FrameSender::Stop() {
     }
     running_ = false;
   }
+  /* Abort first: the worker may be a hundred milliseconds into a transfer,
+   * and joining without cancelling makes teardown slow enough that the
+   * framework reports the driver as hung. */
+  if (device_) {
+    device_->CancelTransfers();
+  }
   work_cv_.notify_all();
   free_cv_.notify_all();
   if (worker_.joinable()) {
-    Log("FrameSender: stopping");
     worker_.join();
-    Log("FrameSender: stopped");
   }
 }
 

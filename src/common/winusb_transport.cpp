@@ -437,6 +437,16 @@ bool WinUsbTransport::BulkWritePipelined(const uint8_t* data, size_t len) {
   return true;
 }
 
+void WinUsbTransport::CancelTransfers() {
+  if (!winusb_handle_) {
+    return;
+  }
+  /* Aborts everything queued on the pipe and completes it with
+   * ERROR_OPERATION_ABORTED, so a blocked writer returns at once. */
+  WinUsb_AbortPipe(static_cast<WINUSB_INTERFACE_HANDLE>(winusb_handle_),
+                   bulk_out_pipe_id_);
+}
+
 bool WinUsbTransport::DumpBosDescriptor(std::string* out) {
   auto handle = static_cast<WINUSB_INTERFACE_HANDLE>(winusb_handle_);
   constexpr UCHAR kBosDescriptorType = 0x0F;

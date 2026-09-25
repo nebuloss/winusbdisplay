@@ -37,6 +37,7 @@ class CompositeTransport : public Transport {
   bool ControlSetReport(const uint8_t* data, size_t len) override;
   bool ControlGetReport(uint8_t* data, size_t len) override;
   bool BulkWrite(const uint8_t* data, size_t len) override;
+  void CancelTransfers() override;
 
  private:
   std::unique_ptr<Transport> control_;

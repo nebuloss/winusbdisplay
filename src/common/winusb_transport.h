@@ -31,6 +31,7 @@ class WinUsbTransport : public Transport {
   bool ControlSetReport(const uint8_t* data, size_t len) override;
   bool ControlGetReport(uint8_t* data, size_t len) override;
   bool BulkWrite(const uint8_t* data, size_t len) override;
+  void CancelTransfers() override;
 
   /* Writes a human readable dump of every interface setting and pipe. Used by
    * the enumerate phase to record what the hardware actually exposes. */
