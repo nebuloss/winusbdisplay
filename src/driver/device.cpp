@@ -413,7 +413,6 @@ SwapChainProcessor::SwapChainProcessor(IDDCX_SWAPCHAIN swapchain,
       ddc_(ddc),
       monitor_(monitor),
       frame_index_(0) {
-  cursor_previous_ = EmptyRect();
   pending_damage_[0] = EmptyRect();
   pending_damage_[1] = EmptyRect();
   terminate_event_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -658,34 +657,14 @@ bool SwapChainProcessor::ProcessFrame(
     return false;
   }
 
-  bool converted = false;
-  bool used_gpu = false;
-
-  verify_fb_width_ = fb_width;
-  verify_fb_height_ = fb_height;
-
-  const size_t rect_pixels =
-      static_cast<size_t>(to_send.width()) * to_send.height();
-  const bool prefer_gpu = rect_pixels >= kGpuConversionMinPixels;
-
-  /* IddCx keeps the acquired surface valid until the next acquire, so holding
-   * it lets an idle refresh re-convert the current picture instead of
-   * resending something stale. */
-  last_source_ = source;
-  last_width_ = fb_width;
-  last_height_ = fb_height;
-
-  if (EnsureCompute()) {
-    /* Check the two paths agree before trusting the GPU one. */
-    if (!compute_verified_) {
-      VerifyGpuAgainstCpu(source.Get(), to_send, adjust);
-    }
-    if (compute_ready_ && prefer_gpu) {
-      converted = ConvertOnGpu(source.Get(), to_send, adjust,
-                               transfer->data() + kFrameHeaderSize,
-                               transfer->size() - kFrameOverhead);
-      used_gpu = converted;
-      if (!converted) {
+  /* One conversion path only. A GPU compute shader was implemented and
+   * measured: it is slower than the threaded SIMD path for ordinary damage,
+   * about equal at full screen, and its output differs from the CPU path by
+   * one least significant bit. Choosing between them by damage size meant a
+   * region could be converted one way and then the other, which alternates
+   * the picture and is visible on antialiased text. Not worth the CPU saving.
+   */
+  if (!converted) {
         Log("compute: conversion failed, falling back to the CPU path");
         compute_ready_ = false;
         compute_failed_ = true;
@@ -694,53 +673,8 @@ bool SwapChainProcessor::ProcessFrame(
   }
 
   {
-    /* Keep a CPU copy of the desktop, updated region by region.
-     *
-     * IddCx only guarantees the acquired surface stays valid until the next
-     * call to ReleaseAndAcquireBuffer, so anything that needs the current
-     * picture outside that window, namely the idle refresh, cannot read it
-     * safely. Reading a surface the OS has since recycled paints whatever now
-     * occupies that memory, which appears as content briefly reverting.
-     *
-     * The cursor path, when enabled, also composites over this copy. */
-    if (EnsureStaging(source_desc.Width, source_desc.Height)) {
-      D3D11_BOX box = {};
-      box.left = static_cast<UINT>(to_send.x1);
-      box.top = static_cast<UINT>(to_send.y1);
-      box.front = 0;
-      box.right = static_cast<UINT>(to_send.x2);
-      box.bottom = static_cast<UINT>(to_send.y2);
-      box.back = 1;
-      d3d_context_->CopySubresourceRegion(staging_.Get(), 0, box.left, box.top,
-                                          0, source.Get(), 0, &box);
-
-      D3D11_MAPPED_SUBRESOURCE snapshot = {};
-      if (SUCCEEDED(d3d_context_->Map(staging_.Get(), 0, D3D11_MAP_READ, 0,
-                                      &snapshot))) {
-        std::lock_guard<std::mutex> lock(cursor_mutex_);
-        if (desktop_width_ != fb_width || desktop_height_ != fb_height) {
-          desktop_width_ = fb_width;
-          desktop_height_ = fb_height;
-          desktop_stride_ = static_cast<size_t>(fb_width) * 4;
-          desktop_copy_.assign(desktop_stride_ * fb_height, 0);
-        }
-        for (int y = to_send.y1; y < to_send.y2; ++y) {
-          memcpy(desktop_copy_.data() + static_cast<size_t>(y) *
-                                            desktop_stride_ +
-                     static_cast<size_t>(to_send.x1) * 4,
-                 static_cast<const uint8_t*>(snapshot.pData) +
-                     static_cast<size_t>(y) * snapshot.RowPitch +
-                     static_cast<size_t>(to_send.x1) * 4,
-                 static_cast<size_t>(to_send.width()) * 4);
-        }
-        d3d_context_->Unmap(staging_.Get(), 0);
-      }
-    }
-  }
-
-  if (!converted) {
-    /* CPU path: copy the damage out of the GPU, then convert while reading
-     * the mapped staging texture. */
+    /* Copy the damaged region out of the GPU, then convert while reading the
+     * mapped staging texture. */
     if (!EnsureStaging(source_desc.Width, source_desc.Height)) {
       sender_->Cancel(transfer);
       return false;
@@ -770,20 +704,6 @@ bool SwapChainProcessor::ProcessFrame(
       sender_->Cancel(transfer);
       return false;
     }
-  } else {
-    /* The GPU wrote the pixels straight into the transfer buffer; the header
-     * and footer are still ours to add. */
-    FrameUpdateHeader header;
-    PutBe16(header.marker_be, kFrameMarker);
-    PutBe24(header.position,
-            ((static_cast<uint32_t>(to_send.x1) & 0xFFF) << 12) |
-                (static_cast<uint32_t>(to_send.y1) & 0xFFF));
-    PutBe24(header.dimensions,
-            ((static_cast<uint32_t>(to_send.width()) & 0xFFF) << 12) |
-                (static_cast<uint32_t>(to_send.height()) & 0xFFF));
-    memcpy(transfer->data(), &header, sizeof(header));
-    memcpy(transfer->data() + kFrameHeaderSize + pixel_bytes, kFrameFooter,
-           kFrameFooterSize);
   }
 
   QueryPerformanceCounter(&t_converted);
@@ -830,29 +750,16 @@ bool SwapChainProcessor::ProcessFrame(
 }
 
 bool SwapChainProcessor::SendRefresh(bool whole_screen) {
-  std::lock_guard<std::mutex> copy_lock(cursor_mutex_);
-  if (desktop_copy_.empty() || desktop_width_ <= 0 || desktop_height_ <= 0) {
+  (void)whole_screen;
+  if (!last_source_ || last_width_ <= 0 || last_height_ <= 0) {
     return false;
   }
-  last_width_ = desktop_width_;
-  last_height_ = desktop_height_;
 
   Rect full;
   full.x1 = 0;
   full.y1 = 0;
   full.x2 = last_width_;
   full.y2 = last_height_;
-
-  /* Tempting idea that does not work: send only a band, since keeping the
-   * panel awake just needs traffic and a full repaint costs eight vsync
-   * periods. The chip alternates between two frame buffers on every
-   * transfer, so a partial update lands in one of them and leaves the other
-   * holding older content for that region. The two then alternate on screen
-   * and the picture visibly flickers. Any partial update has to be tracked
-   * per buffer, which is what pending_damage_ is for, so a refresh that is
-   * meant to resynchronise everything sends the whole screen. */
-  (void)whole_screen;
-
   full = AlignDamageRect(full, last_width_, last_height_);
   if (full.empty()) {
     return false;
@@ -864,38 +771,43 @@ bool SwapChainProcessor::SendRefresh(bool whole_screen) {
   if (!transfer) {
     return false;
   }
-  /* A full repaint covers whatever the displaced frame was carrying. */
-  (void)superseded;
+
+  if (!EnsureStaging(static_cast<UINT>(last_width_),
+                     static_cast<UINT>(last_height_))) {
+    sender_->Cancel(transfer);
+    return false;
+  }
+  d3d_context_->CopyResource(staging_.Get(), last_source_.Get());
+
+  D3D11_MAPPED_SUBRESOURCE mapped = {};
+  if (FAILED(d3d_context_->Map(staging_.Get(), 0, D3D11_MAP_READ, 0,
+                               &mapped))) {
+    sender_->Cancel(transfer);
+    return false;
+  }
 
   PictureAdjust adjust;
   if (ddc_) {
     adjust.brightness = ddc_->brightness();
     adjust.contrast = ddc_->contrast();
   }
-
-  const size_t row_bytes = static_cast<size_t>(full.width()) * 2;
-  const size_t pixel_bytes = row_bytes * full.height();
-  const size_t length = pixel_bytes + kFrameOverhead;
-  if (transfer->size() < length) {
-    sender_->Cancel(transfer);
-    return false;
-  }
-
-  /* Converted from our own copy, which is always valid, rather than from the
-   * acquired surface, which by now may have been recycled by the OS. */
-  const size_t produced =
-      FrameRect(transfer->data(), transfer->size(), desktop_copy_.data(),
-                desktop_stride_, desktop_width_, desktop_height_, full, adjust);
-  if (produced == 0) {
+  const size_t length =
+      FrameRect(transfer->data(), transfer->size(),
+                static_cast<const uint8_t*>(mapped.pData), mapped.RowPitch,
+                last_width_, last_height_, full, adjust);
+  d3d_context_->Unmap(staging_.Get(), 0);
+  if (length == 0) {
     sender_->Cancel(transfer);
     return false;
   }
 
   sender_->Submit(transfer, length, full);
-
-  std::lock_guard<std::mutex> damage_lock(damage_mutex_);
-  pending_damage_[0] = EmptyRect();
-  pending_damage_[1] = EmptyRect();
+  {
+    /* A full repaint leaves nothing owed. */
+    std::lock_guard<std::mutex> damage_lock(damage_mutex_);
+    pending_damage_[0] = EmptyRect();
+    pending_damage_[1] = EmptyRect();
+  }
   last_send_ms_ = GetTickCount64();
   return true;
 }
