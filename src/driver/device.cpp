@@ -48,8 +48,6 @@ IDDCX_MONITOR_MODE MakeMonitorMode(const Mode& mode,
 IDDCX_TARGET_MODE MakeTargetMode(const Mode& mode) {
   IDDCX_TARGET_MODE out = {};
   out.Size = sizeof(out);
-  out.TargetVideoSignalInfo.totalSize.cx = mode.width;
-  out.TargetVideoSignalInfo.totalSize.cy = mode.height;
   out.TargetVideoSignalInfo.targetVideoSignalInfo =
       MakeSignalInfo(mode.width, mode.height, mode.hz);
   return out;
@@ -606,19 +604,18 @@ void IndirectDevice::BuildModeList() {
 }
 
 void IndirectDevice::CreateMonitor() {
-  IDDCX_MONITOR_DESCRIPTION description = {};
-  description.Size = sizeof(description);
-  description.Type = IDDCX_MONITOR_DESCRIPTION_TYPE_EDID;
-  description.DataSize = static_cast<UINT>(edid_.size());
-  description.pData = edid_.data();
+  IDDCX_MONITOR_INFO info = {};
+  info.Size = sizeof(info);
+  info.MonitorType = DISPLAYCONFIG_OUTPUT_TECHNOLOGY_HDMI;
+  info.ConnectorIndex = 0;
+  info.MonitorDescription.Size = sizeof(info.MonitorDescription);
+  info.MonitorDescription.Type = IDDCX_MONITOR_DESCRIPTION_TYPE_EDID;
+  info.MonitorDescription.DataSize = static_cast<UINT>(edid_.size());
+  info.MonitorDescription.pData = edid_.data();
 
   IDARG_IN_MONITORCREATE create = {};
   create.ObjectAttributes = nullptr;
-  create.pMonitorInfo = &description;
-  create.MonitorInfo.Size = sizeof(create.MonitorInfo);
-  create.MonitorInfo.MonitorType = DISPLAYCONFIG_OUTPUT_TECHNOLOGY_HDMI;
-  create.MonitorInfo.ConnectorIndex = 0;
-  create.MonitorInfo.MonitorDescription = description;
+  create.pMonitorInfo = &info;
 
   IDARG_OUT_MONITORCREATE created = {};
   if (!NT_SUCCESS(IddCxMonitorCreate(adapter_, &create, &created))) {
