@@ -454,7 +454,11 @@ void SwapChainProcessor::Run() {
   SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
 
   if (!EnsureD3D()) {
-    Log("SwapChain: D3D init failed");
+    /* Delete the swapchain so the OS knows to build a new one and try again.
+     * Simply returning leaves the monitor attached to a dead swapchain. */
+    Log("SwapChain: D3D init failed, releasing swapchain");
+    WdfObjectDelete(swapchain_);
+    swapchain_ = nullptr;
     return;
   }
   Log("SwapChain: processing started");
@@ -487,7 +491,7 @@ void SwapChainProcessor::Run() {
 
     /* First few frames, then once a second, so the log stays readable. */
     ULONGLONG now = GetTickCount64();
-    if (logged < 3 || now - last_report >= 1000) {
+    if (logged < 3 || now - last_report >= 10000) {
       Log("SwapChain: frame ok=%d sent=%llu dropped=%llu", ok ? 1 : 0,
           sender_->frames_sent(), sender_->frames_dropped());
       ++logged;
