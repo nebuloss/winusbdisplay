@@ -115,9 +115,36 @@ void ConvertRowXrgbToUyvyScalar(uint8_t* dst, const uint8_t* src,
   }
 }
 
+void ApplyPictureAdjust(uint8_t* row, int width, const PictureAdjust& adjust) {
+  if (adjust.IsIdentity()) {
+    return;
+  }
+  /* Brightness scales luma above black; contrast scales chroma about neutral
+   * and luma about mid grey. Both are fixed point over 256. */
+  const int luma_gain = (adjust.brightness * 256) / 100;
+  const int chroma_gain = (adjust.contrast * 256) / 50;
+
+  for (int i = 0; i < width * 2; i += 4) {
+    for (int luma_offset : {1, 3}) {
+      int y = row[i + luma_offset] - 16;
+      y = (y * luma_gain) >> 8;
+      y += 16;
+      row[i + luma_offset] = static_cast<uint8_t>(y < 16 ? 16
+                                                  : (y > 235 ? 235 : y));
+    }
+    for (int chroma_offset : {0, 2}) {
+      int c = row[i + chroma_offset] - 128;
+      c = (c * chroma_gain) >> 8;
+      c += 128;
+      row[i + chroma_offset] = static_cast<uint8_t>(c < 16 ? 16
+                                                    : (c > 240 ? 240 : c));
+    }
+  }
+}
+
 size_t FrameRect(uint8_t* dst, size_t dst_capacity, const uint8_t* src,
                  size_t src_stride, int fb_width, int fb_height,
-                 const Rect& rect) {
+                 const Rect& rect, const PictureAdjust& adjust) {
   if (rect.empty() || rect.x1 < 0 || rect.y1 < 0 || rect.x2 > fb_width ||
       rect.y2 > fb_height || (rect.x1 & 1) || (rect.width() & 1)) {
     return 0;
@@ -144,6 +171,7 @@ size_t FrameRect(uint8_t* dst, size_t dst_capacity, const uint8_t* src,
         src + static_cast<size_t>(y) * src_stride +
         static_cast<size_t>(rect.x1) * 4;
     ConvertRowXrgbToUyvy(out, row, rect.width());
+    ApplyPictureAdjust(out, rect.width(), adjust);
     out += row_bytes;
   }
 

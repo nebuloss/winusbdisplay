@@ -34,6 +34,23 @@ inline size_t TransferLength(const Rect& rect) {
   return static_cast<size_t>(rect.width()) * 2 * rect.height() + kFrameOverhead;
 }
 
+/* Picture adjustment applied during conversion, expressed the way DDC/CI
+ * reports them: brightness and contrast each 0..100, with 100 and 50 meaning
+ * "leave the image alone". The dongle has no hardware controls, so this is
+ * how a brightness slider produces a visible change.
+ *
+ * Y is limited range (16..235) and gets scaled about its black point; U and V
+ * are scaled about neutral (128) by contrast so colours do not shift. */
+struct PictureAdjust {
+  int brightness = 100;
+  int contrast = 50;
+
+  bool IsIdentity() const { return brightness == 100 && contrast == 50; }
+};
+
+void ApplyPictureAdjust(uint8_t* uyvy_row, int width,
+                        const PictureAdjust& adjust);
+
 /* Writes header, converted pixels and footer into `dst`, which must hold at
  * least TransferLength(rect) bytes. `src` points at the top left pixel of the
  * whole framebuffer in XRGB8888 with `src_stride` bytes per row. Returns the
@@ -42,7 +59,8 @@ inline size_t TransferLength(const Rect& rect) {
  * The rect must already be aligned; call AlignDamageRect first. */
 size_t FrameRect(uint8_t* dst, size_t dst_capacity, const uint8_t* src,
                  size_t src_stride, int fb_width, int fb_height,
-                 const Rect& rect);
+                 const Rect& rect,
+                 const PictureAdjust& adjust = PictureAdjust());
 
 /* Converts one row. Dispatches to the SIMD path when the CPU supports it.
  *

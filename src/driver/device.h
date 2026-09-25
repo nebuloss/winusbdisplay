@@ -85,7 +85,7 @@ class SwapChainProcessor {
  public:
   SwapChainProcessor(IDDCX_SWAPCHAIN swapchain, LUID render_adapter,
                      HANDLE new_frame_event, Device* device,
-                     FrameSender* sender, const Mode& mode);
+                     FrameSender* sender, const Mode& mode, DdcCiSlave* ddc);
   ~SwapChainProcessor();
 
   /* D3D is initialised on the calling thread, so a failure can be reported
@@ -108,6 +108,7 @@ class SwapChainProcessor {
   Device* device_;
   FrameSender* sender_;
   Mode mode_;
+  DdcCiSlave* ddc_ = nullptr;
 
   Microsoft::WRL::ComPtr<ID3D11Device> d3d_device_;
   Microsoft::WRL::ComPtr<ID3D11DeviceContext> d3d_context_;

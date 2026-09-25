@@ -279,13 +279,15 @@ void FrameSender::WorkerMain() {
 SwapChainProcessor::SwapChainProcessor(IDDCX_SWAPCHAIN swapchain,
                                        LUID render_adapter,
                                        HANDLE new_frame_event, Device* device,
-                                       FrameSender* sender, const Mode& mode)
+                                       FrameSender* sender, const Mode& mode,
+                                       DdcCiSlave* ddc)
     : swapchain_(swapchain),
       render_adapter_(render_adapter),
       new_frame_event_(new_frame_event),
       device_(device),
       sender_(sender),
       mode_(mode),
+      ddc_(ddc),
       frame_index_(0) {
   pending_damage_[0] = EmptyRect();
   pending_damage_[1] = EmptyRect();
@@ -468,10 +470,15 @@ bool SwapChainProcessor::ProcessFrame(
     return false;
   }
 
+  PictureAdjust adjust;
+  if (ddc_) {
+    adjust.brightness = ddc_->brightness();
+    adjust.contrast = ddc_->contrast();
+  }
   const size_t length =
       FrameRect(transfer->data(), transfer->size(),
                 static_cast<const uint8_t*>(mapped.pData), mapped.RowPitch,
-                fb_width, fb_height, to_send);
+                fb_width, fb_height, to_send, adjust);
   d3d_context_->Unmap(staging_.Get(), 0);
 
   if (length == 0) {
@@ -794,7 +801,7 @@ NTSTATUS IndirectDevice::AssignSwapChain(const IDARG_IN_SETSWAPCHAIN* args) {
   }
   std::unique_ptr<SwapChainProcessor> processor(new SwapChainProcessor(
       args->hSwapChain, args->RenderAdapterLuid, args->hNextSurfaceAvailable,
-      ms_device_.get(), sender_.get(), active_mode_));
+      ms_device_.get(), sender_.get(), active_mode_, &ddc_));
 
   if (!processor->Start()) {
     /* Delete the swapchain so the OS builds a new one and tries again. This
