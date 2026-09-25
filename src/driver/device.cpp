@@ -572,7 +572,7 @@ bool SwapChainProcessor::ProcessFrame(
      * with the damage area points at the GPU readback, not the conversion. */
     static ULONGLONG last_phase_log = 0;
     const ULONGLONG phase_now = GetTickCount64();
-    if (phase_now - last_phase_log >= 2000) {
+    if (phase_now - last_phase_log >= 30000) {
       last_phase_log = phase_now;
       const double to_us = 1000000.0 / qpc_freq.QuadPart;
       Log("phases: copy=%.0fus map=%.0fus convert=%.0fus  %dx%d (%zu bytes)",
@@ -665,7 +665,8 @@ void SwapChainProcessor::Run() {
    * hung if we fall too far behind on the acquire loop. */
   SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
 
-  Log("SwapChain: processing started");
+  Log("SwapChain: processing started, %u conversion thread(s)",
+      ConversionThreads());
 
   unsigned logged = 0;
   ULONGLONG last_report = GetTickCount64();
