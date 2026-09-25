@@ -668,8 +668,11 @@ void IndirectDevice::CreateMonitor() {
       return;
     }
 
+    WDF_OBJECT_ATTRIBUTES attributes;
+    WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&attributes, MonitorContextWrapper);
+
     IDARG_IN_MONITORCREATE create = {};
-    create.ObjectAttributes = nullptr;
+    create.ObjectAttributes = &attributes;
     create.pMonitorInfo = &info;
 
     IDARG_OUT_MONITORCREATE created = {};
@@ -677,6 +680,11 @@ void IndirectDevice::CreateMonitor() {
     if (!NT_SUCCESS(status)) {
       Log("probe [%s]: create -> 0x%08X", candidate.name, status);
       continue;
+    }
+
+    auto* wrapper = GetMonitorContext(created.MonitorObject);
+    if (wrapper) {
+      wrapper->device = this;
     }
 
     IDARG_OUT_MONITORARRIVAL arrival = {};

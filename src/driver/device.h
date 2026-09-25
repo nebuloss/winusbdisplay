@@ -190,3 +190,14 @@ struct IndirectDeviceContextWrapper {
 
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(IndirectDeviceContextWrapper,
                                    GetIndirectDeviceContext)
+
+/* IddCxMonitorCreate needs real object attributes with a context type. Passing
+ * null attributes lets the create succeed but then IddCxMonitorArrival fails
+ * with STATUS_DEVICE_NOT_READY, which is a thoroughly misleading symptom. */
+struct MonitorContextWrapper {
+  ms912x::IndirectDevice* device;
+
+  void Cleanup() { device = nullptr; }
+};
+
+WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(MonitorContextWrapper, GetMonitorContext)
