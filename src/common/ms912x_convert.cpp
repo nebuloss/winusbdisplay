@@ -222,28 +222,25 @@ constexpr int16_t kYb = 3196, kYg = 16452, kYr = 8382;
 constexpr int16_t kUb = 14336, kUg = -9498, kUr = -4838;
 constexpr int16_t kVb = -2332, kVg = -12005, kVr = 14336;
 
-/* Horizontal pairwise add: lanes 0 and 2 of the result hold the two dot
- * products. SSE2 only, so no _mm_hadd_epi32. */
-inline __m128i PairSum(__m128i v) {
-  return _mm_add_epi32(v, _mm_shuffle_epi32(v, _MM_SHUFFLE(3, 3, 1, 1)));
+/* Horizontally adds the two dot products in a madd result and returns them in
+ * lanes 0 and 1. Staying in registers matters: an earlier version wrote the
+ * lanes to the stack and read them back, and the resulting store forwarding
+ * stall dominated the whole conversion. */
+inline __m128i PairDots(__m128i madd_result) {
+  const __m128i summed = _mm_add_epi32(
+      madd_result, _mm_shuffle_epi32(madd_result, _MM_SHUFFLE(3, 3, 1, 1)));
+  return _mm_shuffle_epi32(summed, _MM_SHUFFLE(3, 1, 2, 0));
 }
 
-inline void DotPair(__m128i pixels, __m128i coeff, int* out0, int* out1) {
-  __m128i summed = PairSum(_mm_madd_epi16(pixels, coeff));
-  alignas(16) int lanes[4];
-  _mm_store_si128(reinterpret_cast<__m128i*>(lanes), summed);
-  *out0 = lanes[0];
-  *out1 = lanes[2];
+/* Four consecutive dot products, from the low and high halves of four
+ * unpacked pixels. */
+inline __m128i QuadDots(__m128i lo, __m128i hi, __m128i coeff) {
+  return _mm_unpacklo_epi64(PairDots(_mm_madd_epi16(lo, coeff)),
+                            PairDots(_mm_madd_epi16(hi, coeff)));
 }
 
-inline uint8_t Clamp8(int value) {
-  if (value < 0) {
-    return 0;
-  }
-  if (value > 255) {
-    return 255;
-  }
-  return static_cast<uint8_t>(value);
+inline __m128i ScaleAndBias(__m128i value, int bias) {
+  return _mm_add_epi32(_mm_srai_epi32(value, 15), _mm_set1_epi32(bias));
 }
 
 }  // namespace
@@ -254,31 +251,48 @@ void ConvertRowXrgbToUyvySimd(uint8_t* dst, const uint8_t* src, int width) {
   const __m128i u_coeff = _mm_setr_epi16(kUb, kUg, kUr, 0, kUb, kUg, kUr, 0);
   const __m128i v_coeff = _mm_setr_epi16(kVb, kVg, kVr, 0, kVb, kVg, kVr, 0);
   const __m128i zero = _mm_setzero_si128();
+  const __m128i ones = _mm_set1_epi16(1);
 
   int i = 0;
-  for (; i + 3 < width; i += 4) {
-    __m128i raw = _mm_loadu_si128(
-        reinterpret_cast<const __m128i*>(src + static_cast<size_t>(i) * 4));
-    __m128i lo = _mm_unpacklo_epi8(raw, zero);  /* pixels 0 and 1 */
-    __m128i hi = _mm_unpackhi_epi8(raw, zero);  /* pixels 2 and 3 */
+  /* Eight pixels per iteration produces exactly one 16 byte UYVY store. */
+  for (; i + 7 < width; i += 8) {
+    const uint8_t* p = src + static_cast<size_t>(i) * 4;
+    const __m128i raw0 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p));
+    const __m128i raw1 =
+        _mm_loadu_si128(reinterpret_cast<const __m128i*>(p + 16));
 
-    int y0, y1, y2, y3, u0, u1, u2, u3, v0, v1, v2, v3;
-    DotPair(lo, y_coeff, &y0, &y1);
-    DotPair(hi, y_coeff, &y2, &y3);
-    DotPair(lo, u_coeff, &u0, &u1);
-    DotPair(hi, u_coeff, &u2, &u3);
-    DotPair(lo, v_coeff, &v0, &v1);
-    DotPair(hi, v_coeff, &v2, &v3);
+    const __m128i lo0 = _mm_unpacklo_epi8(raw0, zero);
+    const __m128i hi0 = _mm_unpackhi_epi8(raw0, zero);
+    const __m128i lo1 = _mm_unpacklo_epi8(raw1, zero);
+    const __m128i hi1 = _mm_unpackhi_epi8(raw1, zero);
 
-    dst[0] = Clamp8(128 + (((u0 >> 15) + (u1 >> 15)) / 2));
-    dst[1] = Clamp8(16 + (y0 >> 15));
-    dst[2] = Clamp8(128 + (((v0 >> 15) + (v1 >> 15)) / 2));
-    dst[3] = Clamp8(16 + (y1 >> 15));
-    dst[4] = Clamp8(128 + (((u2 >> 15) + (u3 >> 15)) / 2));
-    dst[5] = Clamp8(16 + (y2 >> 15));
-    dst[6] = Clamp8(128 + (((v2 >> 15) + (v3 >> 15)) / 2));
-    dst[7] = Clamp8(16 + (y3 >> 15));
-    dst += 8;
+    /* Luma for all eight pixels, packed to 16 bit then to bytes. */
+    const __m128i y_lo = ScaleAndBias(QuadDots(lo0, hi0, y_coeff), 16);
+    const __m128i y_hi = ScaleAndBias(QuadDots(lo1, hi1, y_coeff), 16);
+    const __m128i y_bytes =
+        _mm_packus_epi16(_mm_packs_epi32(y_lo, y_hi), zero);
+
+    /* Chroma for all eight, then averaged across each pixel pair.
+     * _mm_madd_epi16 against all ones is a pairwise horizontal add. */
+    const __m128i u_all = _mm_packs_epi32(
+        ScaleAndBias(QuadDots(lo0, hi0, u_coeff), 128),
+        ScaleAndBias(QuadDots(lo1, hi1, u_coeff), 128));
+    const __m128i v_all = _mm_packs_epi32(
+        ScaleAndBias(QuadDots(lo0, hi0, v_coeff), 128),
+        ScaleAndBias(QuadDots(lo1, hi1, v_coeff), 128));
+
+    const __m128i u_pairs = _mm_srai_epi32(_mm_madd_epi16(u_all, ones), 1);
+    const __m128i v_pairs = _mm_srai_epi32(_mm_madd_epi16(v_all, ones), 1);
+
+    /* Interleave to U V U V ..., then with luma to U Y V Y ... */
+    const __m128i uv =
+        _mm_unpacklo_epi16(_mm_packs_epi32(u_pairs, zero),
+                           _mm_packs_epi32(v_pairs, zero));
+    const __m128i uv_bytes = _mm_packus_epi16(uv, zero);
+
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(dst),
+                     _mm_unpacklo_epi8(uv_bytes, y_bytes));
+    dst += 16;
   }
 
   if (i < width) {
@@ -286,6 +300,8 @@ void ConvertRowXrgbToUyvySimd(uint8_t* dst, const uint8_t* src, int width) {
                                width - i);
   }
 }
+
+namespace {
 
 void ConvertRowXrgbToUyvy(uint8_t* dst, const uint8_t* src, int width) {
   /* SSE2 is part of the x64 baseline, so no runtime check is needed. */
