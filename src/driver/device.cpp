@@ -310,6 +310,7 @@ void FrameSender::Submit(std::vector<uint8_t>* buffer, size_t length,
         slot.length = length;
         slot.damage = damage;
         slot.queued = true;
+        slot.queued_at = GetTickCount64();
         break;
       }
     }
@@ -355,8 +356,20 @@ void FrameSender::WorkerMain() {
     }
 
     ULONGLONG start = GetTickCount64();
+    const ULONGLONG waited = start - slot->queued_at;
     bool ok = device_->SendFrame(slot->data.data(), slot->length);
     ULONGLONG cost = GetTickCount64() - start;
+    {
+      /* Split the delay a frame sees into time spent waiting behind the
+       * previous transfer and time on the wire. */
+      static ULONGLONG last_latency_log = 0;
+      const ULONGLONG now = GetTickCount64();
+      if (now - last_latency_log >= 2000) {
+        last_latency_log = now;
+        Log("latency: queued %llums, on the wire %llums, %zu bytes", waited,
+            cost, slot->length);
+      }
+    }
     if (!ok) {
       Log("FrameSender: send failed after %llums: %s", cost,
           device_->last_error().c_str());

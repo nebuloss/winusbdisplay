@@ -75,6 +75,7 @@ class FrameSender {
     bool queued = false;
     /* What this frame repaints, so it can be recovered if superseded. */
     Rect damage;
+    unsigned long long queued_at = 0;
   };
 
   Device* device_;
