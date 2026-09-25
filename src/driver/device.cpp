@@ -58,6 +58,10 @@ IDDCX_TARGET_MODE MakeTargetMode(const Mode& mode) {
   out.Size = sizeof(out);
   out.TargetVideoSignalInfo.targetVideoSignalInfo =
       MakeSignalInfo(mode.width, mode.height, mode.hz);
+  /* Let the panel run at its real refresh rate but ask the OS to compose new
+   * content only as fast as the USB link can carry it. */
+  out.TargetVideoSignalInfo.targetVideoSignalInfo.AdditionalSignalInfo
+      .vSyncFreqDivider = SyncDividerForMode(mode);
   return out;
 }
 
@@ -765,6 +769,9 @@ void IndirectDevice::BuildModeList() {
       break;
     default:
       /* HDMI, VGA, digital and unknown get the full table, most useful first. */
+      /* 1080p30 is a real chip mode and is a far better match for the
+       * available bandwidth than 1080p60, so offer it first. */
+      push(1920, 1080, 30);
       push(1920, 1080, 60);
       push(1600, 1200, 60);
       push(1680, 1050, 60);
@@ -872,8 +879,8 @@ NTSTATUS IndirectDevice::CommitModes(const IDARG_IN_COMMITMODES* args) {
       Log("CommitModes: modeset failed: %s", ms_device_->last_error().c_str());
       return STATUS_DEVICE_DATA_ERROR;
     }
-    Log("CommitModes: %ux%u@%u -> chip mode 0x%02X", width, height, hz,
-        mode->mode_id);
+    Log("CommitModes: %ux%u@%u -> chip mode 0x%02X, sync divider %u",
+        width, height, hz, mode->mode_id, SyncDividerForMode(*mode));
     active_mode_ = *mode;
   }
   return STATUS_SUCCESS;

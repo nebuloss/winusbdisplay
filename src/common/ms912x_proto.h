@@ -126,6 +126,21 @@ extern const size_t kModeListLen;
 
 const Mode* FindMode(uint16_t width, uint16_t height, uint16_t hz);
 
+/* Sustained bulk throughput of the chip, measured on an MS912C at 1080p.
+ * Deliberately conservative: it is the figure used to decide how often the
+ * OS should be allowed to present, and over-promising produces judder. */
+constexpr uint32_t kSustainedBytesPerSecond = 29u * 1024u * 1024u;
+
+/* How many vsyncs the OS should skip between desktop updates for a mode, so
+ * that the update rate matches what the link can actually carry.
+ *
+ * IddCx exposes this as DISPLAYCONFIG_VIDEO_SIGNAL_INFO.AdditionalSignalInfo
+ * .vSyncFreqDivider: the panel keeps running at its real refresh rate while
+ * the OS composes new content at vSyncFreq / divider. Without it the
+ * compositor presents 60 times a second, we discard most of those frames,
+ * and the result is both wasted conversion work and uneven pacing. */
+uint32_t SyncDividerForMode(const Mode& mode);
+
 #pragma pack(push, 1)
 
 /* kReqTypeReadByte / response. addr is big endian, and up to four data bytes

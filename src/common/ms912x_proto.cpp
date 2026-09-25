@@ -31,6 +31,36 @@ const Mode* FindMode(uint16_t width, uint16_t height, uint16_t hz) {
   return nullptr;
 }
 
+uint32_t SyncDividerForMode(const Mode& mode) {
+  /* Bytes one full frame costs on the wire, at two bytes per pixel. */
+  const uint64_t frame_bytes =
+      static_cast<uint64_t>(mode.width) * mode.height * 2;
+  if (frame_bytes == 0 || mode.hz == 0) {
+    return 1;
+  }
+
+  /* Frames per second the link can sustain for this mode. */
+  const uint64_t sustainable = kSustainedBytesPerSecond / frame_bytes;
+  if (sustainable >= mode.hz) {
+    return 1;
+  }
+  if (sustainable == 0) {
+    return mode.hz;
+  }
+
+  uint32_t divider = static_cast<uint32_t>((mode.hz + sustainable - 1) /
+                                           sustainable);
+  /* Windows rejects a zero divider, and anything past 8 makes the desktop
+   * feel broken rather than merely slow. */
+  if (divider < 1) {
+    divider = 1;
+  }
+  if (divider > 8) {
+    divider = 8;
+  }
+  return divider;
+}
+
 const char* VideoPortName(VideoPort port) {
   switch (port) {
     case VideoPort::kCvbs:
