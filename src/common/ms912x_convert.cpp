@@ -4,6 +4,11 @@
 
 #include <emmintrin.h>
 
+#include <atomic>
+#include <functional>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 #include <climits>
@@ -142,6 +147,157 @@ void ApplyPictureAdjust(uint8_t* row, int width, const PictureAdjust& adjust) {
   }
 }
 
+namespace {
+
+/* Minimal persistent worker pool. Threads are created once: spawning them per
+ * frame would cost more than the work being parallelised. */
+class RowPool {
+ public:
+  static RowPool& Instance() {
+    static RowPool pool;
+    return pool;
+  }
+
+  unsigned workers() const { return static_cast<unsigned>(threads_.size()) + 1; }
+
+  void Resize(unsigned total) {
+    if (total < 1) {
+      total = 1;
+    }
+    Shutdown();
+    std::lock_guard<std::mutex> lock(mutex_);
+    running_ = true;
+    for (unsigned i = 0; i + 1 < total; ++i) {
+      threads_.emplace_back(&RowPool::Worker, this);
+    }
+  }
+
+  /* Runs body(first_row, last_row) over [0, rows) split across the pool,
+   * including the calling thread, and returns once every chunk is done. */
+  void Run(int rows, const std::function<void(int, int)>& body) {
+    const unsigned total = workers();
+    if (total <= 1 || rows < 64) {
+      body(0, rows);
+      return;
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      body_ = &body;
+      rows_ = rows;
+      chunks_ = total;
+      next_chunk_ = 1;  /* chunk 0 belongs to the caller */
+      outstanding_ = total - 1;
+      ++generation_;
+    }
+    work_cv_.notify_all();
+
+    RunChunk(0, rows, total, body);
+
+    std::unique_lock<std::mutex> lock(mutex_);
+    done_cv_.wait(lock, [this] { return outstanding_ == 0; });
+    body_ = nullptr;
+  }
+
+ private:
+  RowPool() {
+    unsigned hardware = std::thread::hardware_concurrency();
+    if (hardware == 0) {
+      hardware = 2;
+    }
+    /* Leave headroom: this runs on the IddCx processing thread while the USB
+     * worker and the rest of the system are also active. */
+    unsigned total = hardware > 4 ? 4 : hardware;
+    Resize(total);
+  }
+
+  ~RowPool() { Shutdown(); }
+
+  static void RunChunk(unsigned index, int rows, unsigned chunks,
+                       const std::function<void(int, int)>& body) {
+    const int first = static_cast<int>(
+        (static_cast<long long>(rows) * index) / chunks);
+    const int last = static_cast<int>(
+        (static_cast<long long>(rows) * (index + 1)) / chunks);
+    if (last > first) {
+      body(first, last);
+    }
+  }
+
+  void Worker() {
+    unsigned seen = 0;
+    for (;;) {
+      unsigned index = 0;
+      int rows = 0;
+      unsigned chunks = 0;
+      const std::function<void(int, int)>* body = nullptr;
+      {
+        std::unique_lock<std::mutex> lock(mutex_);
+        work_cv_.wait(lock, [&] { return !running_ || generation_ != seen; });
+        if (!running_) {
+          return;
+        }
+        seen = generation_;
+        if (next_chunk_ >= chunks_) {
+          continue;
+        }
+        index = next_chunk_++;
+        rows = rows_;
+        chunks = chunks_;
+        body = body_;
+      }
+
+      if (body) {
+        RunChunk(index, rows, chunks, *body);
+      }
+
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        --outstanding_;
+      }
+      done_cv_.notify_one();
+    }
+  }
+
+  void Shutdown() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!running_ && threads_.empty()) {
+        return;
+      }
+      running_ = false;
+      ++generation_;
+    }
+    work_cv_.notify_all();
+    for (std::thread& thread : threads_) {
+      if (thread.joinable()) {
+        thread.join();
+      }
+    }
+    threads_.clear();
+  }
+
+  std::vector<std::thread> threads_;
+  std::mutex mutex_;
+  std::condition_variable work_cv_;
+  std::condition_variable done_cv_;
+  bool running_ = false;
+  unsigned generation_ = 0;
+  unsigned chunks_ = 0;
+  unsigned next_chunk_ = 0;
+  unsigned outstanding_ = 0;
+  int rows_ = 0;
+  const std::function<void(int, int)>* body_ = nullptr;
+};
+
+}  // namespace
+
+void SetConversionThreads(unsigned threads) {
+  RowPool::Instance().Resize(threads);
+}
+
+unsigned ConversionThreads() { return RowPool::Instance().workers(); }
+
 size_t FrameRect(uint8_t* dst, size_t dst_capacity, const uint8_t* src,
                  size_t src_stride, int fb_width, int fb_height,
                  const Rect& rect, const PictureAdjust& adjust) {
@@ -164,16 +320,21 @@ size_t FrameRect(uint8_t* dst, size_t dst_capacity, const uint8_t* src,
               (static_cast<uint32_t>(rect.height()) & 0xFFF));
   memcpy(dst, &header, sizeof(header));
 
-  uint8_t* out = dst + sizeof(header);
+  uint8_t* const out = dst + sizeof(header);
   const size_t row_bytes = static_cast<size_t>(rect.width()) * 2;
-  for (int y = rect.y1; y < rect.y2; ++y) {
-    const uint8_t* row =
-        src + static_cast<size_t>(y) * src_stride +
-        static_cast<size_t>(rect.x1) * 4;
-    ConvertRowXrgbToUyvy(out, row, rect.width());
-    ApplyPictureAdjust(out, rect.width(), adjust);
-    out += row_bytes;
-  }
+  const int width = rect.width();
+
+  RowPool::Instance().Run(
+      rect.height(), [&](int first, int last) {
+        for (int i = first; i < last; ++i) {
+          const uint8_t* row = src +
+                               static_cast<size_t>(rect.y1 + i) * src_stride +
+                               static_cast<size_t>(rect.x1) * 4;
+          uint8_t* target = out + static_cast<size_t>(i) * row_bytes;
+          ConvertRowXrgbToUyvy(target, row, width);
+          ApplyPictureAdjust(target, width, adjust);
+        }
+      });
 
   memcpy(out, kFrameFooter, kFrameFooterSize);
   return needed;

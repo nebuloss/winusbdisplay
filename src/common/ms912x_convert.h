@@ -76,6 +76,14 @@ void ConvertRowXrgbToUyvyScalar(uint8_t* dst, const uint8_t* src, int width);
  * so results may differ from the scalar path by one least significant bit. */
 void ConvertRowXrgbToUyvySimd(uint8_t* dst, const uint8_t* src, int width);
 
+/* Converts rows across several threads. Worth doing because most of the cost
+ * is not arithmetic but reading the source, which lives in mapped GPU memory
+ * and is far slower than ordinary RAM; several threads keep more cache misses
+ * outstanding at once. Falls back to the calling thread for small areas,
+ * where the synchronisation would cost more than it saves. */
+void SetConversionThreads(unsigned threads);
+unsigned ConversionThreads();
+
 /* Compares the two paths over pseudo-random pixels. Returns the largest
  * absolute difference found, and 0 when they agree exactly. */
 int ConvertSelfTest(int width, int iterations);
