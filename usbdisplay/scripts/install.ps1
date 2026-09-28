@@ -126,6 +126,103 @@ function Reset-PixelInterfaces {
     Start-Sleep -Seconds 2
 }
 
+# A released package arrives already signed and with its catalogs built,
+# because doing that needs two tools from the Windows SDK and asking a user
+# to install a developer kit to get their second monitor working is not
+# reasonable. A tree built from source has neither, and makes both here.
+$released = Test-Path (Join-Path $root 'driver\usbdisplaydd.cat')
+
+if ($released) {
+    Write-Host '=== installing a released package ==='
+
+    # Windows will not accept the packages until it trusts the certificate
+    # they were signed with. Worth being plain about: this is the step that
+    # matters, and it is a real decision rather than a formality.
+    $certificate = Join-Path $root 'usbdisplay.cer'
+    if (Test-Path $certificate) {
+        Write-Host '    trusting the release certificate'
+        Import-Certificate -FilePath $certificate -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
+        Import-Certificate -FilePath $certificate -CertStoreLocation Cert:\LocalMachine\TrustedPublisher | Out-Null
+    }
+
+    foreach ($package in @(
+        @{ Name = 'raw USB access'; Path = 'winusb\usbdisplay_winusb.inf' },
+        @{ Name = 'display driver';  Path = 'driver\usbdisplaydd.inf' })) {
+        Write-Host "    installing the $($package.Name)"
+        pnputil /add-driver (Join-Path $root $package.Path) /install
+        if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 3010) {
+            throw "installing the $($package.Name) failed with code $LASTEXITCODE"
+        }
+    }
+
+    $devcon = $null
+    foreach ($r in @("${env:ProgramFiles(x86)}\Windows Kits\10\Tools",
+                     "${env:ProgramFiles(x86)}\Windows Kits\10\bin")) {
+        if (-not (Test-Path $r)) { continue }
+        $devcon = Get-ChildItem $r -Recurse -Filter devcon.exe -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match '\\x64\\' } | Select-Object -First 1
+        if ($devcon) { break }
+    }
+
+    $existing = Get-PnpDevice -InstanceId 'ROOT\DISPLAY\*' -ErrorAction SilentlyContinue |
+        Where-Object { $_.FriendlyName -match 'USB Display' }
+    if (-not $existing) {
+        if ($devcon) {
+            & $devcon.FullName install (Join-Path $root 'driver\usbdisplaydd.inf') 'root\usbdisplaydd'
+        } else {
+            # Without devcon the node is created through the setup API
+            # directly, so a released package needs nothing from the SDK.
+            Write-Host '    creating the device node'
+            $code = @'
+using System;
+using System.Runtime.InteropServices;
+public class Dev {
+  [DllImport("newdev.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+  public static extern bool UpdateDriverForPlugAndPlayDevicesW(
+    IntPtr parent, string hardwareId, string infPath, uint flags, out bool reboot);
+  [DllImport("setupapi.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+  public static extern IntPtr SetupDiCreateDeviceInfoList(ref Guid cls, IntPtr parent);
+  [DllImport("setupapi.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+  public static extern bool SetupDiCreateDeviceInfoW(IntPtr set, string name,
+    ref Guid cls, string desc, IntPtr parent, uint flags, out SP_DEVINFO_DATA data);
+  [DllImport("setupapi.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+  public static extern bool SetupDiSetDeviceRegistryPropertyW(IntPtr set,
+    ref SP_DEVINFO_DATA data, uint prop, byte[] buffer, uint size);
+  [DllImport("setupapi.dll", SetLastError=true)]
+  public static extern bool SetupDiCallClassInstaller(uint fn, IntPtr set, ref SP_DEVINFO_DATA data);
+  [StructLayout(LayoutKind.Sequential)]
+  public struct SP_DEVINFO_DATA { public int cbSize; public Guid ClassGuid;
+    public uint DevInst; public IntPtr Reserved; }
+}
+'@
+            Add-Type -TypeDefinition $code -ErrorAction SilentlyContinue
+            $display = [Guid]'4d36e968-e325-11ce-bfc1-08002be10318'
+            $set = [Dev]::SetupDiCreateDeviceInfoList([ref]$display, [IntPtr]::Zero)
+            $info = New-Object Dev+SP_DEVINFO_DATA
+            $info.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($info)
+            if ([Dev]::SetupDiCreateDeviceInfoW($set, 'Display', [ref]$display,
+                    $null, [IntPtr]::Zero, 0x00000001, [ref]$info)) {
+                $id = [Text.Encoding]::Unicode.GetBytes("root\usbdisplaydd`0`0")
+                [void][Dev]::SetupDiSetDeviceRegistryPropertyW($set, [ref]$info, 1, $id, $id.Length)
+                [void][Dev]::SetupDiCallClassInstaller(0x0000000f, $set, [ref]$info)
+                $reboot = $false
+                [void][Dev]::UpdateDriverForPlugAndPlayDevicesW([IntPtr]::Zero,
+                    'root\usbdisplaydd', (Join-Path $root 'driver\usbdisplaydd.inf'), 1, [ref]$reboot)
+            }
+        }
+    } else {
+        Write-Host '    the device is already present, updating it'
+        if ($devcon) {
+            & $devcon.FullName update (Join-Path $root 'driver\usbdisplaydd.inf') 'root\usbdisplaydd'
+        }
+    }
+
+    Start-Sleep -Seconds 3
+    pnputil /scan-devices | Out-Null
+}
+
+if (-not $released) {
+
 Write-Host '=== 1. raw USB access to the pixel interface ==='
 if (Test-WinUsbPackageCurrent) {
     Write-Host '    already installed and current, leaving it alone'
@@ -176,6 +273,8 @@ if ($existing) {
 
 Start-Sleep -Seconds 3
 pnputil /scan-devices | Out-Null
+
+}
 
 Write-Host ''
 Write-Host '=== 4. picture settings ==='

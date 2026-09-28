@@ -223,53 +223,98 @@ jobs:
         with:
           path: artifacts
 
-      - name: Assemble the package
-        shell: pwsh
-        # Laid out the way somebody installing it needs, rather than the way
-        # it happened to be built: the scripts expect the binary beside the
-        # INF it belongs to.
-        run: |
-          $stage = 'package'
-          New-Item -ItemType Directory -Path "$stage\driver\x64\Release" -Force | Out-Null
-          New-Item -ItemType Directory -Path "$stage\inf" -Force | Out-Null
-          New-Item -ItemType Directory -Path "$stage\scripts" -Force | Out-Null
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
 
-          Copy-Item artifacts\driver\* "$stage\driver\x64\Release\" -Force
-          Copy-Item artifacts\tools\* "$stage\" -Force
-          Copy-Item usbdisplay\inf\* "$stage\inf\" -Force
-          Copy-Item usbdisplay\scripts\install.ps1 "$stage\scripts\"
-          Copy-Item usbdisplay\scripts\purge.ps1 "$stage\scripts\"
-          Copy-Item usbdisplay\scripts\reattach.ps1 "$stage\scripts\"
+      - name: Assemble a package that can actually be installed
+        shell: pwsh
+        # Catalogs are generated and signed here rather than on the user's
+        # machine.
+        #
+        # Installing a driver package needs a catalog, and generating one
+        # needs two tools that ship with the Windows SDK. Requiring those of
+        # somebody who only wants their second monitor to work is not
+        # reasonable, and it is the difference between a release that can be
+        # installed and a pile of files that cannot.
+        #
+        # The signature is a certificate generated here and thrown away, so
+        # it proves nothing about origin. That is stated plainly in the
+        # release notes rather than glossed over: the installer still has to
+        # add it to the machine's trusted stores, and anyone installing this
+        # should understand that is what they are agreeing to.
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $stage = 'package'
+          New-Item -ItemType Directory -Path "$stage\driver", "$stage\winusb", "$stage\tools" -Force | Out-Null
+
+          # Each package needs its INF and every file it names together in
+          # one directory, which is what the catalog tool expects.
+          Copy-Item artifacts\driver\usbdisplaydd.dll "$stage\driver\"
+          Copy-Item artifacts\driver\usbdisplaydd.inf "$stage\driver\"
+          Copy-Item usbdisplay\inf\usbdisplay_winusb.inf "$stage\winusb\"
+          Copy-Item artifacts\tools\* "$stage\tools\"
+
+          $inf2cat = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Recurse -Filter 'Inf2Cat.exe' |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          $signtool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Recurse -Filter 'signtool.exe' |
+            Where-Object { $_.FullName -match 'x64' } |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $inf2cat -or -not $signtool) { throw 'The SDK signing tools were not found.' }
+
+          $cert = New-SelfSignedCertificate -Subject 'CN=usbdisplay release' `
+            -Type CodeSigningCert -CertStoreLocation Cert:\CurrentUser\My `
+            -NotAfter (Get-Date).AddYears(5)
+
+          foreach ($dir in 'driver', 'winusb') {
+            & $inf2cat.FullName /driver:"$stage\$dir" /os:10_X64,10_RS3_ARM64
+            if ($LASTEXITCODE -ne 0) { throw "catalog generation failed for $dir" }
+            Get-ChildItem "$stage\$dir" -Include '*.cat', '*.dll' -Recurse | ForEach-Object {
+              & $signtool.FullName sign /q /fd sha256 /sha1 $cert.Thumbprint $_.FullName
+              if ($LASTEXITCODE -ne 0) { throw "signing failed on $($_.Name)" }
+            }
+          }
+
+          # The certificate travels with the package: the installer has to
+          # trust it before Windows will accept either driver.
+          Export-Certificate -Cert $cert -FilePath "$stage\usbdisplay.cer" | Out-Null
+
+          Copy-Item usbdisplay\scripts\install.ps1 "$stage\"
+          Copy-Item usbdisplay\scripts\purge.ps1 "$stage\"
+          Copy-Item usbdisplay\scripts\reattach.ps1 "$stage\"
           Copy-Item usbdisplay\README.md "$stage\"
           Copy-Item LICENSE "$stage\"
 
-          # The install script looks for the binary under build\, which is
-          # where it sits after a local build.
-          New-Item -ItemType Directory -Path "$stage\build" -Force | Out-Null
-          Move-Item "$stage\driver" "$stage\build\driver"
-
           Compress-Archive -Path "$stage\*" `
             -DestinationPath "usbdisplay-${{ github.ref_name }}.zip"
+          Write-Host "packaged:"
+          Get-ChildItem -Recurse $stage | ForEach-Object { Write-Host "   $($_.FullName.Replace((Get-Location).Path,''))" }
 
       - name: Publish
         uses: softprops/action-gh-release@v2
         with:
           files: usbdisplay-${{ github.ref_name }}.zip
           body: |
-            Install with an elevated PowerShell:
+            Unpack it, then from an elevated PowerShell:
 
-                scripts\install.ps1
+                .\install.ps1
 
-            No reboot and no signing policy change are needed. Nothing here
-            loads into the kernel, so all Windows asks for is a package
-            signed by a certificate it trusts, and the install script
-            creates one locally for the purpose. It works with Secure Boot
-            on, and it does need administrator rights.
+            No reboot and no change to Windows' signing policy are needed.
+            Nothing here loads into the kernel, so all Windows asks for is a
+            package signed by a certificate it trusts. It works with Secure
+            Boot on. It does need administrator rights.
 
-            Binaries are deliberately unsigned. A publicly released driver
-            would carry a signature from a certificate that cannot be put
-            in a public repository, so the local one the installer makes is
-            the honest alternative.
+            **About the signature.** These files are signed with a
+            certificate generated when the release was built and then
+            discarded. It proves the files have not been altered since, and
+            nothing whatever about who made them. Installing means telling
+            your machine to trust that certificate, which is a real decision
+            and not a formality: if you would rather not, build from source
+            instead, which is a supported path and documented in the README.
 
-            Run `usbdisplaytray.exe` for brightness, and right-click its
-            icon for "Start with Windows".
+            After installing, run `tools\usbdisplaytray.exe` for brightness,
+            and right-click its icon for "Start with Windows".
+
+            `usbdisplayctl.exe list` and `info` work without installing
+            anything and are the first thing to try if the adapter is not
+            recognised.
