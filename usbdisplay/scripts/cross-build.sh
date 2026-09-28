@@ -346,6 +346,13 @@ ls -la "$OUT/usbdisplaydd.dll"
 # need a Windows machine for it. Its manifest is what makes Windows raise the
 # permission prompt rather than the program failing for want of rights, and
 # lld embeds one as readily as the Microsoft linker does.
+#
+# MANIFESTUAC:NO for the same reason the Windows build needs it. Left to
+# itself the linker writes a manifest of its own asking to run as the
+# invoking user, and merging that with ours, which asks for administrator,
+# fails outright rather than choosing between them. The error names
+# conflicting attributes without saying that one side of the conflict is the
+# linker's own, so it reads like a fault in the file we supplied.
 log "Building the installer"
 "${CLANG_CL[@]}" "${FLAGS[@]}" "${DEFINES[@]}" "${INCLUDES[@]}" \
   /c "$ROOT/src/tools/setup/main.cpp" /Fo"$WORK/obj/setup.obj"
@@ -356,7 +363,7 @@ log "Building the installer"
   /LIBPATH:"$XWIN/crt/lib/x86_64" \
   /LIBPATH:"$XWIN/sdk/lib/um/x86_64" \
   /LIBPATH:"$XWIN/sdk/lib/ucrt/x86_64" \
-  /MANIFEST:EMBED \
+  /MANIFESTUAC:NO /MANIFEST:EMBED \
   /MANIFESTINPUT:"$ROOT/src/tools/setup/setup.manifest" \
   "$WORK/obj/setup.obj" \
   setupapi.lib newdev.lib advapi32.lib crypt32.lib cfgmgr32.lib \
@@ -364,6 +371,12 @@ log "Building the installer"
   libcmt.lib libcpmt.lib libucrt.lib libvcruntime.lib
 
 log "Built $ROOT/build/usbdisplay-setup.exe"
+# The embedded manifest is the whole reason this program can start, and it
+# is easy to lose without the link failing. Checked here so a mistake shows
+# up as a build error rather than as a permission failure on the machine of
+# somebody trying to install a driver.
+grep -q 'requireAdministrator' "$ROOT/build/usbdisplay-setup.exe" ||
+  die "the installer was linked without its manifest"
 ls -la "$ROOT/build/usbdisplay-setup.exe"
 
 # The two programs a user actually runs after installing: the console tool,
