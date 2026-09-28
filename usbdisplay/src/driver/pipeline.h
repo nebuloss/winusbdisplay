@@ -119,6 +119,13 @@ class Pipeline {
 
   Microsoft::WRL::ComPtr<ID3D11Device> d3d_device_;
   Microsoft::WRL::ComPtr<ID3D11DeviceContext> d3d_context_;
+  /* The last image the compositor handed over.
+   *
+   * Held so the idle repaint has something real to convert from. It stays
+   * valid until the next acquire, and while the desktop is still there is
+   * no next acquire, which is exactly when this is needed. */
+  Microsoft::WRL::ComPtr<ID3D11Texture2D> last_surface_;
+
   ConverterSet converters_;
 
   /* The gamma table in force, and the one the frame loop is using. Kept
@@ -127,6 +134,7 @@ class Pipeline {
   std::mutex gamma_lock_;
   GammaRamp pending_gamma_;
   bool gamma_changed_ = false;
+  unsigned long long gamma_changed_at_ms_ = 0;
   GammaRamp gamma_;
 
   DamageTracker damage_;

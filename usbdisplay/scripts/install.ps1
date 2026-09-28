@@ -192,13 +192,34 @@ foreach ($pair in @(@('Brightness', 100), @('Contrast', 50))) {
         New-ItemProperty -Path $settingsKey -Name $pair[0] -Value $pair[1] -PropertyType DWord -Force | Out-Null
     }
 }
-$acl = Get-Acl $settingsKey
-$users = New-Object System.Security.Principal.SecurityIdentifier(
-    [System.Security.Principal.WellKnownSidType]::BuiltinUsersSid, $null)
-$rule = New-Object System.Security.AccessControl.RegistryAccessRule(
-    $users, 'SetValue,QueryValues,ReadKey', 'None', 'None', 'Allow')
-$acl.SetAccessRule($rule)
-Set-Acl -Path $settingsKey -AclObject $acl
+# Widened through the .NET types rather than the Get-Acl and Set-Acl
+# cmdlets. Those live in a module that does not load on every machine, and
+# when it does not they fail in a way that leaves the install looking
+# successful while the setting stays unwritable: the brightness control then
+# silently cannot save anything.
+try {
+    $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey(
+        'SOFTWARE\usbdisplay',
+        [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree,
+        [System.Security.AccessControl.RegistryRights]::ChangePermissions)
+    $acl = $key.GetAccessControl()
+    $users = New-Object System.Security.Principal.SecurityIdentifier(
+        [System.Security.Principal.WellKnownSidType]::BuiltinUsersSid, $null)
+    $rule = New-Object System.Security.AccessControl.RegistryAccessRule(
+        $users,
+        [System.Security.AccessControl.RegistryRights]'SetValue,QueryValues,ReadKey,CreateSubKey',
+        [System.Security.AccessControl.InheritanceFlags]::ContainerInherit,
+        [System.Security.AccessControl.PropagationFlags]::None,
+        [System.Security.AccessControl.AccessControlType]::Allow)
+    $acl.AddAccessRule($rule)
+    $key.SetAccessControl($acl)
+    $key.Close()
+    Write-Host '    users can now set brightness without elevation'
+} catch {
+    Write-Host "    WARNING: could not widen permissions on $settingsKey"
+    Write-Host "    $($_.Exception.Message)"
+    Write-Host '    Brightness will fall back to a lower quality method.'
+}
 
 Write-Host ''
 Write-Host '=== result ==='

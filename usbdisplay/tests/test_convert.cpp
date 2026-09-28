@@ -403,3 +403,55 @@ TEST(gamma, region_conversion_honours_the_table) {
                 "a dimming table must actually dim the encoded result, or "
                 "the brightness slider moves and nothing happens");
 }
+
+/* Brightness has to track what a monitor's own control does, or a display
+ * driven by this project looks wrong beside an ordinary one set to the same
+ * number. That is not a cosmetic concern: it is the first thing anyone
+ * notices with two screens side by side. */
+
+TEST(brightness, full_brightness_is_exactly_unchanged) {
+  PictureAdjust full;
+  CHECK_EQ_BECAUSE(full.LumaGain(), 256,
+                   "anything else would dim a picture nobody asked to dim");
+}
+
+TEST(brightness, follows_emitted_light_rather_than_stored_value) {
+  /* A backlight at half emits half the light. Luma is gamma encoded, so the
+   * stored value that emits half is about 0.73, not 0.5. Scaling by the
+   * percentage instead lands near a fifth of the light and the display
+   * looks far darker than the monitor beside it. */
+  PictureAdjust half;
+  half.brightness = 50;
+
+  const int gain = half.LumaGain();
+  CHECK_BECAUSE(gain > 170 && gain < 200,
+                "half brightness should scale stored luma by roughly 0.73, "
+                "which is what emits half the light");
+
+  /* Confirm it really is half the light once decoded. */
+  const double encoded = gain / 256.0;
+  const double light = pow(encoded, PictureAdjust::kDisplayGamma);
+  CHECK_BECAUSE(light > 0.45 && light < 0.55,
+                "decoding the scaled value must give half the original "
+                "light, or this display and a normal one disagree");
+}
+
+TEST(brightness, never_brightens) {
+  for (int percent = 0; percent <= 100; ++percent) {
+    PictureAdjust adjust;
+    adjust.brightness = percent;
+    CHECK(adjust.LumaGain() <= 256);
+  }
+}
+
+TEST(brightness, rises_with_the_setting) {
+  int previous = -1;
+  for (int percent = 0; percent <= 100; percent += 5) {
+    PictureAdjust adjust;
+    adjust.brightness = percent;
+    const int gain = adjust.LumaGain();
+    CHECK_BECAUSE(gain >= previous,
+                  "a higher setting must never produce a darker picture");
+    previous = gain;
+  }
+}

@@ -336,8 +336,8 @@ void ApplyPictureAdjust(uint8_t* row, int width, const PictureAdjust& adjust) {
   if (adjust.IsIdentity()) {
     return;
   }
-  const int luma_gain = (adjust.brightness * 256) / 100;
-  const int chroma_gain = (adjust.contrast * 256) / 50;
+  const int luma_gain = adjust.LumaGain();
+  const int chroma_gain = adjust.ChromaGain();
 
   for (int i = 0; i < width * 2; i += 4) {
     for (int luma : {1, 3}) {

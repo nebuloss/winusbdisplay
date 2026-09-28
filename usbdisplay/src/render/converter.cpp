@@ -285,8 +285,8 @@ bool GpuRegionConverter::Convert(ID3D11Texture2D* source, const Rect& region,
   ShaderParams params;
   params.width = static_cast<uint32_t>(region.width());
   params.height = static_cast<uint32_t>(region.height());
-  params.luma_gain = (adjust.brightness * 256) / 100;
-  params.chroma_gain = (adjust.contrast * 256) / 50;
+  params.luma_gain = adjust.LumaGain();
+  params.chroma_gain = adjust.ChromaGain();
   params.apply_gamma = gamma.identity ? 0 : 1;
   memset(params.padding, 0, sizeof(params.padding));
   memcpy(mapped.pData, &params, sizeof(params));

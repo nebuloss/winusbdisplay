@@ -21,6 +21,8 @@
 
 #include <stdint.h>
 
+#include <cmath>
+
 #include <stddef.h>
 
 #include "../core/proto.h"
@@ -110,6 +112,41 @@ struct PictureAdjust {
   bool operator==(const PictureAdjust& other) const {
     return brightness == other.brightness && contrast == other.contrast;
   }
+
+  /* How much to scale luma by, as a fraction of 256.
+   *
+   * Not simply the percentage, and the difference is visible. A monitor's
+   * own brightness control dims its backlight, which reduces emitted light
+   * in proportion: half means half the light. Luma is not stored in
+   * proportion to light, it is stored gamma encoded, so halving the stored
+   * value produces closer to a fifth of the light. Scaling by the
+   * percentage therefore makes this display markedly darker than a normal
+   * monitor set to the same number, which is exactly what you see when the
+   * two sit side by side.
+   *
+   * Raising the percentage to the reciprocal of the encoding exponent puts
+   * them back in step: at 50 this gives 0.73, which is the stored value
+   * that emits half the light.
+   *
+   * Both conversion paths call this and use the integer it returns, so they
+   * cannot drift apart. */
+  int LumaGain() const {
+    if (brightness >= 100) {
+      return 256;
+    }
+    if (brightness <= 0) {
+      return 0;
+    }
+    const double light = brightness / 100.0;
+    const double encoded = pow(light, 1.0 / kDisplayGamma);
+    return static_cast<int>(256.0 * encoded + 0.5);
+  }
+
+  int ChromaGain() const { return (contrast * 256) / 50; }
+
+  /* The exponent ordinary display signals are encoded with. 2.2 is the
+   * conventional value and is close enough to the sRGB curve for this. */
+  static constexpr double kDisplayGamma = 2.2;
 };
 
 /* Writes header, converted pixels and footer into `dst`, which must hold at

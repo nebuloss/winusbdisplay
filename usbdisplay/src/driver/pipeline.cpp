@@ -43,6 +43,22 @@ constexpr int kMaxTransmissions = 2;
 
 constexpr unsigned long long kSettingsPollMs = 500;
 
+/* How long the gamma table must hold still before the screen is repainted
+ * for it.
+ *
+ * A gamma change affects every pixel, so it costs a full repaint: eight of
+ * the adapter's slots, doubled because everything is sent twice, which is
+ * about a quarter of a second of wire time. Dragging a brightness slider
+ * produces a change per pixel of travel, tens per second, and repainting on
+ * each one asks for several times the traffic the link can carry. The queue
+ * backs up, real updates stop getting through, and the picture freezes:
+ * moving the slider loses the display rather than dimming it.
+ *
+ * So changes are allowed to settle first. A quarter of a second is about
+ * one repaint's worth of time, which is the fastest this can usefully go,
+ * and during a drag the panel still follows in visible steps. */
+constexpr unsigned long long kGammaSettleMs = 250;
+
 Rect FromRECT(const RECT& rect) {
   Rect out;
   out.x1 = rect.left;
@@ -78,8 +94,14 @@ Pipeline::Pipeline(IDDCX_SWAPCHAIN swapchain, LUID render_adapter,
 
 void Pipeline::SetGammaRamp(const GammaRamp& gamma) {
   std::lock_guard<std::mutex> guard(gamma_lock_);
+  if (gamma_changed_ && pending_gamma_ == gamma) {
+    /* Same table again: leave the clock alone so a program that repeats
+     * itself cannot hold off the repaint indefinitely. */
+    return;
+  }
   pending_gamma_ = gamma;
   gamma_changed_ = true;
+  gamma_changed_at_ms_ = GetTickCount64();
 }
 
 Pipeline::~Pipeline() {
@@ -310,6 +332,7 @@ void Pipeline::ProcessFrame(const IDARG_OUT_RELEASEANDACQUIREBUFFER& buffer) {
           IID_PPV_ARGS(surface.GetAddressOf())))) {
     return;
   }
+  last_surface_ = surface;
 
   /* The metadata carries only the counts; the regions themselves have to be
    * fetched into buffers we provide. */
@@ -385,20 +408,19 @@ void Pipeline::RefreshIdle() {
    * desktop means the compositor stops presenting entirely, so something has
    * to keep the wire busy.
    *
-   * The bytes come straight out of the record of what the panel is showing,
-   * which is already in the adapter's own format. That makes this both safe
-   * and nearly free: no surface is touched, so there is no question of
-   * reading one the compositor has taken back, and no conversion or graphics
-   * work happens at all. Re-reading the last surface instead was the obvious
-   * approach and is the riskier one, because that surface belongs to the
-   * compositor again the moment the next buffer is asked for.
-   *
    * A band rather than the whole screen: one slot against eight, doubled
-   * because everything is sent twice. It walks down the screen so anything
-   * that somehow went stale is eventually repainted anyway. */
-  if (!onscreen_valid_) {
-    /* Nothing trustworthy to resend. Ask for a real repaint instead. */
-    damage_.MarkAll();
+   * because everything is sent twice. It walks down the screen, so a picture
+   * that has gone stale is brought back a band at a time without ever
+   * blocking the wire for a quarter of a second.
+   *
+   * The band is converted afresh from the last image the compositor gave us
+   * rather than replayed from the record of what was sent. That matters when
+   * the record has been thrown away, which is what happens when the gamma
+   * table changes: replaying would have nothing to replay, so nothing would
+   * be sent, and on a still desktop nothing else is coming either. The panel
+   * would sit there receiving no data at all and go dark, which is precisely
+   * what this exists to prevent. */
+  if (!last_surface_) {
     return;
   }
 
@@ -415,23 +437,17 @@ void Pipeline::RefreshIdle() {
   idle_band_row_ += kIdleBandHeight;
   if (idle_band_row_ >= mode_.height) {
     idle_band_row_ = 0;
+    /* One full pass done, so everything on the panel has now been drawn
+     * with the settings in force and the record can be trusted again. */
+    onscreen_valid_ = true;
   }
 
   if (!band.empty()) {
-    /* Copy the band out of the screen record into the packed layout the
-     * framing step expects. */
-    const size_t row_bytes = static_cast<size_t>(band.width()) * 2;
-    for (int y = band.y1; y < band.y2; ++y) {
-      memcpy(scratch_.data() + static_cast<size_t>(y - band.y1) * row_bytes,
-             onscreen_.data() + static_cast<size_t>(y) * onscreen_stride_ +
-                 static_cast<size_t>(band.x1) * 2,
-             row_bytes);
-    }
-    SubmitConverted(band, band);
+    /* Forced: the point is to put traffic on the wire, so it must send even
+     * where the pixels have not changed. */
+    SendRegion(last_surface_.Get(), band, true);
   }
 
-  /* Restart the clock even if nothing went out, so a completely static
-   * desktop does not retry on every pass through the loop. */
   last_send_ms_ = GetTickCount64();
 }
 
@@ -445,6 +461,12 @@ void Pipeline::CheckGammaRamp() {
     if (!gamma_changed_) {
       return;
     }
+    /* Wait for it to stop moving. See kGammaSettleMs: acting on every change
+     * asks for many times the traffic the link can carry, and the display
+     * stops responding altogether. */
+    if (GetTickCount64() - gamma_changed_at_ms_ < kGammaSettleMs) {
+      return;
+    }
     gamma_changed_ = false;
     updated = pending_gamma_;
   }
@@ -453,7 +475,7 @@ void Pipeline::CheckGammaRamp() {
     return;
   }
   gamma_ = updated;
-  Log("pipeline: gamma table changed (%s), repainting",
+  Log("pipeline: gamma table settled (%s), repainting",
       gamma_.identity ? "back to neutral" : "adjusting the picture");
   onscreen_valid_ = false;
   damage_.MarkAll();
