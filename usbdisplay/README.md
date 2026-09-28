@@ -139,10 +139,7 @@ driver kit are two small static stubs and a few headers, and every piece of
 it is published on NuGet, which is a plain file server. The script downloads
 four archives and compiles with clang.
 
-It needs `clang`, `lld`, `curl`, `unzip` and `wine`. Wine is there for one
-job only, compiling the shader: there is no native Linux compiler for this
-shader model, because the modern one emits a bytecode Direct3D 11 will not
-accept.
+It needs `clang`, `lld`, `curl` and `unzip`, and nothing else.
 
 What cross-compiling cannot do is sign the result or build an installable
 catalog, both of which need Windows tools. The install script does both on

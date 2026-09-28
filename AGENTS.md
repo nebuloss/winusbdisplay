@@ -175,9 +175,28 @@ headers include each other with inconsistent capitalisation, which only
 matters on a case sensitive filesystem, and `IDDCX_VERSION_MAJOR` and its
 companions are not derived from the include path and must be defined.
 
-Wine is needed for one step, compiling the shader. There is no native Linux
-compiler for this shader model, because the modern one emits a different
-bytecode that Direct3D 11 will not accept.
+### The compiled shader is committed
+
+`src/render/generated/convert_cs.h` is a generated file kept in the tree,
+which normally deserves suspicion. The reasoning:
+
+The compiler that produces it, `fxc`, runs only on Windows, and Direct3D 11
+accepts nothing else. The modern compiler emits a different bytecode
+entirely and Microsoft have declined to add the old one back; the only other
+option is a by-product of a compatibility layer rather than a tool meant for
+this. Building it elsewhere therefore meant running a Windows program under
+an emulator, which was by a wide margin the most fragile step in the whole
+build, for one small artefact.
+
+The input is a hundred lines that change perhaps twice a year and the output
+is deterministic, so committing it trades a rebuild nobody wants for a
+dependency everybody pays. After editing the shader run
+`scripts\build-shader.bat` on Windows and commit the result.
+
+The risk this creates is a committed artefact drifting from its source, so
+`test_convert.cpp` reads the shader and checks every arithmetic constant in
+it against the processor path. Change the shader without regenerating and
+the tests say so, and say which script to run.
 
 What cross compiling cannot do is sign the result or build an installable
 catalog; both need Windows tools with no equivalent. The install script does

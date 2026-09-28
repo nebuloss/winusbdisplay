@@ -18,6 +18,11 @@
 #   Microsoft.Windows.SDK.CPP          the headers, and the shader compiler
 #   Microsoft.Windows.SDK.CPP.x64      the 64 bit import libraries
 #
+# The shader is not compiled here. Its compiler runs only on Windows, and
+# Direct3D 11 accepts no other form of it, so the compiled bytecode is
+# committed to the tree instead: see src/render/generated/convert_cs.h.
+# That removes the only reason this script would have needed an emulator.
+#
 # What this does not do is sign anything or build an installable catalog.
 # Those need Windows tools with no equivalent here, and the install script
 # does both on the machine where the driver is actually used.
@@ -159,30 +164,6 @@ if [ ! -f "$WORK/.case-fixed" ]; then
   touch "$WORK/.case-fixed"
 fi
 
-# ------------------------------------------------------------------- shader
-
-SHADER_OUT="$WORK/convert_cs.h"
-if [ ! -f "$SHADER_OUT" ]; then
-  # The shader compiler ships with the headers package, not the build tools
-  # one, which carries the packaging and signing utilities instead.
-  FXC="$(find "$SDK/sdk-headers" -type f -name 'fxc.exe' -path '*x64*' -print -quit)"
-  if [ -z "$FXC" ]; then
-    echo "error: fxc.exe was not found in the SDK package." >&2
-    exit 1
-  fi
-  if ! command -v wine >/dev/null 2>&1; then
-    echo "error: wine is needed to run the shader compiler." >&2
-    echo "There is no native Linux compiler for this shader model: the" >&2
-    echo "modern one emits a different bytecode that Direct3D 11 will not" >&2
-    echo "accept. On Debian or Ubuntu: apt install wine64" >&2
-    exit 1
-  fi
-  log "Compiling the conversion shader"
-  WINEDEBUG=-all wine "$FXC" /nologo /T cs_5_0 /E main \
-    /Vn kConvertComputeShader /Fh "$SHADER_OUT" \
-    "$ROOT/src/render/convert_cs.hlsl"
-fi
-
 # -------------------------------------------------------------------- build
 
 log "Compiling"
@@ -213,7 +194,7 @@ INCLUDES=(
   -imsvc "$SDK_INC/cppwinrt"
   -imsvc "$WDK_IDDCX_INC"
   -imsvc "$WDK_WDF_INC"
-  -I "$WORK"
+  -I "$ROOT/src/render/generated"
 )
 
 

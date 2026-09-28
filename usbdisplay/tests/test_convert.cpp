@@ -459,3 +459,69 @@ TEST(brightness, rises_with_the_setting) {
     previous = gain;
   }
 }
+
+/* The conversion shader is compiled on Windows and its bytecode committed,
+ * because the compiler that produces it exists nowhere else and Direct3D 11
+ * accepts no other form. The risk that creates is a committed artefact that
+ * no longer matches the source it came from, so the constants the two share
+ * are checked against each other here.
+ *
+ * This cannot verify the bytecode itself. What it can do is fail loudly if
+ * the arithmetic in the shader source is changed without the compiled copy
+ * being regenerated, which is the mistake that would otherwise reach a
+ * screen as a shimmer on small text. */
+
+TEST(shader, source_coefficients_match_the_processor_path) {
+  /* Read from the shader source rather than duplicated here, so the two
+   * cannot drift apart silently. */
+  FILE* file = nullptr;
+  const char* paths[] = {
+      "src/render/convert_cs.hlsl",
+      "../src/render/convert_cs.hlsl",
+      "usbdisplay/src/render/convert_cs.hlsl",
+  };
+  for (const char* path : paths) {
+    if (fopen_s(&file, path, "rb") == 0 && file) {
+      break;
+    }
+    file = nullptr;
+  }
+  CHECK_BECAUSE(file != nullptr,
+                "the shader source should be findable from the test working "
+                "directory; if this moved, update the paths above");
+  if (!file) {
+    return;
+  }
+
+  std::string text;
+  char buffer[4096];
+  size_t read = 0;
+  while ((read = fread(buffer, 1, sizeof(buffer), file)) > 0) {
+    text.append(buffer, read);
+  }
+  fclose(file);
+
+  /* Each coefficient must appear in the shader exactly as the processor
+   * path defines it. Both paths run, chosen by update size, so a
+   * disagreement of even one makes a redrawn region flicker between two
+   * renderings. */
+  const struct {
+    const char* name;
+    int value;
+  } coefficients[] = {
+      {"kYr", kCoeffYr}, {"kYg", kCoeffYg}, {"kYb", kCoeffYb},
+      {"kUr", kCoeffUr}, {"kUg", kCoeffUg}, {"kUb", kCoeffUb},
+      {"kVr", kCoeffVr}, {"kVg", kCoeffVg}, {"kVb", kCoeffVb},
+  };
+
+  for (const auto& coefficient : coefficients) {
+    const std::string wanted =
+        std::string(coefficient.name) + " = " + std::to_string(coefficient.value);
+    CHECK_EQ_BECAUSE(
+        text.find(wanted) != std::string::npos, true,
+        std::string("the shader should contain \"") + wanted +
+            "\"; if the arithmetic changed, the compiled copy in "
+            "src/render/generated must be regenerated with "
+            "scripts\\build-shader.bat");
+  }
+}
