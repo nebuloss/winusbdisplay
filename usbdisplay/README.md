@@ -197,4 +197,5 @@ format.
 - `../docs/troubleshooting.md` — symptoms and their usual causes, including
   several hypotheses that were measured and ruled out, so they are not
   retried.
-- `../legacy/README.md` — the first implementation, kept whole and frozen.
+- The `legacy-final` tag holds the earlier implementation, whose comments
+  are the primary record of several protocol details.

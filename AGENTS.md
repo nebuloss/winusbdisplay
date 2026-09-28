@@ -11,12 +11,16 @@ MacroSilicon's own GPL-2.0 Linux sources. **Do not relicense or accept
 permissively licensed reimplementations without revisiting that decision.**
 
 ```
-usbdisplay/    the active project
-legacy/     the frozen first implementation
-docs/       protocol notes, troubleshooting, the original task specification
-reference/  vendor archives, not in git
-scripts/    shared elevation helper
+usbdisplay/  the project
+docs/        protocol notes, troubleshooting, the original specification
+reference/   vendor archives, not in git
+scripts/     shared elevation helper
 ```
+
+An earlier implementation lives at the `legacy-final` tag. Its comments are
+the primary record of several protocol details, so reach for it when
+`docs/protocol-notes.md` is ambiguous:
+`git checkout legacy-final -- legacy/`.
 
 `docs/AGENT_PROMPT.md` is the original specification. It is largely accurate
 and wrong in several specific places; `docs/protocol-notes.md` records every
@@ -35,7 +39,7 @@ the display had broken, and with no history there was no way to bisect.
   that would otherwise be retried.
 - `build/` is ignored, as are the vendor archives, which are large and
   separately redistributable.
-- The `reconstructed` branch is the first implementation's history from
+- The `reconstructed` branch is the earlier implementation's history from
   before git existed, replayed from a session transcript. Use it to find
   which change introduced a symptom. It is a reconstruction, not a
   recording: trust it for sequence and intent, not exact bytes.
