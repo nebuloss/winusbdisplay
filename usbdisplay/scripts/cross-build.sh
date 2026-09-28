@@ -56,23 +56,65 @@ die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
 [ "${1:-}" = "--clean" ] && rm -rf "$WORK"
 
-# clang-cl and lld-link are clang and lld under different names, and the
-# distribution packages do not always install the extra names.
-if command -v clang-cl >/dev/null 2>&1; then
-  CLANG_CL=(clang-cl)
-elif command -v clang >/dev/null 2>&1; then
-  CLANG_CL=(clang --driver-mode=cl)
-else
-  die "clang is not installed. On Debian or Ubuntu: apt install clang lld curl"
+# Finding a clang new enough for the Microsoft standard library.
+#
+# That library refuses to compile with a compiler it does not recognise, and
+# the refusal is a static assertion naming the version it wants rather than
+# anything subtle. The version required moves forward with the toolchain, so
+# this asks each candidate what it is rather than assuming: distributions
+# commonly ship several side by side, with the newest under a suffixed name
+# and something older as the default.
+#
+# clang-cl is the same binary as clang under another name, and packages do
+# not always install the extra name, so clang is asked for its
+# Microsoft-compatible mode directly when needed.
+MINIMUM_CLANG="${MINIMUM_CLANG:-19}"
+
+clang_major() {
+  "$1" --version 2>/dev/null | sed -n 's/.*version \([0-9][0-9]*\).*/\1/p' | head -1
+}
+
+CLANG=""
+BEST_VERSION=0
+for candidate in clang-22 clang-21 clang-20 clang-19 clang; do
+  command -v "$candidate" >/dev/null 2>&1 || continue
+  version="$(clang_major "$candidate")"
+  [ -n "$version" ] || continue
+  if [ "$version" -ge "$MINIMUM_CLANG" ] && [ "$version" -gt "$BEST_VERSION" ]; then
+    CLANG="$candidate"
+    BEST_VERSION="$version"
+  fi
+done
+
+if [ -z "$CLANG" ]; then
+  installed=""
+  for candidate in clang clang-16 clang-17 clang-18 clang-19 clang-20; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      installed="$installed $candidate ($(clang_major "$candidate"))"
+    fi
+  done
+  die "no clang $MINIMUM_CLANG or newer was found.
+The Microsoft standard library refuses anything older, by static assertion.
+Found:${installed:- nothing}
+On Debian or Ubuntu, the LLVM project publishes current packages:
+  wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- $MINIMUM_CLANG"
 fi
 
-if command -v lld-link >/dev/null 2>&1; then
-  LLD_LINK=(lld-link)
-elif command -v ld.lld >/dev/null 2>&1; then
-  LLD_LINK=(ld.lld -flavor link)
+# The matching linker, preferring the one from the same release.
+LLD=""
+for candidate in "lld-link-$BEST_VERSION" "lld-$BEST_VERSION" lld-link ld.lld lld; do
+  command -v "$candidate" >/dev/null 2>&1 || continue
+  LLD="$candidate"
+  break
+done
+[ -n "$LLD" ] || die "the LLVM linker is not installed. On Debian or Ubuntu: apt install lld-$BEST_VERSION"
+
+if [ "${LLD#lld-link}" != "$LLD" ]; then
+  LLD_LINK=("$LLD")
 else
-  die "the LLVM linker is not installed. On Debian or Ubuntu: apt install lld"
+  LLD_LINK=("$LLD" -flavor link)
 fi
+CLANG_CL=("$CLANG" --driver-mode=cl)
 
 for tool in curl tar unzip; do
   command -v "$tool" >/dev/null 2>&1 || die "$tool is not installed"
@@ -137,7 +179,7 @@ WDF_STUB="$(find "$WDK" -type f -ipath "*umdf/x64/$WDF_VERSION/WdfDriverStubUm.l
 [ -n "$IDDCX_STUB" ] || die "iddcxstub.lib, version $IDDCX_VERSION, was not in the kit"
 [ -n "$WDF_STUB" ]   || die "WdfDriverStubUm.lib, version $WDF_VERSION, was not in the kit"
 
-echo "  compiler:  ${CLANG_CL[*]}"
+echo "  compiler:  $CLANG (version $BEST_VERSION)"
 echo "  linker:    ${LLD_LINK[*]}"
 echo "  toolchain: $XWIN"
 echo "  kit:       $IDDCX_INC"

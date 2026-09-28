@@ -77,12 +77,18 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install the toolchain
-        # Four ordinary packages. The Microsoft compiler runtime, the
-        # Windows SDK and the driver kit are all downloaded by the build
-        # script itself.
+        # A current clang, from the LLVM project's own packages.
+        #
+        # The runner image carries 16, 17 and 18, and the Microsoft standard
+        # library refuses anything older than 19 by static assertion. Ubuntu
+        # will not have a newer one for some time, so it comes from
+        # upstream. Everything else the build needs, the compiler runtime,
+        # the Windows SDK and the driver kit, is downloaded by the script.
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang lld curl unzip
+          sudo apt-get install -y --no-install-recommends curl unzip lsb-release wget software-properties-common gnupg
+          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 19
+          sudo apt-get install -y --no-install-recommends lld-19
 
       - name: Cache the downloaded Microsoft toolchain
         # It is a few hundred megabytes and does not change between runs.
@@ -96,11 +102,11 @@ jobs:
         # assumption rather than only an exit code.
         run: |
           echo "== compilers =="
-          for t in clang clang-cl lld lld-link ld.lld; do
+          for t in clang clang-19 clang-cl lld lld-19 lld-link lld-link-19 ld.lld; do
             printf '   %-10s %s\n' "$t" "$(command -v $t || echo 'not present')"
           done
           echo "== versions =="
-          clang --version 2>/dev/null | head -1 || true
+          clang-19 --version 2>/dev/null | head -1 || clang --version 2>/dev/null | head -1 || true
 
       - name: Cross compile the driver
         working-directory: usbdisplay
