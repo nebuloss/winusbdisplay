@@ -186,6 +186,18 @@ jobs:
             ntdll.lib
           if ($LASTEXITCODE -ne 0) { throw 'The driver failed to link.' }
 
+          Write-Host '==> Building the installer'
+          & cl @common /c usbdisplay\src\tools\setup\main.cpp "/Fo$obj\setup.obj"
+          if ($LASTEXITCODE -ne 0) { throw 'the installer failed to compile' }
+          # MANIFESTUAC:NO stops the linker adding a second, conflicting
+          # manifest of its own, which makes embedding ours fail outright.
+          & link /nologo /MACHINE:X64 "/OUT:$out\usbdisplay-setup.exe" `
+            "$obj\setup.obj" setupapi.lib newdev.lib advapi32.lib crypt32.lib `
+            cfgmgr32.lib ole32.lib shell32.lib user32.lib `
+            /MANIFESTUAC:NO /MANIFEST:EMBED `
+            "/MANIFESTINPUT:usbdisplay\src\tools\setup\setup.manifest"
+          if ($LASTEXITCODE -ne 0) { throw 'the installer failed to link' }
+
           # The version in the INF must move for Windows to replace an
           # installed copy, so it is stamped the way a local build does.
           $stamp = "$(Get-Date -Format 'MM/dd/yyyy'),$(Get-Date -Format 'HH.mm.ss').0"
@@ -206,6 +218,7 @@ jobs:
           path: |
             usbdisplay/build/driver/x64/Release/usbdisplaydd.dll
             usbdisplay/build/driver/x64/Release/usbdisplaydd.inf
+            usbdisplay/build/driver/x64/Release/usbdisplay-setup.exe
           if-no-files-found: error
 
   release:
@@ -257,6 +270,9 @@ jobs:
           Copy-Item artifacts\driver\usbdisplaydd.inf "$stage\driver\"
           Copy-Item usbdisplay\inf\usbdisplay_winusb.inf "$stage\winusb\"
           Copy-Item artifacts\tools\* "$stage\tools\"
+          # The installer sits at the top, where somebody unpacking the
+          # archive will find it without being told.
+          Copy-Item artifacts\driver\usbdisplay-setup.exe "$stage\" 
 
           # The two tools are downloaded rather than looked for.
           #

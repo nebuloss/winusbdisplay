@@ -341,3 +341,27 @@ sed "s|^DriverVer *=.*|DriverVer = $(date +%m/%d/%Y),$(date +%H.%M.%S).0|" \
 
 log "Built $OUT/usbdisplaydd.dll"
 ls -la "$OUT/usbdisplaydd.dll"
+
+# The installer, built with the same toolchain because there is no reason to
+# need a Windows machine for it. Its manifest is what makes Windows raise the
+# permission prompt rather than the program failing for want of rights, and
+# lld embeds one as readily as the Microsoft linker does.
+log "Building the installer"
+"${CLANG_CL[@]}" "${FLAGS[@]}" "${DEFINES[@]}" "${INCLUDES[@]}" \
+  /c "$ROOT/src/tools/setup/main.cpp" /Fo"$WORK/obj/setup.obj"
+
+"${LLD_LINK[@]}" \
+  /NOLOGO /MACHINE:X64 \
+  /OUT:"$ROOT/build/usbdisplay-setup.exe" \
+  /LIBPATH:"$XWIN/crt/lib/x86_64" \
+  /LIBPATH:"$XWIN/sdk/lib/um/x86_64" \
+  /LIBPATH:"$XWIN/sdk/lib/ucrt/x86_64" \
+  /MANIFEST:EMBED \
+  /MANIFESTINPUT:"$ROOT/src/tools/setup/setup.manifest" \
+  "$WORK/obj/setup.obj" \
+  setupapi.lib newdev.lib advapi32.lib crypt32.lib cfgmgr32.lib \
+  ole32.lib shell32.lib kernel32.lib user32.lib \
+  libcmt.lib libcpmt.lib libucrt.lib libvcruntime.lib
+
+log "Built $ROOT/build/usbdisplay-setup.exe"
+ls -la "$ROOT/build/usbdisplay-setup.exe"

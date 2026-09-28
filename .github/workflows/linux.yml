@@ -148,6 +148,18 @@ jobs:
             llvm-readobj --coff-imports "$dll" | grep -i 'Name:' | sort -u
           fi
 
+          echo
+          echo "== the installer =="
+          setup=build/usbdisplay-setup.exe
+          test -f "$setup" || { echo "no installer was produced"; exit 1; }
+          file "$setup"
+          # The manifest is what makes Windows ask for permission rather than
+          # the program failing without it, so its presence is worth checking
+          # rather than assuming.
+          grep -q 'requireAdministrator' "$setup" || {
+            echo "the installer will not ask for administrator rights"; exit 1; }
+          ls -la "$setup"
+
           ls -la "$dll"
 
       - uses: actions/upload-artifact@v4
@@ -156,4 +168,5 @@ jobs:
           path: |
             usbdisplay/build/driver/x64/Release/usbdisplaydd.dll
             usbdisplay/build/driver/x64/Release/usbdisplaydd.inf
+            usbdisplay/build/usbdisplay-setup.exe
           if-no-files-found: error
