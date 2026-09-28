@@ -360,11 +360,25 @@ void IndirectDevice::CreateMonitor() {
   info.MonitorDescription.DataSize = static_cast<UINT>(edid_.size());
   info.MonitorDescription.pData = edid_.data();
 
-  /* An all-zero container id is rejected. */
-  if (FAILED(CoCreateGuid(&info.MonitorContainerId))) {
-    Log("CreateMonitor: could not generate a container id");
-    return;
-  }
+  /* A fixed identity, not a fresh one.
+   *
+   * This is how Windows and everything built on it tells one monitor from
+   * another across restarts. Generating a new value here, which is the
+   * obvious thing to do and what this did, means the adapter arrives as a
+   * brand new monitor every single time: position in the desktop layout,
+   * scaling, and any per-monitor setting in a third-party tool are all
+   * attached to the old identity and silently lost. It also litters those
+   * tools with a growing pile of dead entries, one per replug.
+   *
+   * An all-zero value is rejected, so it has to be a real one; it simply
+   * has to be the *same* real one each time. */
+  // {8E4D9A41-6B3C-4F27-9E52-D1A70C8B5F36}
+  static const GUID kMonitorIdentity = {
+      0x8e4d9a41,
+      0x6b3c,
+      0x4f27,
+      {0x9e, 0x52, 0xd1, 0xa7, 0x0c, 0x8b, 0x5f, 0x36}};
+  info.MonitorContainerId = kMonitorIdentity;
 
   WDF_OBJECT_ATTRIBUTES attributes;
   WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&attributes, MonitorContextWrapper);
