@@ -72,6 +72,14 @@ Pipeline::Pipeline(IDDCX_SWAPCHAIN swapchain, LUID render_adapter,
   onscreen_.assign(onscreen_stride_ * mode_.height, 0);
   onscreen_valid_ = false;
   settings_ = ReadSettings();
+  gamma_.Reset();
+  pending_gamma_.Reset();
+}
+
+void Pipeline::SetGammaRamp(const GammaRamp& gamma) {
+  std::lock_guard<std::mutex> guard(gamma_lock_);
+  pending_gamma_ = gamma;
+  gamma_changed_ = true;
 }
 
 Pipeline::~Pipeline() {
@@ -150,9 +158,9 @@ bool Pipeline::CreateDevice() {
 bool Pipeline::ConvertForSending(ID3D11Texture2D* source,
                                  const Rect& rect) {
   const char* used = nullptr;
-  if (!converters_.Convert(source, rect, settings_.picture(), scratch_.data(),
-                           scratch_.size(), settings_.gpu_threshold_pixels,
-                           &used)) {
+  if (!converters_.Convert(source, rect, settings_.picture(), gamma_,
+                           scratch_.data(), scratch_.size(),
+                           settings_.gpu_threshold_pixels, &used)) {
     Log("pipeline: no converter could handle a %dx%d region", rect.width(),
         rect.height());
     return false;
@@ -427,6 +435,30 @@ void Pipeline::RefreshIdle() {
   last_send_ms_ = GetTickCount64();
 }
 
+/* Picks up a gamma table the operating system installed, and repaints if it
+ * differs. Everything already on the panel was converted through the old
+ * table, so none of it matches what a comparison would now produce. */
+void Pipeline::CheckGammaRamp() {
+  GammaRamp updated;
+  {
+    std::lock_guard<std::mutex> guard(gamma_lock_);
+    if (!gamma_changed_) {
+      return;
+    }
+    gamma_changed_ = false;
+    updated = pending_gamma_;
+  }
+
+  if (updated == gamma_) {
+    return;
+  }
+  gamma_ = updated;
+  Log("pipeline: gamma table changed (%s), repainting",
+      gamma_.identity ? "back to neutral" : "adjusting the picture");
+  onscreen_valid_ = false;
+  damage_.MarkAll();
+}
+
 void Pipeline::CheckAdapterReprogrammed() {
   /* Reprogramming clears the adapter's picture memory, and it can happen
    * without this thread asking: a run of failed transfers makes the sender
@@ -479,6 +511,11 @@ void Pipeline::Run() {
     if (status == E_PENDING) {
       const unsigned long long now = GetTickCount64();
 
+      /* Checked every pass rather than on the slower poll, because a
+       * brightness slider should follow the pointer, not lag half a second
+       * behind it. */
+      CheckGammaRamp();
+
       if (now - last_settings_poll_ms_ >= kSettingsPollMs) {
         last_settings_poll_ms_ = now;
         RefreshSettings();
@@ -515,6 +552,7 @@ void Pipeline::Run() {
       break;
     }
 
+    CheckGammaRamp();
     CheckAdapterReprogrammed();
     ProcessFrame(buffer);
     IddCxSwapChainFinishedProcessingFrame(swapchain_);

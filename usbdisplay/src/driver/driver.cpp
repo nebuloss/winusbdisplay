@@ -56,6 +56,7 @@ EVT_IDD_CX_MONITOR_GET_DEFAULT_DESCRIPTION_MODES EvtMonitorGetDefaultModes;
 EVT_IDD_CX_MONITOR_QUERY_TARGET_MODES EvtMonitorQueryModes;
 EVT_IDD_CX_MONITOR_ASSIGN_SWAPCHAIN EvtMonitorAssignSwapChain;
 EVT_IDD_CX_MONITOR_UNASSIGN_SWAPCHAIN EvtMonitorUnassignSwapChain;
+EVT_IDD_CX_MONITOR_SET_GAMMA_RAMP EvtMonitorSetGammaRamp;
 
 void EvtDeviceContextCleanup(WDFOBJECT object) {
   auto* wrapper = GetDeviceContext(object);
@@ -102,7 +103,11 @@ NTSTATUS EvtDeviceD0Entry(WDFDEVICE wdf_device, WDF_POWER_DEVICE_STATE) {
       static_cast<UINT64>(kMaxFrameWidth) * kMaxFrameHeight * 60;
 
   caps.EndPointDiagnostics.Size = sizeof(caps.EndPointDiagnostics);
-  caps.EndPointDiagnostics.GammaSupport = IDDCX_FEATURE_IMPLEMENTATION_NONE;
+  /* Declaring that gamma is applied in software is what makes Windows route
+   * gamma tables to this driver at all. With NONE here, the callback above
+   * is never called and brightness tools have no way in. */
+  caps.EndPointDiagnostics.GammaSupport =
+      IDDCX_FEATURE_IMPLEMENTATION_SOFTWARE;
   caps.EndPointDiagnostics.TransmissionType =
       IDDCX_TRANSMISSION_TYPE_WIRED_USB;
   caps.EndPointDiagnostics.pEndPointFriendlyName = L"USB Display";
@@ -247,6 +252,21 @@ NTSTATUS EvtMonitorAssignSwapChain(IDDCX_MONITOR monitor,
   return device ? device->AssignSwapChain(args) : STATUS_DEVICE_NOT_READY;
 }
 
+/* The one route by which an ordinary Windows brightness tool can reach this
+ * monitor.
+ *
+ * The two mechanisms such tools normally use are both closed to an indirect
+ * display: the one that travels along a display cable needs a graphics
+ * card's I2C master, and the one laptop panels use needs a kernel driver
+ * neither of which exists here. The gamma table does arrive, but only for a
+ * driver that declares it applies one, which is what GammaSupport below
+ * announces. Anything that calls SetDeviceGammaRamp therefore lands here. */
+NTSTATUS EvtMonitorSetGammaRamp(IDDCX_MONITOR monitor,
+                                const IDARG_IN_SET_GAMMARAMP* args) {
+  IndirectDevice* device = DeviceFrom(monitor);
+  return device ? device->SetGammaRamp(args) : STATUS_DEVICE_NOT_READY;
+}
+
 NTSTATUS EvtMonitorUnassignSwapChain(IDDCX_MONITOR monitor) {
   IndirectDevice* device = DeviceFrom(monitor);
   if (device) {
@@ -267,6 +287,7 @@ NTSTATUS EvtDriverDeviceAdd(WDFDRIVER, PWDFDEVICE_INIT device_init) {
   config.EvtIddCxMonitorQueryTargetModes = EvtMonitorQueryModes;
   config.EvtIddCxMonitorAssignSwapChain = EvtMonitorAssignSwapChain;
   config.EvtIddCxMonitorUnassignSwapChain = EvtMonitorUnassignSwapChain;
+  config.EvtIddCxMonitorSetGammaRamp = EvtMonitorSetGammaRamp;
 
   NTSTATUS status = IddCxDeviceInitConfig(device_init, &config);
   if (!NT_SUCCESS(status)) {

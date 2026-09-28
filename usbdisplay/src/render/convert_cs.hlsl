@@ -20,10 +20,18 @@ cbuffer Params : register(b0) {
   uint2 gSize;        // width and height of the region, in pixels
   int   gLumaGain;    // brightness, fixed point over 256
   int   gChromaGain;  // contrast, fixed point over 256
+  int   gApplyGamma;  // non-zero when the table below is not the identity
+  int3  gPad;
 };
 
 Texture2D<float4> gSource : register(t0);
 RWStructuredBuffer<uint> gOutput : register(u0);
+
+// The gamma table Windows handed the driver, 256 entries per channel packed
+// as red, green, blue. Only the top eight bits of each entry are used, which
+// is what the processor path does too: the two must agree exactly, because
+// which one runs depends on how large the update is.
+StructuredBuffer<uint> gGamma : register(t1);
 
 // Must match kCoeff* in render/convert.h.
 static const int kYr = 8382, kYg = 16452, kYb = 3196;
@@ -32,8 +40,15 @@ static const int kVr = 14336, kVg = -12005, kVb = -2331;
 
 int3 LoadRgb(uint x, uint y) {
   float4 texel = gSource.Load(int3(int(x), int(y), 0));
-  return int3(round(texel.r * 255.0f), round(texel.g * 255.0f),
-              round(texel.b * 255.0f));
+  int3 c = int3(round(texel.r * 255.0f), round(texel.g * 255.0f),
+                round(texel.b * 255.0f));
+  if (gApplyGamma != 0) {
+    // Same shift as the processor path, on the same 16 bit entries.
+    c.r = int(gGamma[c.r] >> 8);
+    c.g = int(gGamma[256 + c.g] >> 8);
+    c.b = int(gGamma[512 + c.b] >> 8);
+  }
+  return c;
 }
 
 int Luma(int3 c) { return 16 + ((kYr * c.r + kYg * c.g + kYb * c.b) >> 15); }

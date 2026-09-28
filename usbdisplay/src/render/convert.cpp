@@ -291,6 +291,47 @@ void ConvertRow(uint8_t* dst, const uint8_t* src, int width) {
   ConvertRowSimd(dst, src, width);
 }
 
+void GammaRamp::Reset() {
+  for (int i = 0; i < 256; ++i) {
+    red[i] = green[i] = blue[i] = static_cast<uint16_t>(i * 257);
+  }
+  identity = true;
+}
+
+void GammaRamp::Set(const uint16_t* rgb256x3) {
+  memcpy(red, rgb256x3, sizeof(red));
+  memcpy(green, rgb256x3 + 256, sizeof(green));
+  memcpy(blue, rgb256x3 + 512, sizeof(blue));
+
+  /* Only the top eight bits survive conversion, so a ramp that differs from
+   * the identity below that threshold is not worth the work of applying. */
+  identity = true;
+  for (int i = 0; i < 256 && identity; ++i) {
+    identity = (red[i] >> 8) == i && (green[i] >> 8) == i &&
+               (blue[i] >> 8) == i;
+  }
+}
+
+bool GammaRamp::operator==(const GammaRamp& other) const {
+  return memcmp(red, other.red, sizeof(red)) == 0 &&
+         memcmp(green, other.green, sizeof(green)) == 0 &&
+         memcmp(blue, other.blue, sizeof(blue)) == 0;
+}
+
+void ApplyGammaRow(uint8_t* row, int width, const GammaRamp& gamma) {
+  if (gamma.identity) {
+    return;
+  }
+  /* Source order is blue, green, red, unused. The alpha byte is left alone
+   * because nothing downstream reads it. */
+  for (int i = 0; i < width; ++i) {
+    uint8_t* pixel = row + static_cast<size_t>(i) * 4;
+    pixel[0] = static_cast<uint8_t>(gamma.blue[pixel[0]] >> 8);
+    pixel[1] = static_cast<uint8_t>(gamma.green[pixel[1]] >> 8);
+    pixel[2] = static_cast<uint8_t>(gamma.red[pixel[2]] >> 8);
+  }
+}
+
 void ApplyPictureAdjust(uint8_t* row, int width, const PictureAdjust& adjust) {
   if (adjust.IsIdentity()) {
     return;
@@ -336,7 +377,7 @@ size_t FrameExisting(uint8_t* dst, size_t dst_capacity, const Rect& rect) {
 
 bool ConvertRegion(uint8_t* dst, size_t dst_capacity, const uint8_t* src,
                    size_t stride, const Rect& rect,
-                   const PictureAdjust& adjust) {
+                   const PictureAdjust& adjust, const GammaRamp* gamma) {
   const size_t row_bytes = static_cast<size_t>(rect.width()) * 2;
   /* Checked rather than assumed. The destination is sized from the display
    * mode, and the mode can change under a caller that has not noticed. */
@@ -346,11 +387,26 @@ bool ConvertRegion(uint8_t* dst, size_t dst_capacity, const uint8_t* src,
   }
   const int width = rect.width();
 
+  const bool want_gamma = gamma != nullptr && !gamma->identity;
+
   RowPool::Instance().Run(rect.height(), [&](int first, int last) {
+    /* Gamma acts on the source colour, so a row has to be copied out before
+     * it can be adjusted: the surface belongs to the compositor and must not
+     * be written to. One row per thread, reused down the block. */
+    std::vector<uint8_t> scratch;
+    if (want_gamma) {
+      scratch.resize(static_cast<size_t>(width) * 4);
+    }
+
     for (int i = first; i < last; ++i) {
       const uint8_t* row = src +
                            static_cast<size_t>(rect.y1 + i) * stride +
                            static_cast<size_t>(rect.x1) * 4;
+      if (want_gamma) {
+        memcpy(scratch.data(), row, scratch.size());
+        ApplyGammaRow(scratch.data(), width, *gamma);
+        row = scratch.data();
+      }
       uint8_t* target = dst + static_cast<size_t>(i) * row_bytes;
       ConvertRow(target, row, width);
       ApplyPictureAdjust(target, width, adjust);
@@ -388,7 +444,8 @@ size_t FrameSubRegion(uint8_t* dst, size_t dst_capacity,
 
 size_t FrameRect(uint8_t* dst, size_t dst_capacity, const uint8_t* src,
                  size_t stride, int image_width, int image_height,
-                 const Rect& rect, const PictureAdjust& adjust) {
+                 const Rect& rect, const PictureAdjust& adjust,
+                 const GammaRamp* gamma) {
   if (rect.empty() || rect.x1 < 0 || rect.y1 < 0 || rect.x2 > image_width ||
       rect.y2 > image_height || (rect.x1 & 1) || (rect.width() & 1)) {
     return 0;
@@ -400,7 +457,7 @@ size_t FrameRect(uint8_t* dst, size_t dst_capacity, const uint8_t* src,
   }
 
   if (!ConvertRegion(dst + kFrameHeaderSize, dst_capacity - kFrameOverhead,
-                     src, stride, rect, adjust)) {
+                     src, stride, rect, adjust, gamma)) {
     return 0;
   }
   return needed;

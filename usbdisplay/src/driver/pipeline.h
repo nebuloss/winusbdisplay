@@ -38,6 +38,7 @@
 #include <wrl/client.h>
 
 #include <memory>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -63,6 +64,10 @@ class Pipeline {
    * from there takes the whole driver host down with it. */
   bool Start();
   void Stop();
+
+  /* Installs a gamma table from the operating system. Safe from another
+   * thread: the frame loop picks it up on its next pass. */
+  void SetGammaRamp(const GammaRamp& gamma);
 
  private:
   void Run();
@@ -103,6 +108,7 @@ class Pipeline {
   /* Notices that the adapter has been reprogrammed behind this thread's
    * back, which voids everything known about what the panel is showing. */
   void CheckAdapterReprogrammed();
+  void CheckGammaRamp();
 
   IDDCX_SWAPCHAIN swapchain_;
   LUID render_adapter_;
@@ -114,6 +120,14 @@ class Pipeline {
   Microsoft::WRL::ComPtr<ID3D11Device> d3d_device_;
   Microsoft::WRL::ComPtr<ID3D11DeviceContext> d3d_context_;
   ConverterSet converters_;
+
+  /* The gamma table in force, and the one the frame loop is using. Kept
+   * apart so the operating system can install one at any moment without
+   * tearing a conversion that is already under way. */
+  std::mutex gamma_lock_;
+  GammaRamp pending_gamma_;
+  bool gamma_changed_ = false;
+  GammaRamp gamma_;
 
   DamageTracker damage_;
 

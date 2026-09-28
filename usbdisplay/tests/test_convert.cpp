@@ -280,3 +280,126 @@ TEST(modes, no_mode_exceeds_the_maximum_frame_size) {
                   "mode that does not fit would overrun them");
   }
 }
+
+/* Gamma tables are how ordinary Windows brightness tools reach this monitor,
+ * so they have to behave exactly like the rest of the conversion: applied on
+ * the source colour, and identically whichever path runs. */
+
+TEST(gamma, the_default_table_changes_nothing) {
+  GammaRamp ramp;
+  ramp.Reset();
+  CHECK_BECAUSE(ramp.identity,
+                "a table where output equals input must be recognised as "
+                "such, or every frame pays for a pointless pass over the "
+                "pixels");
+
+  std::vector<uint8_t> row = SolidRow(4, 200, 100, 50);
+  const std::vector<uint8_t> before = row;
+  ApplyGammaRow(row.data(), 4, ramp);
+  CHECK_EQ(memcmp(row.data(), before.data(), row.size()), 0);
+}
+
+TEST(gamma, a_dimming_table_darkens_every_channel) {
+  uint16_t table[768];
+  for (int i = 0; i < 256; ++i) {
+    const uint16_t half = static_cast<uint16_t>(i * 257 / 2);
+    table[i] = half;
+    table[256 + i] = half;
+    table[512 + i] = half;
+  }
+
+  GammaRamp ramp;
+  ramp.Set(table);
+  CHECK_BECAUSE(!ramp.identity, "a table that halves output is not neutral");
+
+  std::vector<uint8_t> row = SolidRow(2, 200, 160, 80);
+  ApplyGammaRow(row.data(), 2, ramp);
+
+  /* Source order is blue, green, red. */
+  CHECK_EQ(static_cast<int>(row[0]), 80 / 2);
+  CHECK_EQ(static_cast<int>(row[1]), 160 / 2);
+  CHECK_EQ(static_cast<int>(row[2]), 200 / 2);
+}
+
+TEST(gamma, a_table_that_only_moves_low_bits_counts_as_neutral) {
+  uint16_t table[768];
+  for (int i = 0; i < 256; ++i) {
+    /* Differs from the identity, but only below the eighth bit, which
+     * conversion discards. Built by placing the level in the high byte
+     * directly: the obvious i * 257 + n overflows at the top of the range
+     * and changes the high byte after all, which is what this test is
+     * supposed to rule out. */
+    const uint16_t nudged = static_cast<uint16_t>((i << 8) | (i % 7));
+    table[i] = nudged;
+    table[256 + i] = nudged;
+    table[512 + i] = nudged;
+  }
+  GammaRamp ramp;
+  ramp.Set(table);
+  CHECK_BECAUSE(ramp.identity,
+                "only the top eight bits survive conversion, so a table that "
+                "moves nothing above them is not worth applying");
+}
+
+TEST(gamma, applied_before_conversion_not_after) {
+  /* Gamma acts on colour, so dimming the source and converting must give the
+   * same answer as converting a dimmed source. If it were applied to the
+   * encoded result instead, the chroma would shift and colours would drift
+   * as brightness changed. */
+  uint16_t table[768];
+  for (int i = 0; i < 256; ++i) {
+    const uint16_t half = static_cast<uint16_t>(i * 257 / 2);
+    table[i] = half;
+    table[256 + i] = half;
+    table[512 + i] = half;
+  }
+  GammaRamp ramp;
+  ramp.Set(table);
+
+  const std::vector<uint8_t> source = SolidRow(2, 200, 160, 80);
+  const std::vector<uint8_t> halved = SolidRow(2, 100, 80, 40);
+
+  std::vector<uint8_t> viaGamma(4);
+  std::vector<uint8_t> direct(4);
+  {
+    std::vector<uint8_t> work = source;
+    ApplyGammaRow(work.data(), 2, ramp);
+    ConvertRow(viaGamma.data(), work.data(), 2);
+  }
+  ConvertRow(direct.data(), halved.data(), 2);
+
+  CHECK_EQ_BECAUSE(memcmp(viaGamma.data(), direct.data(), 4), 0,
+                   "a gamma table must act on the colour, exactly as if the "
+                   "desktop itself had been drawn darker");
+}
+
+TEST(gamma, region_conversion_honours_the_table) {
+  const int width = 64, height = 8;
+  const size_t stride = static_cast<size_t>(width) * 4;
+  std::vector<uint8_t> source(stride * height);
+  FillSolid(source.data(), stride, width, height, 200, 200, 200);
+
+  uint16_t table[768];
+  for (int i = 0; i < 256; ++i) {
+    const uint16_t half = static_cast<uint16_t>(i * 257 / 2);
+    table[i] = half;
+    table[256 + i] = half;
+    table[512 + i] = half;
+  }
+  GammaRamp ramp;
+  ramp.Set(table);
+
+  const Rect region = Make(0, 0, width, height);
+  std::vector<uint8_t> plain(static_cast<size_t>(width) * 2 * height);
+  std::vector<uint8_t> dimmed = plain;
+
+  CHECK(ConvertRegion(plain.data(), plain.size(), source.data(), stride,
+                      region, PictureAdjust(), nullptr));
+  CHECK(ConvertRegion(dimmed.data(), dimmed.size(), source.data(), stride,
+                      region, PictureAdjust(), &ramp));
+
+  /* Luma sits at odd byte offsets in the encoded output. */
+  CHECK_BECAUSE(dimmed[1] < plain[1],
+                "a dimming table must actually dim the encoded result, or "
+                "the brightness slider moves and nothing happens");
+}

@@ -60,6 +60,40 @@ static_assert(kCoeffVr + kCoeffVg + kCoeffVb == 0, "V must be neutral on grey");
  * the GPU path drags two. It is overridable at runtime for that reason. */
 constexpr int64_t kGpuThresholdPixels = 1920 * 1080 / 4;
 
+/* A gamma lookup table, as Windows hands one over.
+ *
+ * This is how brightness reaches the panel from ordinary Windows tools. The
+ * adapter has no brightness control of its own, and the paths that normally
+ * carry one to a monitor do not reach an indirect display: the cable-based
+ * protocol needs a graphics card's I2C master, and the laptop-panel path
+ * needs a kernel driver. What does reach us is the gamma ramp, because the
+ * display stack offers to hand it to a driver that says it will apply it.
+ *
+ * So a tool calls SetDeviceGammaRamp, Windows passes the table here, and it
+ * is applied while converting, exactly like the manual brightness setting.
+ * Three channels of 256 entries, each 16 bit, of which the conversion uses
+ * the top 8.
+ *
+ * Both conversion paths must apply this identically, for the same reason
+ * they must convert identically: an update that crosses the size threshold
+ * would otherwise flicker between two renderings. */
+struct GammaRamp {
+  uint16_t red[256];
+  uint16_t green[256];
+  uint16_t blue[256];
+  bool identity = true;
+
+  /* The ramp Windows starts from, where output equals input. */
+  void Reset();
+
+  /* Loads a ramp, and works out whether it actually changes anything. An
+   * identity ramp is the common case and skipping it keeps the fast path
+   * fast. */
+  void Set(const uint16_t* rgb256x3);
+
+  bool operator==(const GammaRamp& other) const;
+};
+
 /* Picture adjustment applied while converting, expressed the way a monitor
  * reports it: brightness and contrast each 0..100, with 100 and 50 meaning
  * "leave the image alone".
@@ -87,7 +121,8 @@ struct PictureAdjust {
 size_t FrameRect(uint8_t* dst, size_t dst_capacity, const uint8_t* src,
                  size_t stride, int image_width, int image_height,
                  const Rect& rect,
-                 const PictureAdjust& adjust = PictureAdjust());
+                 const PictureAdjust& adjust = PictureAdjust(),
+                 const GammaRamp* gamma = nullptr);
 
 /* Writes just the header and footer around pixel data that something else,
  * in practice the GPU path, has already produced. */
@@ -100,7 +135,8 @@ size_t FrameExisting(uint8_t* dst, size_t dst_capacity, const Rect& rect);
  * wrapped up and sent. */
 bool ConvertRegion(uint8_t* dst, size_t dst_capacity, const uint8_t* src,
                    size_t stride, const Rect& rect,
-                   const PictureAdjust& adjust);
+                   const PictureAdjust& adjust,
+                   const GammaRamp* gamma = nullptr);
 
 /* Copies a sub-region out of a buffer produced by ConvertRegion and frames
  * it for the wire. `sub` must lie inside `region`. Returns bytes written. */
@@ -111,6 +147,11 @@ size_t FrameSubRegion(uint8_t* dst, size_t dst_capacity,
 /* One row. Dispatches to SIMD; SSE2 is part of the x64 baseline so there is
  * no runtime check. */
 void ConvertRow(uint8_t* dst, const uint8_t* src, int width);
+
+/* Applies a gamma table to a row of BGRA source pixels, in place. Done
+ * before conversion, because that is where Windows expects a gamma ramp to
+ * act: on the colour, not on the encoded result. */
+void ApplyGammaRow(uint8_t* bgra_row, int width, const GammaRamp& gamma);
 void ConvertRowScalar(uint8_t* dst, const uint8_t* src, int width);
 void ConvertRowSimd(uint8_t* dst, const uint8_t* src, int width);
 

@@ -64,6 +64,13 @@ class IndirectDevice {
    * the lock rather than handed out by reference. */
   std::vector<Mode> modes();
 
+  /* Applies a gamma table from the operating system. This is how ordinary
+   * Windows brightness tools reach this monitor: the paths they normally
+   * use need either a graphics card's I2C master or a kernel driver, and an
+   * indirect display has neither, but the display stack will hand the gamma
+   * table to a driver that declares it applies one. */
+  NTSTATUS SetGammaRamp(const IDARG_IN_SET_GAMMARAMP* args);
+
  private:
   void CreateMonitor();
   void AnnounceMonitor();
@@ -93,6 +100,10 @@ class IndirectDevice {
   bool adapter_ready_ = false;
   bool pending_arrival_ = false;
   std::string last_attach_error_;
+
+  /* The gamma table in force, kept here so it survives a swapchain being
+   * torn down and rebuilt, which happens on every mode change. */
+  GammaRamp gamma_;
 
   VideoPort port_ = VideoPort::kUnknown;
   std::vector<uint8_t> edid_;

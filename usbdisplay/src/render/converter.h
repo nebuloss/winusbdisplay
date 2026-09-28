@@ -67,8 +67,8 @@ class RegionConverter {
    * the device's format. Returns false on failure, after which the caller
    * should stop offering it work. */
   virtual bool Convert(ID3D11Texture2D* source, const Rect& region,
-                       const PictureAdjust& adjust, uint8_t* destination,
-                       size_t capacity) = 0;
+                       const PictureAdjust& adjust, const GammaRamp& gamma,
+                       uint8_t* destination, size_t capacity) = 0;
 
   virtual const char* error() const = 0;
 };
@@ -84,8 +84,8 @@ class CpuRegionConverter : public RegionConverter {
   bool Usable() const override { return true; }
   bool Suits(const Rect& region, int64_t threshold) const override;
   bool Convert(ID3D11Texture2D* source, const Rect& region,
-               const PictureAdjust& adjust, uint8_t* destination,
-               size_t capacity) override;
+               const PictureAdjust& adjust, const GammaRamp& gamma,
+               uint8_t* destination, size_t capacity) override;
   const char* error() const override { return error_; }
 
  private:
@@ -109,13 +109,14 @@ class GpuRegionConverter : public RegionConverter {
   bool Usable() const override { return usable_; }
   bool Suits(const Rect& region, int64_t threshold) const override;
   bool Convert(ID3D11Texture2D* source, const Rect& region,
-               const PictureAdjust& adjust, uint8_t* destination,
-               size_t capacity) override;
+               const PictureAdjust& adjust, const GammaRamp& gamma,
+               uint8_t* destination, size_t capacity) override;
   const char* error() const override { return error_; }
 
  private:
   bool EnsureRegionTexture(int width, int height, DXGI_FORMAT format);
   bool EnsureBuffers(size_t bytes);
+  bool UploadGamma(const GammaRamp& gamma);
 
   Microsoft::WRL::ComPtr<ID3D11Device> device_;
   Microsoft::WRL::ComPtr<ID3D11DeviceContext> context_;
@@ -132,6 +133,12 @@ class GpuRegionConverter : public RegionConverter {
   Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> output_view_;
   Microsoft::WRL::ComPtr<ID3D11Buffer> readback_;
   size_t buffer_bytes_ = 0;
+
+  /* The gamma table, uploaded only when it changes. */
+  Microsoft::WRL::ComPtr<ID3D11Buffer> gamma_;
+  Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> gamma_view_;
+  GammaRamp uploaded_gamma_;
+  bool gamma_uploaded_ = false;
 
   bool usable_ = false;
   const char* error_ = "";
@@ -150,8 +157,9 @@ class ConverterSet {
   /* Converts using the most suitable implementation, falling back through
    * the rest on failure. Names the one that ran in `used`. */
   bool Convert(ID3D11Texture2D* source, const Rect& region,
-               const PictureAdjust& adjust, uint8_t* destination,
-               size_t capacity, int64_t threshold, const char** used);
+               const PictureAdjust& adjust, const GammaRamp& gamma,
+               uint8_t* destination, size_t capacity, int64_t threshold,
+               const char** used);
 
   std::string Describe() const;
 

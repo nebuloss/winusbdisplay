@@ -315,6 +315,33 @@ void IndirectDevice::ReleaseHardware() {
   Log("ReleaseHardware: done in %llu ms", GetTickCount64() - started);
 }
 
+NTSTATUS IndirectDevice::SetGammaRamp(const IDARG_IN_SET_GAMMARAMP* args) {
+  GammaRamp ramp;
+  ramp.Reset();
+
+  if (args->Type == IDDCX_GAMMARAMP_TYPE_RGB256x3x16) {
+    /* Three channels of 256 sixteen bit entries. Checked rather than
+     * trusted: this is a pointer from outside. */
+    const UINT expected = 3 * 256 * sizeof(uint16_t);
+    if (args->GammaRampSizeInBytes != expected || !args->pGammaRampData) {
+      Log("SetGammaRamp: unexpected table, %u bytes", args->GammaRampSizeInBytes);
+      return STATUS_INVALID_PARAMETER;
+    }
+    ramp.Set(static_cast<const uint16_t*>(args->pGammaRampData));
+  } else if (args->Type != IDDCX_GAMMARAMP_TYPE_DEFAULT) {
+    return STATUS_NOT_SUPPORTED;
+  }
+  /* The default type means "go back to neutral", which Reset already is. */
+
+  std::lock_guard<std::mutex> guard(lock_);
+  if (pipeline_) {
+    pipeline_->SetGammaRamp(ramp);
+  }
+  /* Remembered so a table set while no swapchain exists is not lost. */
+  gamma_ = ramp;
+  return STATUS_SUCCESS;
+}
+
 std::vector<Mode> IndirectDevice::modes() {
   std::lock_guard<std::mutex> guard(lock_);
   return modes_;
@@ -458,6 +485,10 @@ NTSTATUS IndirectDevice::AssignSwapChain(const IDARG_IN_SETSWAPCHAIN* args) {
       new Pipeline(args->hSwapChain, args->RenderAdapterLuid,
                    args->hNextSurfaceAvailable, device_.get(), sender_.get(),
                    active_mode_));
+
+  /* Carry across any gamma table the operating system set before this
+   * swapchain existed, so brightness survives a mode change. */
+  pipeline->SetGammaRamp(gamma_);
 
   if (!pipeline->Start()) {
     /* Hand the swapchain back so the OS builds another and tries again. It

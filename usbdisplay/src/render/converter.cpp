@@ -20,6 +20,8 @@ struct ShaderParams {
   uint32_t height;
   int32_t luma_gain;
   int32_t chroma_gain;
+  int32_t apply_gamma;
+  int32_t padding[3];
 };
 
 /* B8G8R8A8_UNORM and its typeless sibling are what the compositor hands out.
@@ -175,9 +177,66 @@ bool GpuRegionConverter::EnsureRegionTexture(int width, int height,
   return true;
 }
 
+bool GpuRegionConverter::UploadGamma(const GammaRamp& gamma) {
+  if (gamma_ && gamma_uploaded_ && uploaded_gamma_ == gamma) {
+    return true;
+  }
+
+  /* 768 entries, one per channel per level, held as 32 bit values because a
+   * structured buffer of 16 bit elements is awkward to index in a shader and
+   * this costs three kilobytes. */
+  uint32_t table[768];
+  for (int i = 0; i < 256; ++i) {
+    table[i] = gamma.red[i];
+    table[256 + i] = gamma.green[i];
+    table[512 + i] = gamma.blue[i];
+  }
+
+  if (!gamma_) {
+    D3D11_BUFFER_DESC desc;
+    memset(&desc, 0, sizeof(desc));
+    desc.ByteWidth = sizeof(table);
+    desc.Usage = D3D11_USAGE_DYNAMIC;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+    desc.StructureByteStride = sizeof(uint32_t);
+    if (FAILED(device_->CreateBuffer(&desc, nullptr, &gamma_))) {
+      error_ = "could not create the gamma table buffer";
+      return false;
+    }
+
+    D3D11_SHADER_RESOURCE_VIEW_DESC view;
+    memset(&view, 0, sizeof(view));
+    view.Format = DXGI_FORMAT_UNKNOWN;
+    view.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+    view.Buffer.NumElements = 768;
+    if (FAILED(device_->CreateShaderResourceView(gamma_.Get(), &view,
+                                                 &gamma_view_))) {
+      error_ = "could not create the gamma table view";
+      return false;
+    }
+  }
+
+  D3D11_MAPPED_SUBRESOURCE mapped;
+  if (FAILED(context_->Map(gamma_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0,
+                           &mapped))) {
+    error_ = "could not upload the gamma table";
+    return false;
+  }
+  memcpy(mapped.pData, table, sizeof(table));
+  context_->Unmap(gamma_.Get(), 0);
+
+  uploaded_gamma_ = gamma;
+  gamma_uploaded_ = true;
+  return true;
+}
+
+
 bool GpuRegionConverter::Convert(ID3D11Texture2D* source, const Rect& region,
-                           const PictureAdjust& adjust,
-                                 uint8_t* dst, size_t capacity) {
+                                 const PictureAdjust& adjust,
+                                 const GammaRamp& gamma, uint8_t* dst,
+                                 size_t capacity) {
   if (!usable_ || region.empty() || (region.width() & 1)) {
     error_ = "the GPU path was asked for an update it cannot handle";
     return false;
@@ -199,6 +258,9 @@ bool GpuRegionConverter::Convert(ID3D11Texture2D* source, const Rect& region,
 
   if (!EnsureRegionTexture(region.width(), region.height(),
                            source_desc.Format)) {
+    return false;
+  }
+  if (!UploadGamma(gamma)) {
     return false;
   }
 
@@ -225,14 +287,16 @@ bool GpuRegionConverter::Convert(ID3D11Texture2D* source, const Rect& region,
   params.height = static_cast<uint32_t>(region.height());
   params.luma_gain = (adjust.brightness * 256) / 100;
   params.chroma_gain = (adjust.contrast * 256) / 50;
+  params.apply_gamma = gamma.identity ? 0 : 1;
+  memset(params.padding, 0, sizeof(params.padding));
   memcpy(mapped.pData, &params, sizeof(params));
   context_->Unmap(constants_.Get(), 0);
 
-  ID3D11ShaderResourceView* views[] = {region_view_.Get()};
+  ID3D11ShaderResourceView* views[] = {region_view_.Get(), gamma_view_.Get()};
   ID3D11UnorderedAccessView* targets[] = {output_view_.Get()};
   ID3D11Buffer* buffers[] = {constants_.Get()};
   context_->CSSetShader(shader_.Get(), nullptr, 0);
-  context_->CSSetShaderResources(0, 1, views);
+  context_->CSSetShaderResources(0, 2, views);
   context_->CSSetUnorderedAccessViews(0, 1, targets, nullptr);
   context_->CSSetConstantBuffers(0, 1, buffers);
 
@@ -243,9 +307,9 @@ bool GpuRegionConverter::Convert(ID3D11Texture2D* source, const Rect& region,
   /* Unbind before the copy. Leaving the output bound as a UAV while it is
    * also the source of a copy makes the debug layer complain and the runtime
    * silently drop one or the other. */
-  ID3D11ShaderResourceView* no_views[] = {nullptr};
+  ID3D11ShaderResourceView* no_views[] = {nullptr, nullptr};
   ID3D11UnorderedAccessView* no_targets[] = {nullptr};
-  context_->CSSetShaderResources(0, 1, no_views);
+  context_->CSSetShaderResources(0, 2, no_views);
   context_->CSSetUnorderedAccessViews(0, 1, no_targets, nullptr);
 
   D3D11_BOX finished;
@@ -310,7 +374,8 @@ bool CpuRegionConverter::EnsureStaging(int width, int height) {
 
 bool CpuRegionConverter::Convert(ID3D11Texture2D* source, const Rect& region,
                                  const PictureAdjust& adjust,
-                                 uint8_t* destination, size_t capacity) {
+                                 const GammaRamp& gamma, uint8_t* destination,
+                                 size_t capacity) {
   if (region.empty()) {
     error_ = "asked to convert nothing";
     return false;
@@ -348,7 +413,7 @@ bool CpuRegionConverter::Convert(ID3D11Texture2D* source, const Rect& region,
   const bool ok =
       ConvertRegion(destination, capacity,
                     static_cast<const uint8_t*>(mapped.pData), mapped.RowPitch,
-                    local, adjust);
+                    local, adjust, &gamma);
   context_->Unmap(staging_.Get(), 0);
 
   if (!ok) {
@@ -364,9 +429,9 @@ void ConverterSet::Add(std::unique_ptr<RegionConverter> converter) {
 }
 
 bool ConverterSet::Convert(ID3D11Texture2D* source, const Rect& region,
-                           const PictureAdjust& adjust, uint8_t* destination,
-                           size_t capacity, int64_t threshold,
-                           const char** used) {
+                           const PictureAdjust& adjust, const GammaRamp& gamma,
+                           uint8_t* destination, size_t capacity,
+                           int64_t threshold, const char** used) {
   /* Preferred implementation first, then anything else still standing. */
   for (int pass = 0; pass < 2; ++pass) {
     for (auto it = converters_.begin(); it != converters_.end();) {
@@ -376,7 +441,8 @@ bool ConverterSet::Convert(ID3D11Texture2D* source, const Rect& region,
         ++it;
         continue;
       }
-      if (converter->Convert(source, region, adjust, destination, capacity)) {
+      if (converter->Convert(source, region, adjust, gamma, destination,
+                             capacity)) {
         if (used) {
           *used = converter->Name();
         }
