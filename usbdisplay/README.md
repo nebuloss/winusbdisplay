@@ -106,6 +106,7 @@ Remove everything with `scripts\purge.ps1`.
 ```
 scripts\test.bat            # all of it
 scripts\test.bat planner    # just the group whose name matches
+make test                   # the same tests, any compiler, no Windows
 ```
 
 Everything runs with no adapter plugged in, including the protocol sequences,
@@ -116,6 +117,17 @@ The sequence is the only thing that can be checked, so it is.
 
 Every expectation carries a sentence explaining why it exists, so a failure
 says which behaviour was lost rather than only which number changed.
+
+The suite has no dependency on Windows. That is not an accident: the
+protocol, the damage planner, the cost model and the colour conversion all
+sit behind interfaces that name no operating system, so they build and run
+anywhere. The benefit is quick feedback without a Windows machine, and a
+second compiler's opinion on the same code, which catches the undefined
+behaviour that any one compiler happens to forgive.
+
+The driver is a different matter and cannot be built anywhere but Windows:
+it needs the driver kit, the indirect display stub library and a shader
+compiler, none of which exist elsewhere.
 
 ## Diagnosing
 

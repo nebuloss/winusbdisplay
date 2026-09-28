@@ -20,7 +20,11 @@
     <ProjectGuid>{095A9BFC-581E-4281-BB4F-C5621D5C2CFD}</ProjectGuid>
     <RootNamespace>usbdisplaydd</RootNamespace>
     <TargetName>usbdisplaydd</TargetName>
-    <WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion>
+    <!-- Overridable, because a build machine rarely has the same kit
+         version as a development one and pinning it turns a working build
+         into a confusing failure. Pass /p:WindowsTargetPlatformVersion=...
+         to use a different one. -->
+    <WindowsTargetPlatformVersion Condition="'$(WindowsTargetPlatformVersion)' == ''">10.0.26100.0</WindowsTargetPlatformVersion>
     <TargetVersion>Windows10</TargetVersion>
     <DriverTargetPlatform>Universal</DriverTargetPlatform>
     <MinimumVisualStudioVersion>17.0</MinimumVisualStudioVersion>
@@ -94,6 +98,7 @@
   <ItemGroup>
     <ClCompile Include="..\core\proto.cpp" />
     <ClCompile Include="..\core\usb.cpp" />
+    <ClCompile Include="..\core\open_device.cpp" />
     <ClCompile Include="..\core\macrosilicon.cpp" />
     <ClCompile Include="..\render\rect.cpp" />
     <ClCompile Include="..\render\damage.cpp" />
@@ -109,6 +114,7 @@
 
   <ItemGroup>
     <ClInclude Include="..\core\proto.h" />
+    <ClInclude Include="..\core\link.h" />
     <ClInclude Include="..\core\usb.h" />
     <ClInclude Include="..\core\display_device.h" />
     <ClInclude Include="..\core\macrosilicon.h" />
@@ -141,8 +147,18 @@
     <PropertyGroup>
       <FxcPath>$(WindowsSdkDir)bin\$(WindowsTargetPlatformVersion)\x64\fxc.exe</FxcPath>
     </PropertyGroup>
+    <!-- The shader compiler is usually beside the kit version being built
+         against, but not always: a machine can carry several kits and ship
+         the tool with only some of them. Fall back to whichever is present
+         rather than failing over a version number. -->
+    <ItemGroup Condition="!Exists('$(FxcPath)')">
+      <FxcCandidate Include="$(WindowsSdkDir)bin\**\x64\fxc.exe" />
+    </ItemGroup>
+    <PropertyGroup Condition="!Exists('$(FxcPath)') And '@(FxcCandidate)' != ''">
+      <FxcPath>%(FxcCandidate.FullPath)</FxcPath>
+    </PropertyGroup>
     <Error Condition="!Exists('$(FxcPath)')"
-           Text="fxc.exe not found at $(FxcPath). The Windows SDK component that ships it is required to build the conversion shader." />
+           Text="fxc.exe was not found under $(WindowsSdkDir)bin. It ships with the Windows SDK and is needed to compile the conversion shader." />
     <MakeDir Directories="$(IntDir)" />
     <Exec Command="&quot;$(FxcPath)&quot; /nologo /T cs_5_0 /E main /Vn kConvertComputeShader /Fh &quot;$(IntDir)convert_cs.h&quot; &quot;$(ProjectRoot)src\render\convert_cs.hlsl&quot;" />
   </Target>

@@ -3,6 +3,8 @@
 #include "macrosilicon.h"
 
 #include <cstring>
+#include <string>
+#include <vector>
 
 #include "../render/convert.h"
 
@@ -550,29 +552,6 @@ std::vector<Mode> MacroSiliconDevice::SupportedModes(VideoPort port) {
     modes.push_back(*FindMode(1024, 768, 60));
   }
   return modes;
-}
-
-/* ---- the factory ------------------------------------------------------- */
-
-std::unique_ptr<DisplayDevice> OpenDisplayDevice(std::string* error) {
-  /* One probe today. A second supported adapter would add another here, and
-   * nothing else in the driver would change. */
-  std::unique_ptr<UsbLink> link = UsbLink::Open(true, error);
-  if (!link) {
-    return nullptr;
-  }
-  return std::unique_ptr<DisplayDevice>(
-      new MacroSiliconDevice(std::move(link)));
-}
-
-std::unique_ptr<DisplayDevice> OpenLoopbackDevice(const std::string& directory,
-                                                  std::string* error) {
-  std::unique_ptr<FileLink> link = FileLink::Open(directory, error);
-  if (!link) {
-    return nullptr;
-  }
-  return std::unique_ptr<DisplayDevice>(
-      new MacroSiliconDevice(std::move(link)));
 }
 
 }  // namespace usbdisplay

@@ -113,7 +113,7 @@ void ForEachInterface(const GUID& class_guid, Fn&& callback) {
 
 }  // namespace
 
-void Link::SetWin32Error(const char* what, unsigned long code) {
+void Link::SetPlatformError(const char* what, unsigned long code) {
   char buffer[512];
   char* text = nullptr;
   DWORD length = FormatMessageA(
@@ -392,7 +392,7 @@ bool UsbLink::ControlWrite(const uint8_t* payload) {
   memcpy(feature_scratch_.data() + 1, payload, kControlSize);
   if (!HidD_SetFeature(hid_, feature_scratch_.data(),
                        static_cast<ULONG>(feature_scratch_.size()))) {
-    SetWin32Error("HidD_SetFeature", GetLastError());
+    SetPlatformError("HidD_SetFeature", GetLastError());
     return false;
   }
   return true;
@@ -403,7 +403,7 @@ bool UsbLink::ControlRead(uint8_t* payload) {
   feature_scratch_[0] = 0; /* report id */
   if (!HidD_GetFeature(hid_, feature_scratch_.data(),
                        static_cast<ULONG>(feature_scratch_.size()))) {
-    SetWin32Error("HidD_GetFeature", GetLastError());
+    SetPlatformError("HidD_GetFeature", GetLastError());
     return false;
   }
   memcpy(payload, feature_scratch_.data() + 1, kControlSize);
@@ -420,7 +420,7 @@ bool UsbLink::BulkWrite(const uint8_t* data, size_t len) {
   ULONG written = 0;
   if (!WinUsb_WritePipe(handle, bulk_pipe_, const_cast<uint8_t*>(data),
                         static_cast<ULONG>(len), &written, nullptr)) {
-    SetWin32Error("WinUsb_WritePipe", GetLastError());
+    SetPlatformError("WinUsb_WritePipe", GetLastError());
     /* A stalled or timed out pipe stays that way. Without resetting it here
      * every later write fails the same way and the panel never comes back;
      * before this the only recovery was to unplug the dongle. */

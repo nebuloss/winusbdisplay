@@ -9,6 +9,8 @@
  * cost a full repaint on every frame.
  */
 
+#include <vector>
+
 #include "../src/render/damage.h"
 #include "testing.h"
 

@@ -72,7 +72,14 @@ to a stand-in that records what was sent:
 ```
 usbdisplay\scripts\test.bat
 usbdisplay\scripts\test.bat planner      # one group
+cd usbdisplay && make test                # same tests, no Windows needed
 ```
+
+Everything the tests cover is free of any operating system, which is why
+they also build with an ordinary compiler on an ordinary Linux box. Keep it
+that way: if a change to `src/core` or `src/render` starts needing
+`windows.h`, it has been put in the wrong layer. Platform-specific code goes
+in `src/core/usb.*`, `src/core/open_device.cpp` or `src/driver`.
 
 The tool is the hardware harness. Nothing below needs a driver installed
 except the last line:
@@ -132,6 +139,23 @@ display stack's required upper filter is incompatible with the framework's
 WinUSB dispatcher. It reaches the hardware through user mode handles, which
 works because these drivers run in a user mode host process. Both packages
 must be installed.
+
+## Continuous integration
+
+Two workflows, split by what each machine can actually do.
+
+- `.github/workflows/logic.yml` runs on Linux and covers the whole test
+  suite, twice over with two compilers, and once more with the address and
+  undefined behaviour checkers on. Quick, and it runs on every push.
+- `.github/workflows/windows.yml` builds the tool, the brightness control
+  and the driver, and publishes a package when a tag starting with `v` is
+  pushed. The driver job installs the driver kit on the fly, which is the
+  most fragile step in either file; it is deliberately a separate job so a
+  problem there does not mask a real compile error in everything else.
+
+Neither can test against hardware, so a green build means it compiles and
+the logic holds, not that the panel lights up. That still needs a person
+with an adapter.
 
 ## Adding support for another adapter
 

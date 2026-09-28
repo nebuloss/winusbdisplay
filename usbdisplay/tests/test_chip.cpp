@@ -18,6 +18,8 @@
  */
 
 #include <map>
+#include <cstring>
+#include <vector>
 
 #include "../src/core/macrosilicon.h"
 #include "testing.h"

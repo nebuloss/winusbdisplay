@@ -1,0 +1,201 @@
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# The Windows half of the build: the tool, the brightness control, the test
+# suite and the driver itself.
+#
+# Split into two jobs on purpose. Everything except the driver needs only a
+# compiler and the ordinary Windows SDK, both of which the hosted runners
+# already have, so that job is dependable. The driver additionally needs the
+# Windows Driver Kit, which has to be installed on the fly and is by far the
+# most fragile step here. Keeping them apart means a problem installing the
+# kit does not hide a genuine compile error in everything else.
+
+name: windows
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  tools:
+    name: tool, brightness control and tests
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: microsoft/setup-msbuild@v2
+
+      - name: Build the console tool
+        shell: cmd
+        run: usbdisplay\scripts\build-tool.bat
+
+      - name: Build the brightness control
+        shell: cmd
+        run: usbdisplay\scripts\build-tray.bat
+
+      - name: Build the brightness probe
+        shell: cmd
+        run: usbdisplay\scripts\build-probe.bat
+
+      - name: Run the tests
+        shell: cmd
+        run: usbdisplay\scripts\test.bat
+
+      - name: Check the tool runs
+        shell: cmd
+        # No adapter is attached to a build machine, so this only proves the
+        # binary starts and its offline checks pass. The commands that need
+        # hardware cannot be covered here at all.
+        run: |
+          usbdisplay\build\usbdisplayctl.exe selftest
+          usbdisplay\build\usbdisplayctl.exe plan
+          usbdisplay\build\usbdisplayctl.exe modes
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tools
+          path: |
+            usbdisplay/build/usbdisplayctl.exe
+            usbdisplay/build/usbdisplaytray.exe
+            usbdisplay/build/brightnessprobe.exe
+          if-no-files-found: error
+
+  driver:
+    name: driver
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: microsoft/setup-msbuild@v2
+
+      - name: Install the Windows Driver Kit
+        shell: pwsh
+        # The kit is two separate things and both are needed: the kit itself,
+        # which brings the headers and the indirect display stub library, and
+        # a Visual Studio extension that registers the driver build rules.
+        # Without the extension the project fails with an unknown platform
+        # toolset, which reads like a corrupt project file rather than a
+        # missing component.
+        run: |
+          choco install windowsdriverkit11 --no-progress --yes
+          $vsix = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Vsix' `
+            -Recurse -Filter '*.vsix' -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $vsix) { throw 'The driver kit installed but its Visual Studio extension is missing.' }
+          Write-Host "Installing $($vsix.FullName)"
+          $installer = Get-ChildItem 'C:\Program Files*\Microsoft Visual Studio\2022' `
+            -Recurse -Filter 'VSIXInstaller.exe' -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+          if (-not $installer) { throw 'VSIXInstaller.exe not found.' }
+          & $installer.FullName /quiet /admin $vsix.FullName
+          # The installer returns before it has finished.
+          Start-Sleep -Seconds 45
+
+      - name: Find the installed kit
+        id: kit
+        shell: pwsh
+        # The runner decides which kit version it has, so the version is read
+        # rather than assumed. Pinning it here is what makes a driver build
+        # break for no visible reason when the image is updated.
+        run: |
+          $version = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Include' `
+            -Directory | Where-Object { $_.Name -match '^10\.' } |
+            Sort-Object Name -Descending | Select-Object -First 1
+          if (-not $version) { throw 'No Windows kit found.' }
+          Write-Host "Building against $($version.Name)"
+          "version=$($version.Name)" >> $env:GITHUB_OUTPUT
+
+      - name: Build the driver
+        shell: cmd
+        run: |
+          msbuild usbdisplay\src\driver\usbdisplaydd.vcxproj ^
+            /p:Configuration=Release /p:Platform=x64 /p:SignMode=Off ^
+            /p:WindowsTargetPlatformVersion=${{ steps.kit.outputs.version }} ^
+            /v:minimal /nologo
+
+      - name: Check what was produced
+        shell: pwsh
+        run: |
+          $dll = 'usbdisplay\build\driver\x64\Release\usbdisplaydd.dll'
+          if (-not (Test-Path $dll)) { throw "No driver binary at $dll" }
+          $info = Get-Item $dll
+          Write-Host ("built {0}, {1:N0} bytes" -f $info.Name, $info.Length)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: driver
+          path: |
+            usbdisplay/build/driver/x64/Release/usbdisplaydd.dll
+            usbdisplay/build/driver/x64/Release/usbdisplaydd.inf
+          if-no-files-found: error
+
+  release:
+    name: release
+    needs: [tools, driver]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Assemble the package
+        shell: pwsh
+        # Laid out the way somebody installing it needs, rather than the way
+        # it happened to be built: the scripts expect the binary beside the
+        # INF it belongs to.
+        run: |
+          $stage = 'package'
+          New-Item -ItemType Directory -Path "$stage\driver\x64\Release" -Force | Out-Null
+          New-Item -ItemType Directory -Path "$stage\inf" -Force | Out-Null
+          New-Item -ItemType Directory -Path "$stage\scripts" -Force | Out-Null
+
+          Copy-Item artifacts\driver\* "$stage\driver\x64\Release\" -Force
+          Copy-Item artifacts\tools\* "$stage\" -Force
+          Copy-Item usbdisplay\inf\* "$stage\inf\" -Force
+          Copy-Item usbdisplay\scripts\install.ps1 "$stage\scripts\"
+          Copy-Item usbdisplay\scripts\purge.ps1 "$stage\scripts\"
+          Copy-Item usbdisplay\scripts\reattach.ps1 "$stage\scripts\"
+          Copy-Item usbdisplay\README.md "$stage\"
+          Copy-Item LICENSE "$stage\"
+
+          # The install script looks for the binary under build\, which is
+          # where it sits after a local build.
+          New-Item -ItemType Directory -Path "$stage\build" -Force | Out-Null
+          Move-Item "$stage\driver" "$stage\build\driver"
+
+          Compress-Archive -Path "$stage\*" `
+            -DestinationPath "usbdisplay-${{ github.ref_name }}.zip"
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          files: usbdisplay-${{ github.ref_name }}.zip
+          body: |
+            Install with an elevated PowerShell:
+
+                scripts\install.ps1
+
+            No reboot and no signing policy change are needed. Nothing here
+            loads into the kernel, so all Windows asks for is a package
+            signed by a certificate it trusts, and the install script
+            creates one locally for the purpose. It works with Secure Boot
+            on, and it does need administrator rights.
+
+            Binaries are deliberately unsigned. A publicly released driver
+            would carry a signature from a certificate that cannot be put
+            in a public repository, so the local one the installer makes is
+            the honest alternative.
+
+            Run `usbdisplaytray.exe` for brightness, and right-click its
+            icon for "Start with Windows".

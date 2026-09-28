@@ -10,6 +10,10 @@
  * hypothetical: it happened, and unifying the arithmetic is what fixed it.
  */
 
+#include <cmath>
+#include <cstring>
+#include <vector>
+
 #include "../src/render/convert.h"
 #include "testing.h"
 

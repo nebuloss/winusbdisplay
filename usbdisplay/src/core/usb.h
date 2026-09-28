@@ -31,49 +31,12 @@
 #include <string>
 #include <vector>
 
+#include "link.h"
+
 namespace usbdisplay {
 
 /* Somewhere to send control exchanges and pixels. Two implementations: the
  * real dongle, and a directory on disk. */
-class Link {
- public:
-  virtual ~Link() = default;
-
-  virtual std::string Describe() const = 0;
-
-  /* False when pixels go nowhere real, so callers can say so rather than
-   * reporting success into a void. */
-  virtual bool HasPanel() const = 0;
-
-  /* Exactly kControlSize bytes each way. Callers must hold the control lock;
-   * Chip owns it, and nothing else should be calling these. */
-  virtual bool ControlWrite(const uint8_t* payload) = 0;
-  virtual bool ControlRead(uint8_t* payload) = 0;
-
-  virtual bool BulkWrite(const uint8_t* data, size_t len) = 0;
-
-  /* Terminates the transfer in flight without waiting for it.
-   *
-   * A full frame owns the bus for over a hundred milliseconds. PnP stop and
-   * surprise removal will not wait that long: a driver that blocks gets
-   * reported as hung and its device taken offline. Safe from another thread,
-   * which is the whole point. */
-  virtual void Cancel() {}
-
-  /* Whether the underlying hardware is still attached. Answer from what the
-   * system already knows: a request to a device that has just been unplugged
-   * can block until it times out. */
-  virtual bool StillPresent() const = 0;
-
-  const std::string& error() const { return error_; }
-
- protected:
-  void SetError(const std::string& message) { error_ = message; }
-  void SetWin32Error(const char* what, unsigned long code);
-
-  std::string error_;
-};
-
 /* One physical dongle: its HID control interface and its WinUSB data
  * interface. */
 class UsbLink : public Link {

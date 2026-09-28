@@ -27,6 +27,7 @@ cl /nologo /std:c++17 /EHsc /W4 /WX /O2 /MT /DUNICODE /D_UNICODE ^
   /Fo"%OUT%\tests\\" /Fe"%OUT%\usbdisplay-tests.exe" ^
   "%ROOT%\src\core\proto.cpp" ^
   "%ROOT%\src\core\usb.cpp" ^
+  "%ROOT%\src\core\open_device.cpp" ^
   "%ROOT%\src\core\macrosilicon.cpp" ^
   "%ROOT%\src\render\rect.cpp" ^
   "%ROOT%\src\render\damage.cpp" ^

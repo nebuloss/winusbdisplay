@@ -27,7 +27,7 @@
 
 #include "display_device.h"
 #include "proto.h"
-#include "usb.h"
+#include "link.h"
 
 namespace usbdisplay {
 
