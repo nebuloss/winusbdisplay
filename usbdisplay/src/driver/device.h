@@ -83,6 +83,9 @@ class IndirectDevice {
 
   void WatcherLoop();
 
+  /* Kept although nothing reads it: it is the handle this object belongs
+   * to, and the first thing anyone adding a framework call here will need.
+   * Named in the constructor so the ownership is plain. */
   WDFDEVICE wdf_device_;
   IDDCX_ADAPTER adapter_ = nullptr;
   IDDCX_MONITOR monitor_ = nullptr;

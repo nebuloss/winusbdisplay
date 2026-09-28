@@ -125,8 +125,8 @@ bool Pipeline::Start() {
   } else {
     converters_.Add(std::move(gpu));
   }
-  converters_.Add(std::unique_ptr<RegionConverter>(new CpuRegionConverter(
-      d3d_device_.Get(), d3d_context_.Get(), device_)));
+  converters_.Add(std::unique_ptr<RegionConverter>(
+      new CpuRegionConverter(d3d_device_.Get(), d3d_context_.Get())));
 
   transmissions_ = device_->TransmissionsPerRegion();
   Log("pipeline: converters: %s, %u thread(s), %d transmission(s) per region",

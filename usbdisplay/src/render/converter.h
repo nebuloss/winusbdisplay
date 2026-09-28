@@ -77,8 +77,7 @@ class RegionConverter {
  * pool. Always usable, and therefore always the fallback. */
 class CpuRegionConverter : public RegionConverter {
  public:
-  CpuRegionConverter(ID3D11Device* device, ID3D11DeviceContext* context,
-                     const DisplayDevice* format);
+  CpuRegionConverter(ID3D11Device* device, ID3D11DeviceContext* context);
 
   const char* Name() const override { return "processor"; }
   bool Usable() const override { return true; }
@@ -93,7 +92,6 @@ class CpuRegionConverter : public RegionConverter {
 
   Microsoft::WRL::ComPtr<ID3D11Device> device_;
   Microsoft::WRL::ComPtr<ID3D11DeviceContext> context_;
-  const DisplayDevice* format_;
   Microsoft::WRL::ComPtr<ID3D11Texture2D> staging_;
   int staging_width_ = 0;
   int staging_height_ = 0;

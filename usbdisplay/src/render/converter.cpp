@@ -337,9 +337,8 @@ bool GpuRegionConverter::Convert(ID3D11Texture2D* source, const Rect& region,
 /* ---- processor ---------------------------------------------------------- */
 
 CpuRegionConverter::CpuRegionConverter(ID3D11Device* device,
-                                       ID3D11DeviceContext* context,
-                                       const DisplayDevice* format)
-    : device_(device), context_(context), format_(format) {}
+                                       ID3D11DeviceContext* context)
+    : device_(device), context_(context) {}
 
 bool CpuRegionConverter::Suits(const Rect& region, int64_t threshold) const {
   /* Everything the graphics path does not want, and everything at all when

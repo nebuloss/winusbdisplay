@@ -169,6 +169,38 @@ if [ ! -d "$WDK" ]; then
   rm -f "$WORK/wdk.zip"
 fi
 
+# The kit's headers include each other with inconsistent capitalisation,
+# which is invisible on Windows and fatal on a case sensitive filesystem:
+# wdf.h asks for WudfWdm.h and the file is called wudfwdm.h. xwin solves
+# this for the SDK but never sees the kit, so the same is done here, in both
+# directions so that either spelling resolves.
+if [ ! -f "$WDK/.case-insensitive" ]; then
+  find "$WDK" -type f -name '*.h' -print0 |
+  while IFS= read -r -d '' header; do
+    directory="$(dirname "$header")"
+    name="$(basename "$header")"
+    lower="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')"
+    [ "$name" = "$lower" ] || [ -e "$directory/$lower" ] || \
+      ln -s "$name" "$directory/$lower"
+  done
+
+  # And the mixed-case spellings the headers actually ask for. Derived by
+  # reading the includes rather than listed, so a new one cannot be missed.
+  find "$WDK" -type f -name '*.h' -print0 |
+  while IFS= read -r -d '' header; do
+    directory="$(dirname "$header")"
+    sed -n 's/^[[:space:]]*#[[:space:]]*include[[:space:]]*["<]\([A-Za-z0-9_.]*\.h\)[">].*/\1/p' \
+      "$header" |
+    while IFS= read -r wanted; do
+      [ -e "$directory/$wanted" ] && continue
+      actual="$(printf '%s' "$wanted" | tr '[:upper:]' '[:lower:]')"
+      [ -f "$directory/$actual" ] || continue
+      ln -s "$actual" "$directory/$wanted" 2>/dev/null || true
+    done
+  done
+  touch "$WDK/.case-insensitive"
+fi
+
 IDDCX_INC="$(find "$WDK" -type d -path "*um/iddcx/$IDDCX_VERSION" -print -quit)"
 WDF_INC="$(find "$WDK" -type d -path "*wdf/umdf/$WDF_VERSION" -print -quit)"
 IDDCX_STUB="$(find "$WDK" -type f -ipath "*iddcx/$IDDCX_VERSION/iddcxstub.lib" -print -quit)"
@@ -238,6 +270,9 @@ FLAGS=(
   -Wno-microsoft-enum-value
   -Wno-ignored-attributes
   -Wno-nonportable-include-path
+  # The framework hands a driver a handle it may never need to use again;
+  # keeping it is deliberate rather than an oversight.
+  -Wno-unused-private-field
 )
 
 for source in "${SOURCES[@]}"; do
