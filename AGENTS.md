@@ -331,6 +331,11 @@ Each cost real investigation; the evidence is in `docs/protocol-notes.md`.
 - **Replacing the WinUSB package detaches the pixel interface** and it does
   not come back on its own. The installer skips the package when it is
   already current; if it did replace it, run `reattach.ps1`.
+- **Never remove a live display device node.** Disable it, wait for the stop
+  to finish, then remove. Removing one outright while its monitor is still
+  in the desktop bug checked a machine during development, in kernel code
+  this project does not contain. A user mode driver cannot cause that; the
+  installer provoking it can. See `docs/troubleshooting.md`.
 
 ## Environment realities
 

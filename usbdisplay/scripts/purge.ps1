@@ -31,8 +31,27 @@ foreach ($r in $devconRoots) {
 }
 
 if ($devcon) {
-    & $devcon.FullName remove 'root\usbdisplaydd'
-    & $devcon.FullName remove 'root\ms912xidd'
+    # Disabled before removal, and not hurried.
+    #
+    # While one of these exists and is started, its monitor is part of the
+    # desktop and the kernel side of the display stack holds state for it.
+    # Removing one outright, with a monitor still attached, bug checked a
+    # machine during development. Disabling first takes the monitor out of
+    # the desktop through the path designed for that, and lets the driver
+    # stop cleanly.
+    Get-PnpDevice -InstanceId 'ROOT\DISPLAY\*' -EA SilentlyContinue |
+        Where-Object {
+            $hardware = ($_ | Get-PnpDeviceProperty -KeyName 'DEVPKEY_Device_HardwareIds' `
+                -EA SilentlyContinue).Data
+            $hardware -and ($hardware | Where-Object {
+                $_ -in 'root\usbdisplaydd', 'root\usbhdmidd', 'root\ms912xidd' })
+        } | ForEach-Object {
+            Write-Output ("  disabling " + $_.InstanceId)
+            Disable-PnpDevice -InstanceId $_.InstanceId -Confirm:$false -EA SilentlyContinue
+            Start-Sleep -Seconds 2
+            & $devcon.FullName remove ("@" + $_.InstanceId) | Out-Null
+            Start-Sleep -Seconds 1
+        }
 } else {
     Write-Output "  devcon not found in the Windows Kits."
     Write-Output "  The driver packages below will still be removed, but the"

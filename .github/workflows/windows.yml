@@ -210,6 +210,13 @@ jobs:
 
   release:
     name: release
+    # On a Windows machine only because the two tools that build and sign a
+    # driver catalog are Microsoft's own and have no equivalent elsewhere.
+    # Everything else here, assembling and publishing, would run anywhere.
+    # Running them under emulation on Linux was considered and rejected: the
+    # catalog tool is a 32 bit program, so it would need an emulator and a
+    # second architecture, and signing is the last place to want a
+    # translation layer between the tool and what it produces.
     needs: [tools, driver]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: windows-latest
@@ -222,10 +229,6 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-
-      - uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
 
       - name: Assemble a package that can actually be installed
         shell: pwsh
@@ -255,47 +258,37 @@ jobs:
           Copy-Item usbdisplay\inf\usbdisplay_winusb.inf "$stage\winusb\"
           Copy-Item artifacts\tools\* "$stage\tools\"
 
-          # Both tools are searched for across every plausible root rather
-          # than one assumed path: the build machine decides where its kits
-          # live, and a single hardcoded directory is exactly the sort of
-          # assumption that works until the image is updated.
-          $roots = @(
-            "${env:ProgramFiles(x86)}\Windows Kits\10\bin",
-            "${env:ProgramFiles}\Windows Kits\10\bin",
-            "${env:ProgramFiles(x86)}\Windows Kits\10\Tools",
-            "${env:ProgramFiles(x86)}\Microsoft SDKs\ClickOnce",
-            "${env:ProgramFiles}\Microsoft Visual Studio",
-            "${env:ProgramFiles(x86)}\Microsoft Visual Studio"
-          ) | Where-Object { Test-Path $_ }
+          # The two tools are downloaded rather than looked for.
+          #
+          # Neither is reliably present on a build machine: the catalog tool
+          # ships with the driver kit, which is not installed here, and
+          # hunting for the other one across whatever happens to be on disk
+          # is the kind of assumption that works until the image changes.
+          # Both are published on NuGet, which is a plain file server, so
+          # fetching them takes seconds and gives the same versions every
+          # time.
+          $version = '10.0.26100.6584'
+          $tools = "$env:RUNNER_TEMP\signing-tools"
+          New-Item -ItemType Directory -Path $tools -Force | Out-Null
 
-          function Find-KitTool([string]$name, [switch]$Prefer64) {
-            foreach ($root in $roots) {
-              $found = Get-ChildItem $root -Recurse -Filter $name -ErrorAction SilentlyContinue
-              if (-not $found) { continue }
-              if ($Prefer64) {
-                $sixtyFour = $found | Where-Object { $_.FullName -match '\\x64\\' }
-                if ($sixtyFour) { $found = $sixtyFour }
-              }
-              return ($found | Sort-Object FullName -Descending | Select-Object -First 1)
-            }
-            return $null
+          foreach ($package in @(
+              @{ Id = 'microsoft.windows.wdk.x64';        Dir = 'wdk' },
+              @{ Id = 'microsoft.windows.sdk.buildtools'; Dir = 'sdk' })) {
+            $archive = "$tools\$($package.Dir).zip"
+            Invoke-WebRequest -UseBasicParsing `
+              -Uri "https://api.nuget.org/v3-flatcontainer/$($package.Id)/$version/$($package.Id).$version.nupkg" `
+              -OutFile $archive
+            Expand-Archive -Path $archive -DestinationPath "$tools\$($package.Dir)" -Force
+            Remove-Item $archive
           }
 
-          $inf2cat = Find-KitTool 'Inf2Cat.exe'
-          $signtool = Find-KitTool 'signtool.exe' -Prefer64
-
-          # Named separately, because "the tools were not found" leaves
-          # whoever reads it no better off than before.
-          if (-not $inf2cat) {
-            Write-Host 'Searched:'
-            $roots | ForEach-Object { Write-Host "   $_" }
-            throw 'Inf2Cat.exe was not found. It ships with the Windows Driver Kit.'
-          }
-          if (-not $signtool) {
-            Write-Host 'Searched:'
-            $roots | ForEach-Object { Write-Host "   $_" }
-            throw 'signtool.exe was not found. It ships with the Windows SDK.'
-          }
+          # The catalog tool is a 32 bit program, which matters only in that
+          # it rules out running any of this under emulation elsewhere.
+          $inf2cat = Get-ChildItem "$tools\wdk" -Recurse -Filter 'Inf2Cat.exe' | Select-Object -First 1
+          $signtool = Get-ChildItem "$tools\sdk" -Recurse -Filter 'signtool.exe' |
+            Where-Object { $_.FullName -match '\\x64\\' } | Select-Object -First 1
+          if (-not $inf2cat) { throw 'Inf2Cat.exe was not in the driver kit package.' }
+          if (-not $signtool) { throw 'signtool.exe was not in the build tools package.' }
           Write-Host "inf2cat:  $($inf2cat.FullName)"
           Write-Host "signtool: $($signtool.FullName)"
 

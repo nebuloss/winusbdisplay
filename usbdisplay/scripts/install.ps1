@@ -18,7 +18,19 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$root = Split-Path -Parent $PSScriptRoot
+
+# Where everything else lives, relative to this script.
+#
+# In a source tree this script sits in scripts\ and everything is a level
+# up. In a released package it sits at the top with the files beside it.
+# Deciding by looking is the only thing that works for both, and getting it
+# wrong means a released package looks for its own contents one directory
+# too high.
+$root = if (Test-Path (Join-Path $PSScriptRoot 'driver\usbdisplaydd.inf')) {
+    $PSScriptRoot
+} else {
+    Split-Path -Parent $PSScriptRoot
+}
 
 function Get-KitTool([string]$name) {
     $roots = @(
@@ -159,7 +171,11 @@ if ($released) {
         @{ Name = 'display driver';  Path = 'driver\usbdisplaydd.inf' })) {
         Write-Host "    installing the $($package.Name)"
         pnputil /add-driver (Join-Path $root $package.Path) /install
-        if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 3010) {
+        # 0 is plain success. 3010 means installed, restart to tidy up.
+        # 259 means the package was added but no device currently needs it,
+        # which is what happens when it is already current: a success that
+        # reads like a failure if taken at face value.
+        if ($LASTEXITCODE -notin 0, 259, 3010) {
             throw "installing the $($package.Name) failed with code $LASTEXITCODE"
         }
     }
@@ -173,8 +189,74 @@ if ($released) {
         if ($devcon) { break }
     }
 
-    $existing = Get-PnpDevice -InstanceId 'ROOT\DISPLAY\*' -ErrorAction SilentlyContinue |
-        Where-Object { $_.FriendlyName -match 'USB Display' }
+    # Found by hardware id, which is the only thing that actually
+    # identifies these.
+    #
+    # Not by name: names have changed between versions, so matching one
+    # leaves the older device unrecognised, a second gets added, and the
+    # user ends up with monitors that can never work. Not by service
+    # either: every user mode driver runs under the same one, so that
+    # matches every indirect display on the machine including other
+    # people's. The hardware id is ours and nobody else's.
+    function Get-OurDevices([string[]]$ids) {
+        Get-PnpDevice -InstanceId 'ROOT\DISPLAY\*' -ErrorAction SilentlyContinue |
+            Where-Object {
+                $hardware = ($_ | Get-PnpDeviceProperty -KeyName 'DEVPKEY_Device_HardwareIds' `
+                    -ErrorAction SilentlyContinue).Data
+                $hardware -and ($hardware | Where-Object { $ids -contains $_ })
+            }
+    }
+
+    # Removing a display device is done carefully, and the reason is a
+    # crashed machine.
+    #
+    # These nodes are not inert: while one exists and is started, its
+    # monitor is part of the desktop and the kernel side of the display
+    # stack holds state for it. Ripping one out with a removal call, several
+    # in a row, with a monitor still attached, bug checked the machine
+    # outright: IRQL_NOT_LESS_OR_EQUAL, inside kernel code this project does
+    # not contain and cannot fix.
+    #
+    # So the order matters. Disable first, which makes Windows take the
+    # monitor out of the desktop topology through the path designed for it
+    # and lets this driver stop cleanly. Wait for that to finish. Only then
+    # remove. And never in a tight loop.
+    function Remove-DisplayDevice($device) {
+        Disable-PnpDevice -InstanceId $device.InstanceId -Confirm:$false `
+            -ErrorAction SilentlyContinue
+        # Long enough for the stop to complete. The framework reports a
+        # driver that has not finished as hung, and hurrying this is what
+        # caused the crash.
+        Start-Sleep -Seconds 2
+        if ($devcon) {
+            & $devcon.FullName remove "@$($device.InstanceId)" | Out-Null
+        } else {
+            # Without devcon the device is left disabled rather than
+            # removed. A disabled device is harmless and visible; forcing a
+            # removal without the tool meant for it is not worth the risk.
+            Write-Host '      left disabled, devcon is not available to remove it'
+        }
+        Start-Sleep -Seconds 1
+    }
+
+    foreach ($stale in Get-OurDevices @('root\usbhdmidd', 'root\ms912xidd')) {
+        Write-Host '    retiring a device left by an earlier version'
+        Remove-DisplayDevice $stale
+    }
+
+    $existing = @(Get-OurDevices @('root\usbdisplaydd'))
+
+    # More than one is a duplicate an earlier version could create. Keep the
+    # first and retire the rest, or the desktop grows a monitor for each and
+    # only one of them is ever driven.
+    if ($existing.Count -gt 1) {
+        Write-Host "    retiring $($existing.Count - 1) duplicate device(s)"
+        foreach ($duplicate in $existing[1..($existing.Count - 1)]) {
+            Remove-DisplayDevice $duplicate
+        }
+        $existing = @($existing[0])
+    }
+
     if (-not $existing) {
         if ($devcon) {
             & $devcon.FullName install (Join-Path $root 'driver\usbdisplaydd.inf') 'root\usbdisplaydd'

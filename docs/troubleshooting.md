@@ -248,3 +248,44 @@ write fails with the same error, leaving the panel dark permanently. The
 driver now aborts and resets the pipe on any failed write, and reprograms the
 chip after three consecutive failures. Before that fix the only recovery was
 to replug the dongle.
+
+
+## The machine blue screens while installing or removing
+
+`IRQL_NOT_LESS_OR_EQUAL`, bug check 0xA, with no dump written.
+
+**Cause: a display device node was removed while its monitor was live.**
+
+This happened during development and is worth stating plainly because the
+instinct on seeing it is to suspect this driver, and that instinct is wrong
+in a way that wastes time. A user mode driver cannot raise the interrupt
+level, cannot touch kernel memory, and cannot produce this bug check. The
+faulting code is the kernel side of the display stack, which this project
+does not contain.
+
+What provoked it was an install script calling a removal on
+`ROOT\DISPLAY\...` nodes, several in quick succession, while a monitor was
+still attached to the desktop. Those nodes are not inert: while one exists
+and is started, its monitor is part of the desktop topology and kernel
+components hold state for it.
+
+**The rule: disable, wait, then remove. Never in a tight loop.**
+
+Disabling makes Windows take the monitor out of the desktop through the path
+designed for exactly that, and lets this driver's stop path run to
+completion. `install.ps1` and `purge.ps1` both do this now, with a pause
+between each step. Without the removal tool available they leave the device
+disabled instead, which is harmless and visible, rather than forcing it.
+
+If it has already happened: nothing is damaged, and the leftover nodes can be
+cleaned up by running `purge.ps1`, which now takes the safe path. Check what
+is present with:
+
+```
+Get-PnpDevice -InstanceId 'ROOT\DISPLAY\*' | ForEach-Object {
+  $_ | Get-PnpDeviceProperty -KeyName 'DEVPKEY_Device_HardwareIds' }
+```
+
+Several entries with a hardware id of `root\usbdisplaydd` means duplicates,
+which earlier versions of the installer could create; one identifying itself
+as `root\usbhdmidd` is from before this project was renamed.
