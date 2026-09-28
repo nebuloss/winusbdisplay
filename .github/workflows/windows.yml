@@ -255,12 +255,49 @@ jobs:
           Copy-Item usbdisplay\inf\usbdisplay_winusb.inf "$stage\winusb\"
           Copy-Item artifacts\tools\* "$stage\tools\"
 
-          $inf2cat = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Recurse -Filter 'Inf2Cat.exe' |
-            Sort-Object FullName -Descending | Select-Object -First 1
-          $signtool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Recurse -Filter 'signtool.exe' |
-            Where-Object { $_.FullName -match 'x64' } |
-            Sort-Object FullName -Descending | Select-Object -First 1
-          if (-not $inf2cat -or -not $signtool) { throw 'The SDK signing tools were not found.' }
+          # Both tools are searched for across every plausible root rather
+          # than one assumed path: the build machine decides where its kits
+          # live, and a single hardcoded directory is exactly the sort of
+          # assumption that works until the image is updated.
+          $roots = @(
+            "${env:ProgramFiles(x86)}\Windows Kits\10\bin",
+            "${env:ProgramFiles}\Windows Kits\10\bin",
+            "${env:ProgramFiles(x86)}\Windows Kits\10\Tools",
+            "${env:ProgramFiles(x86)}\Microsoft SDKs\ClickOnce",
+            "${env:ProgramFiles}\Microsoft Visual Studio",
+            "${env:ProgramFiles(x86)}\Microsoft Visual Studio"
+          ) | Where-Object { Test-Path $_ }
+
+          function Find-KitTool([string]$name, [switch]$Prefer64) {
+            foreach ($root in $roots) {
+              $found = Get-ChildItem $root -Recurse -Filter $name -ErrorAction SilentlyContinue
+              if (-not $found) { continue }
+              if ($Prefer64) {
+                $sixtyFour = $found | Where-Object { $_.FullName -match '\\x64\\' }
+                if ($sixtyFour) { $found = $sixtyFour }
+              }
+              return ($found | Sort-Object FullName -Descending | Select-Object -First 1)
+            }
+            return $null
+          }
+
+          $inf2cat = Find-KitTool 'Inf2Cat.exe'
+          $signtool = Find-KitTool 'signtool.exe' -Prefer64
+
+          # Named separately, because "the tools were not found" leaves
+          # whoever reads it no better off than before.
+          if (-not $inf2cat) {
+            Write-Host 'Searched:'
+            $roots | ForEach-Object { Write-Host "   $_" }
+            throw 'Inf2Cat.exe was not found. It ships with the Windows Driver Kit.'
+          }
+          if (-not $signtool) {
+            Write-Host 'Searched:'
+            $roots | ForEach-Object { Write-Host "   $_" }
+            throw 'signtool.exe was not found. It ships with the Windows SDK.'
+          }
+          Write-Host "inf2cat:  $($inf2cat.FullName)"
+          Write-Host "signtool: $($signtool.FullName)"
 
           # The certificate is built through the .NET types rather than the
           # certificate cmdlets. Those need a provider that is not present
