@@ -144,10 +144,21 @@ The compiler runtime, the Windows SDK and the driver kit are all downloaded
 by the script. The result is a Windows library within a few hundred bytes of
 what the Windows build produces from the same sources.
 
-What cross-compiling cannot do is sign the result or build an installable
-catalog, both of which need Windows tools. The install script does both on
-the machine where the driver is actually used, so this matters only if you
-wanted to ship from Linux.
+The release is built the same way:
+
+```
+scripts/cross-build.sh          # driver, installer, console tool, tray
+scripts/package.sh v1.2.3       # catalogs, signatures, archive
+```
+
+That second step is the one usually said to need Windows. It does not. A
+driver catalog is a PKCS#7 structure listing every file in the package with
+its hash, and `LINBIT/generate-cat-file` builds one while `osslsigncode`
+signs it. Both are free software and neither needs anything from Microsoft.
+`scripts/make-catalog.sh` explains the details worth knowing, chiefly that
+signing has to happen after cataloguing rather than before.
+
+Signing needs `osslsigncode` and `openssl`; packaging also needs `zip`.
 
 ## Diagnosing
 

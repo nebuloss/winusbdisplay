@@ -9,13 +9,17 @@
 # Windows Driver Kit, which has to be installed on the fly and is by far the
 # most fragile step here. Keeping them apart means a problem installing the
 # kit does not hide a genuine compile error in everything else.
+#
+# This workflow publishes nothing. Releases are built on Linux, catalogs and
+# signatures included; see .github/workflows/linux.yml. What this one is for
+# is catching a difference between the two toolchains, which is a real risk
+# and not one a Linux-only build can see.
 
 name: windows
 
 on:
   push:
     branches: [master]
-    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -221,173 +225,3 @@ jobs:
             usbdisplay/build/driver/x64/Release/usbdisplay-setup.exe
           if-no-files-found: error
 
-  release:
-    name: release
-    # Everything published here, the driver, the installer and the tools, is
-    # also built on Linux, and that path is exercised on every push. Only two
-    # steps genuinely need Windows: generating a driver catalog and signing
-    # it. Those tools are Microsoft's own, have no equivalent elsewhere, and
-    # the catalog one is a 32 bit program, so running it on Linux would mean
-    # an emulator and a second architecture. Signing is the last place to
-    # want a translation layer between a tool and what it produces.
-    #
-    # So a release is assembled where it can be signed. Nothing else about
-    # the project depends on that.
-    needs: [tools, driver]
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: windows-latest
-    permissions:
-      contents: write
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: Assemble a package that can actually be installed
-        shell: pwsh
-        # Catalogs are generated and signed here rather than on the user's
-        # machine.
-        #
-        # Installing a driver package needs a catalog, and generating one
-        # needs two tools that ship with the Windows SDK. Requiring those of
-        # somebody who only wants their second monitor to work is not
-        # reasonable, and it is the difference between a release that can be
-        # installed and a pile of files that cannot.
-        #
-        # The signature is a certificate generated here and thrown away, so
-        # it proves nothing about origin. That is stated plainly in the
-        # release notes rather than glossed over: the installer still has to
-        # add it to the machine's trusted stores, and anyone installing this
-        # should understand that is what they are agreeing to.
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $stage = 'package'
-          New-Item -ItemType Directory -Path "$stage\driver", "$stage\winusb", "$stage\tools" -Force | Out-Null
-
-          # Each package needs its INF and every file it names together in
-          # one directory, which is what the catalog tool expects.
-          Copy-Item artifacts\driver\usbdisplaydd.dll "$stage\driver\"
-          Copy-Item artifacts\driver\usbdisplaydd.inf "$stage\driver\"
-          Copy-Item usbdisplay\inf\usbdisplay_winusb.inf "$stage\winusb\"
-          Copy-Item artifacts\tools\* "$stage\tools\"
-          # The installer sits at the top, where somebody unpacking the
-          # archive will find it without being told.
-          Copy-Item artifacts\driver\usbdisplay-setup.exe "$stage\" 
-
-          # The two tools are downloaded rather than looked for.
-          #
-          # Neither is reliably present on a build machine: the catalog tool
-          # ships with the driver kit, which is not installed here, and
-          # hunting for the other one across whatever happens to be on disk
-          # is the kind of assumption that works until the image changes.
-          # Both are published on NuGet, which is a plain file server, so
-          # fetching them takes seconds and gives the same versions every
-          # time.
-          $version = '10.0.26100.6584'
-          $tools = "$env:RUNNER_TEMP\signing-tools"
-          New-Item -ItemType Directory -Path $tools -Force | Out-Null
-
-          foreach ($package in @(
-              @{ Id = 'microsoft.windows.wdk.x64';        Dir = 'wdk' },
-              @{ Id = 'microsoft.windows.sdk.buildtools'; Dir = 'sdk' })) {
-            $archive = "$tools\$($package.Dir).zip"
-            Invoke-WebRequest -UseBasicParsing `
-              -Uri "https://api.nuget.org/v3-flatcontainer/$($package.Id)/$version/$($package.Id).$version.nupkg" `
-              -OutFile $archive
-            Expand-Archive -Path $archive -DestinationPath "$tools\$($package.Dir)" -Force
-            Remove-Item $archive
-          }
-
-          # The catalog tool is a 32 bit program, which matters only in that
-          # it rules out running any of this under emulation elsewhere.
-          $inf2cat = Get-ChildItem "$tools\wdk" -Recurse -Filter 'Inf2Cat.exe' | Select-Object -First 1
-          $signtool = Get-ChildItem "$tools\sdk" -Recurse -Filter 'signtool.exe' |
-            Where-Object { $_.FullName -match '\\x64\\' } | Select-Object -First 1
-          if (-not $inf2cat) { throw 'Inf2Cat.exe was not in the driver kit package.' }
-          if (-not $signtool) { throw 'signtool.exe was not in the build tools package.' }
-          Write-Host "inf2cat:  $($inf2cat.FullName)"
-          Write-Host "signtool: $($signtool.FullName)"
-
-          # The certificate is built through the .NET types rather than the
-          # certificate cmdlets. Those need a provider that is not present
-          # on every machine, and where it is missing they fail complaining
-          # about a missing drive, which explains nothing. Signing from a
-          # file also avoids touching the machine's certificate stores at
-          # all, which a build has no business doing.
-          Add-Type -AssemblyName System.Security
-          $request = [System.Security.Cryptography.X509Certificates.CertificateRequest]::new(
-            'CN=usbdisplay release ${{ github.ref_name }}',
-            [System.Security.Cryptography.RSA]::Create(2048),
-            [System.Security.Cryptography.HashAlgorithmName]::SHA256,
-            [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
-          $request.CertificateExtensions.Add(
-            [System.Security.Cryptography.X509Certificates.X509BasicConstraintsExtension]::new($false, $false, 0, $true))
-          $request.CertificateExtensions.Add(
-            [System.Security.Cryptography.X509Certificates.X509KeyUsageExtension]::new('DigitalSignature', $true))
-          $purpose = [System.Security.Cryptography.OidCollection]::new()
-          [void]$purpose.Add([System.Security.Cryptography.Oid]::new('1.3.6.1.5.5.7.3.3'))  # code signing
-          $request.CertificateExtensions.Add(
-            [System.Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]::new($purpose, $true))
-
-          $cert = $request.CreateSelfSigned(
-            [DateTimeOffset]::UtcNow.AddDays(-1), [DateTimeOffset]::UtcNow.AddYears(5))
-          $pfx = Join-Path $env:RUNNER_TEMP 'signing.pfx'
-          $password = [Guid]::NewGuid().ToString()
-          [IO.File]::WriteAllBytes($pfx, $cert.Export('Pfx', $password))
-
-          foreach ($dir in 'driver', 'winusb') {
-            & $inf2cat.FullName /driver:"$stage\$dir" /os:10_X64,10_RS3_ARM64
-            if ($LASTEXITCODE -ne 0) { throw "catalog generation failed for $dir" }
-            Get-ChildItem "$stage\$dir" -Include '*.cat', '*.dll' -Recurse | ForEach-Object {
-              & $signtool.FullName sign /q /fd sha256 /f $pfx /p $password $_.FullName
-              if ($LASTEXITCODE -ne 0) { throw "signing failed on $($_.Name)" }
-            }
-          }
-          Remove-Item $pfx -Force
-
-          # The certificate travels with the package: the installer has to
-          # trust it before Windows will accept either driver.
-          [IO.File]::WriteAllBytes((Join-Path $stage 'usbdisplay.cer'), $cert.Export('Cert'))
-
-          Copy-Item usbdisplay\scripts\install.ps1 "$stage\"
-          Copy-Item usbdisplay\scripts\purge.ps1 "$stage\"
-          Copy-Item usbdisplay\scripts\reattach.ps1 "$stage\"
-          Copy-Item usbdisplay\README.md "$stage\"
-          Copy-Item LICENSE "$stage\"
-
-          Compress-Archive -Path "$stage\*" `
-            -DestinationPath "usbdisplay-${{ github.ref_name }}.zip"
-          Write-Host "packaged:"
-          Get-ChildItem -Recurse $stage | ForEach-Object { Write-Host "   $($_.FullName.Replace((Get-Location).Path,''))" }
-
-      - name: Publish
-        uses: softprops/action-gh-release@v2
-        with:
-          files: usbdisplay-${{ github.ref_name }}.zip
-          body: |
-            Unpack it, then from an elevated PowerShell:
-
-                .\install.ps1
-
-            No reboot and no change to Windows' signing policy are needed.
-            Nothing here loads into the kernel, so all Windows asks for is a
-            package signed by a certificate it trusts. It works with Secure
-            Boot on. It does need administrator rights.
-
-            **About the signature.** These files are signed with a
-            certificate generated when the release was built and then
-            discarded. It proves the files have not been altered since, and
-            nothing whatever about who made them. Installing means telling
-            your machine to trust that certificate, which is a real decision
-            and not a formality: if you would rather not, build from source
-            instead, which is a supported path and documented in the README.
-
-            After installing, run `tools\usbdisplaytray.exe` for brightness,
-            and right-click its icon for "Start with Windows".
-
-            `usbdisplayctl.exe list` and `info` work without installing
-            anything and are the first thing to try if the adapter is not
-            recognised.

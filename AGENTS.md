@@ -60,6 +60,13 @@ scripts\elev.ps1 -Command '<powershell>'
 scripts\elev.ps1 -Stop
 ```
 
+On Linux, where the whole release is built:
+
+```
+usbdisplay/scripts/cross-build.sh         # driver, installer, both tools
+usbdisplay/scripts/package.sh <version>   # catalogs, signatures, archive
+```
+
 `build-tool.bat` and `test.bat` compile with `/W4 /WX` and must stay
 warning-clean. The driver is `/W4` without `/WX`, because the driver kit
 headers are not clean at that level.
@@ -232,12 +239,40 @@ The installer is built the same way and by the same script, so the complete
 set of binaries a user needs, driver, installer, console tool and brightness
 control, comes off a Linux machine.
 
-What cross compiling cannot do is sign the result or build an installable
-catalog. Both need Microsoft's own tools, which have no equivalent
-elsewhere, and the catalog one is a 32 bit program, so running it on Linux
-would mean an emulator and a second architecture for the one step where a
-translation layer is least welcome. The release job therefore runs on
-Windows; it is the only part of the project that must.
+### Catalogs and signing also work on Linux
+
+This was asserted here to be impossible and it is not, which is worth
+recording as a caution about the rest: "needs Windows" was received wisdom
+rather than a finding.
+
+A driver catalog is a PKCS#7 SignedData carrying a Microsoft certificate
+trust list, content type OID `1.3.6.1.4.1.311.10.1`: a DER structure naming
+every file in the package with its hash. Nothing in it is secret. Two
+existing projects cover the job between them, and neither replaces the
+other:
+
+- **`LINBIT/generate-cat-file`** builds the unsigned catalog. C99, no
+  library dependencies, GPL-2.0, and used in production by WinDRBD to ship a
+  *kernel* driver, which is a far harder audience than this package.
+- **`osslsigncode`** puts the Authenticode signature on it. An ordinary
+  Ubuntu package, able to sign `.cat` files since 2022. It cannot create
+  one.
+
+`scripts/make-catalog.sh` drives both and `scripts/package.sh` assembles the
+release around them, so the whole thing, driver, installer, both tools, both
+catalogs and every signature, comes off one Linux machine. The release job
+lives in the Linux workflow now; the Windows one builds and tests and
+publishes nothing.
+
+Two details that are easy to get wrong:
+
+- **Sign after cataloguing, not before.** It looks backwards, because
+  signing changes the file. It works because the hash recorded for an
+  executable skips the checksum and the certificate table, the two areas
+  signing writes to. That is what the generator's `strip-pe-image` computes.
+- **Member hashes are SHA1 and that is correct.** It is what the format has
+  always used and what Windows 10 and 11 still accept. The *signature* is
+  SHA256, and the signature is what carries the trust decision.
 
 Neither workflow can test against hardware, so a green build means it
 compiles and the logic holds, never that the panel lights up.
@@ -349,8 +384,10 @@ Each cost real investigation; the evidence is in `docs/protocol-notes.md`.
   builds fail: the ARM64 toolset is not installed.
 - Driver installation needs **no reboot and no test signing**, because
   neither package loads a kernel binary. It does need **elevation**.
-- `Inf2Cat.exe` ships x86 only and its OS names are case sensitive with no
-  plain `10_ARM64` (use `10_RS3_ARM64`). `signtool` needs `/sm` to see a
+- `Inf2Cat.exe` and `signtool` are only used by `install.ps1`, which builds
+  a catalog locally when installing a source build. `Inf2Cat` ships x86 only
+  and its OS names are case sensitive with no plain `10_ARM64` (use
+  `10_RS3_ARM64`). `signtool` needs `/sm` to see a
   certificate in the machine store.
 - `pnputil` keeps the old binary if `DriverVer` has not changed. Always
   install the **build-stamped** INF from `usbdisplay/build/driver/...`.

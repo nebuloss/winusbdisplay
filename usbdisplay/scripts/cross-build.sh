@@ -26,9 +26,9 @@
 # Direct3D 11 accepts no other form of it, so the compiled bytecode is
 # committed to the tree instead; see src/render/generated/convert_cs.h.
 #
-# What this does not do is sign anything or produce an installable catalog.
-# Those need Windows tools with no equivalent here, and the install script
-# does both on the machine where the driver is actually used.
+# What this does not do is produce the catalog that makes the package
+# installable, or sign it. Both of those also work on Linux and both live in
+# scripts/make-catalog.sh, which explains how.
 #
 #   ./cross-build.sh            build
 #   ./cross-build.sh --clean    discard the downloaded toolchain first
@@ -365,3 +365,65 @@ log "Building the installer"
 
 log "Built $ROOT/build/usbdisplay-setup.exe"
 ls -la "$ROOT/build/usbdisplay-setup.exe"
+
+# The two programs a user actually runs after installing: the console tool,
+# which is also the hardware harness, and the brightness control.
+#
+# They are built here for the same reason the installer is. A release that
+# comes half from one machine and half from another has to be assembled
+# somewhere, and the assembling machine then decides what the release is.
+# Building everything in one place removes that question.
+LIBPATHS=(
+  /LIBPATH:"$XWIN/crt/lib/x86_64"
+  /LIBPATH:"$XWIN/sdk/lib/um/x86_64"
+  /LIBPATH:"$XWIN/sdk/lib/ucrt/x86_64"
+)
+CRT_LIBS=(libcmt.lib libcpmt.lib libucrt.lib libvcruntime.lib)
+
+log "Building usbdisplayctl"
+CTL_SOURCES=(
+  src/core/proto.cpp
+  src/core/usb.cpp
+  src/core/open_device.cpp
+  src/core/macrosilicon.cpp
+  src/render/rect.cpp
+  src/render/damage.cpp
+  src/render/convert.cpp
+  src/tools/usbdisplayctl/main.cpp
+)
+mkdir -p "$WORK/obj/ctl"
+for source in "${CTL_SOURCES[@]}"; do
+  "${CLANG_CL[@]}" "${FLAGS[@]}" "${DEFINES[@]}" "${INCLUDES[@]}" \
+    /c "$ROOT/$source" /Fo"$WORK/obj/ctl/$(basename "${source%.cpp}").obj"
+done
+
+"${LLD_LINK[@]}" \
+  /NOLOGO /MACHINE:X64 \
+  /OUT:"$ROOT/build/usbdisplayctl.exe" \
+  "${LIBPATHS[@]}" \
+  "$WORK"/obj/ctl/*.obj \
+  setupapi.lib hid.lib winusb.lib advapi32.lib ole32.lib \
+  kernel32.lib user32.lib "${CRT_LIBS[@]}"
+
+log "Building usbdisplaytray"
+mkdir -p "$WORK/obj/tray"
+for source in src/tools/usbdisplaytray/control.cpp src/tools/usbdisplaytray/main.cpp; do
+  "${CLANG_CL[@]}" "${FLAGS[@]}" "${DEFINES[@]}" "${INCLUDES[@]}" \
+    /c "$ROOT/$source" /Fo"$WORK/obj/tray/$(basename "${source%.cpp}").obj"
+done
+
+# A windows-subsystem program, so it starts without a console window behind
+# it. The entry point has to be named explicitly: the linker infers it from
+# the subsystem only when it recognises the signature, and wWinMain under
+# this toolchain it does not.
+"${LLD_LINK[@]}" \
+  /NOLOGO /MACHINE:X64 /SUBSYSTEM:WINDOWS /ENTRY:wWinMainCRTStartup \
+  /OUT:"$ROOT/build/usbdisplaytray.exe" \
+  "${LIBPATHS[@]}" \
+  "$WORK"/obj/tray/*.obj \
+  user32.lib gdi32.lib gdiplus.lib shell32.lib dxva2.lib \
+  advapi32.lib dwmapi.lib shcore.lib ole32.lib kernel32.lib \
+  "${CRT_LIBS[@]}"
+
+log "Built the tools"
+ls -la "$ROOT/build/usbdisplayctl.exe" "$ROOT/build/usbdisplaytray.exe"
