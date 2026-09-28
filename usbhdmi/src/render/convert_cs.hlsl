@@ -28,7 +28,7 @@ RWStructuredBuffer<uint> gOutput : register(u0);
 // Must match kCoeff* in render/convert.h.
 static const int kYr = 8382, kYg = 16452, kYb = 3196;
 static const int kUr = -4838, kUg = -9498, kUb = 14336;
-static const int kVr = 14336, kVg = -12005, kVb = -2332;
+static const int kVr = 14336, kVg = -12005, kVb = -2331;
 
 int3 LoadRgb(uint x, uint y) {
   float4 texel = gSource.Load(int3(int(x), int(y), 0));

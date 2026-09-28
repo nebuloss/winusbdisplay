@@ -167,8 +167,8 @@ size_t DamageTracker::Plan(Rect* out, size_t capacity) {
     capacity = kMaxTransfersPerFrame;
   }
 
-  /* This frame's damage plus the previous transfer's, because the chip wrote
-   * the previous transfer into only one of its two images. */
+  /* This frame's damage plus whatever the last transfer carried, because the
+   * adapter wrote that into only one of its two internal images. */
   RectSet combined;
   combined.AddAll(pending_);
   combined.AddAll(previous_);
@@ -177,19 +177,32 @@ size_t DamageTracker::Plan(Rect* out, size_t capacity) {
   }
 
   Rect planned[kMaxTransfersPerFrame];
-  size_t count = PlanTransfers(combined, planned, capacity);
+  const size_t count = PlanTransfers(combined, planned, capacity);
 
   size_t emitted = 0;
-  previous_.Clear();
   for (size_t i = 0; i < count; ++i) {
     const Rect aligned = AlignDamageRect(planned[i], width_, height_);
     if (aligned.empty()) {
       continue;
     }
     out[emitted++] = aligned;
-    previous_.Add(aligned);
   }
 
+  /* Only the genuinely new damage is carried forward, not everything that
+   * went out. A region needs to appear in exactly two consecutive transfers,
+   * once for each of the adapter's two images; remembering the whole plan
+   * instead would repeat it forever and the bus would never go quiet.
+   *
+   * Repeating the new damage alone is enough, because anything else in the
+   * plan was itself a repeat and has now reached both images. */
+  RectSet carried;
+  for (size_t i = 0; i < pending_.size(); ++i) {
+    const Rect aligned = AlignDamageRect(pending_[i], width_, height_);
+    if (!aligned.empty()) {
+      carried.Add(aligned);
+    }
+  }
+  previous_ = carried;
   pending_.Clear();
   return emitted;
 }

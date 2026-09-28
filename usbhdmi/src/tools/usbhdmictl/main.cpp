@@ -48,9 +48,9 @@ void PrintUsage() {
       "  timings         custom timings programmed into flash\n"
       "\n"
       "offline checks, no hardware at all:\n"
-      "  selftest        conversion paths agree, and the damage planner\n"
-      "                  makes the choices it is supposed to\n"
+      "  selftest        quick check that this binary is sane here\n"
       "  plan            what the planner does with realistic damage\n"
+      "                  the thorough version is scripts\\test.bat\n"
       "\n"
       "needs the WinUSB data interface:\n"
       "  testpattern [--mode WxH@Hz] [--bars] [--solid R,G,B]\n"
@@ -352,6 +352,10 @@ int RunPlannerCases(bool verbose) {
 
 int CmdPlan() { return RunPlannerCases(true) == 0 ? 0 : 1; }
 
+/* A short sanity check for use in the field, on a machine that has the tool
+ * but not the source. The thorough version is the test suite, built and run
+ * by scripts\test.bat; this deliberately does not duplicate it, it only
+ * answers "is this binary sane on this processor". */
 int CmdSelfTest() {
   int failures = 0;
 
@@ -366,105 +370,11 @@ int CmdSelfTest() {
   printf(
       "  the two paths must agree exactly, not closely: a region redrawn\n"
       "  at different widths would otherwise alternate between two values\n"
-      "  and shimmer\n\n");
+      "  and shimmer\n");
 
-  printf("framing\n");
-  {
-    std::vector<uint8_t> source(1920 * 1080 * 4);
-    FillColourBars(source.data(), 1920 * 4, 1920, 1080);
-    std::vector<uint8_t> out(kMaxTransferBytes);
-
-    const Rect rect = AlignDamageRect(MakeRect(64, 32, 128, 64), 1920, 1080);
-    const size_t written = FrameRect(out.data(), out.size(), source.data(),
-                                     1920 * 4, 1920, 1080, rect);
-    const size_t expected = TransferLength(rect);
-    const bool size_ok = written == expected;
-    const bool marker_ok = out[0] == 0xFF && out[1] == 0x00;
-    const bool footer_ok =
-        memcmp(out.data() + written - kFrameFooterSize, kFrameFooter,
-               kFrameFooterSize) == 0;
-    failures += (size_ok && marker_ok && footer_ok) ? 0 : 1;
-    printf("  %-5s %zu bytes, marker %s, footer %s\n",
-           (size_ok && marker_ok && footer_ok) ? "ok" : "FAIL", written,
-           marker_ok ? "ok" : "wrong", footer_ok ? "ok" : "wrong");
-  }
-
-  printf("\nalignment\n");
-  {
-    /* An odd left edge produces colour fringing, because UYVY encodes pairs.
-     * The chip wants four pixel horizontal granularity. */
-    const Rect aligned = AlignDamageRect(MakeRect(101, 51, 7, 3), 1920, 1080);
-    const bool ok = (aligned.x1 % 4) == 0 && (aligned.width() % 4) == 0 &&
-                    (aligned.y1 % 2) == 0 && (aligned.height() % 2) == 0 &&
-                    aligned.x1 <= 101 && aligned.x2 >= 108;
-    failures += ok ? 0 : 1;
-    printf("  %-5s 101,51 7x3 becomes %d,%d %dx%d\n", ok ? "ok" : "FAIL",
-           aligned.x1, aligned.y1, aligned.width(), aligned.height());
-  }
-
-  printf("\ndamage refinement\n");
-  {
-    /* The compositor sometimes reports the whole screen as dirty when almost
-     * nothing changed. Believing it costs eight periods. The check runs on
-     * converted pixels, so it works the same whichever conversion path
-     * produced them. */
-    const int width = 1920, height = 1080;
-    const size_t reference_stride = static_cast<size_t>(width) * 2;
-
-    std::vector<uint8_t> source(static_cast<size_t>(width) * height * 4, 0);
-    std::vector<uint8_t> reference(reference_stride * height, 0);
-
-    const Rect whole = MakeRect(0, 0, width, height);
-    std::vector<uint8_t> converted(reference_stride * height);
-    const size_t source_stride = static_cast<size_t>(width) * 4;
-
-    const auto convert_whole = [&]() {
-      for (int y = 0; y < height; ++y) {
-        ConvertRow(converted.data() + static_cast<size_t>(y) * reference_stride,
-                   source.data() + static_cast<size_t>(y) * source_stride,
-                   width);
-      }
-    };
-
-    convert_whole();
-    StoreUyvyReference(whole, converted.data(), reference.data(),
-                       reference_stride);
-
-    const Rect unchanged = ShrinkChangedUyvy(whole, converted.data(),
-                                             reference.data(),
-                                             reference_stride);
-    const bool empty_ok = unchanged.empty();
-    failures += empty_ok ? 0 : 1;
-    printf("  %-5s an unchanged screen shrinks to nothing\n",
-           empty_ok ? "ok" : "FAIL");
-
-    for (int y = 500; y < 520; ++y) {
-      for (int x = 800; x < 840; ++x) {
-        source[y * source_stride + x * 4] = 0xFF;
-      }
-    }
-    convert_whole();
-
-    const Rect actual = ShrinkChangedUyvy(whole, converted.data(),
-                                          reference.data(), reference_stride);
-    const bool ok = actual.x1 == 800 && actual.x2 == 840 &&
-                    actual.y1 == 500 && actual.y2 == 520;
-    failures += ok ? 0 : 1;
-    printf("  %-5s whole screen claimed, %d,%d %dx%d actually changed"
-           " (%d period instead of %d)\n",
-           ok ? "ok" : "FAIL", actual.x1, actual.y1, actual.width(),
-           actual.height(), TransferPeriods(actual),
-           TransferPeriods(whole));
-  }
-
-  printf("\ntransfer planning\n");
-  failures += RunPlannerCases(false);
-  if (failures == 0) {
-    printf("  ok    every scenario within its period budget\n");
-  }
-
-  printf("\n%s\n", failures == 0 ? "all checks passed"
-                                 : "FAILURES, see above");
+  printf("\n%s\n", failures == 0
+                       ? "ok. For the full suite run scripts\\test.bat"
+                       : "FAILED, this binary does not match its reference");
   return failures == 0 ? 0 : 1;
 }
 

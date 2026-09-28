@@ -39,7 +39,15 @@ namespace usbhdmi {
  * the width of the rectangle. Everything uses 15 bit. */
 constexpr int kCoeffYr = 8382, kCoeffYg = 16452, kCoeffYb = 3196;
 constexpr int kCoeffUr = -4838, kCoeffUg = -9498, kCoeffUb = 14336;
-constexpr int kCoeffVr = 14336, kCoeffVg = -12005, kCoeffVb = -2332;
+constexpr int kCoeffVr = 14336, kCoeffVg = -12005, kCoeffVb = -2331;
+
+/* Both chroma rows must sum to exactly zero, or a grey pixel acquires a
+ * colour cast and the whole picture is faintly tinted. Halving the published
+ * 16 bit constants and rounding each independently left the V row summing to
+ * -1, which is where the last of those digits comes from: it is rounded the
+ * other way on purpose. */
+static_assert(kCoeffUr + kCoeffUg + kCoeffUb == 0, "U must be neutral on grey");
+static_assert(kCoeffVr + kCoeffVg + kCoeffVb == 0, "V must be neutral on grey");
 
 /* Picture adjustment applied while converting, expressed the way a monitor
  * reports it: brightness and contrast each 0..100, with 100 and 50 meaning

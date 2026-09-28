@@ -1,0 +1,419 @@
+/* SPDX-License-Identifier: GPL-2.0-only
+ *
+ * The protocol layer, against a fake adapter.
+ *
+ * These are the tests that would have caught the historical failures. Every
+ * one of the following cost real debugging time, and every one is silent:
+ * the transfers all report success and the panel simply stays dark or shows
+ * the wrong thing.
+ *
+ *   - forgetting the zero length packet that ends a transfer
+ *   - enabling the output before a frame has landed, so the panel shows
+ *     whatever was left in the adapter's memory
+ *   - reordering the mode programming sequence
+ *   - not selecting manual block mode, after which partial updates are
+ *     refused and every update has to be a whole frame
+ *   - reading registers one byte at a time, making an EDID read four times
+ *     slower than it needs to be
+ */
+
+#include <map>
+
+#include "../src/core/chip.h"
+#include "testing.h"
+
+using namespace usbhdmi;
+
+namespace {
+
+/* Records everything sent and answers reads from a register map, so a
+ * sequence can be asserted on without any hardware. */
+class FakeLink : public Link {
+ public:
+  struct Control {
+    uint8_t bytes[kControlSize];
+
+    uint8_t op() const { return bytes[0]; }
+    uint8_t sub_op() const { return bytes[1]; }
+    uint16_t address() const {
+      return static_cast<uint16_t>((bytes[1] << 8) | bytes[2]);
+    }
+  };
+
+  struct Bulk {
+    size_t length;
+    std::vector<uint8_t> head;  /* first bytes, enough to check the header */
+  };
+
+  std::string Describe() const override { return "fake adapter"; }
+  bool HasPanel() const override { return has_panel; }
+
+  bool ControlWrite(const uint8_t* payload) override {
+    Control record;
+    memcpy(record.bytes, payload, kControlSize);
+    controls.push_back(record);
+
+    if (record.op() == kOpReadXdata) {
+      pending_read_address_ = record.address();
+      pending_read_is_flash_ = false;
+    } else if (record.op() == kOpReadFlash) {
+      pending_read_address_ = static_cast<uint16_t>(
+          (payload[1] << 16) | (payload[2] << 8) | payload[3]);
+      pending_read_is_flash_ = true;
+    }
+    return !fail_control;
+  }
+
+  bool ControlRead(uint8_t* payload) override {
+    memset(payload, 0, kControlSize);
+    if (fail_control) {
+      return false;
+    }
+    if (pending_read_is_flash_) {
+      return true; /* unprogrammed flash reads back as zeroes */
+    }
+    /* The response carries four consecutive register bytes at offset 3. */
+    for (size_t i = 0; i < kMaxReadBytes; ++i) {
+      const uint16_t address =
+          static_cast<uint16_t>(pending_read_address_ + i);
+      auto it = registers.find(address);
+      payload[3 + i] = it == registers.end() ? 0 : it->second;
+    }
+    reads_served++;
+    return true;
+  }
+
+  bool BulkWrite(const uint8_t* data, size_t len) override {
+    Bulk record;
+    record.length = len;
+    if (data && len) {
+      record.head.assign(data, data + (len < 16 ? len : 16));
+    }
+    bulks.push_back(record);
+    return !fail_bulk;
+  }
+
+  /* Finds the first video command with this sub-operation, or -1. */
+  int IndexOfCommand(uint8_t sub_op) const {
+    for (size_t i = 0; i < controls.size(); ++i) {
+      if (controls[i].op() == kOpVideo && controls[i].sub_op() == sub_op) {
+        return static_cast<int>(i);
+      }
+    }
+    return -1;
+  }
+
+  std::vector<Control> controls;
+  std::vector<Bulk> bulks;
+  std::map<uint16_t, uint8_t> registers;
+  bool has_panel = true;
+  bool fail_control = false;
+  bool fail_bulk = false;
+  int reads_served = 0;
+
+ private:
+  uint32_t pending_read_address_ = 0;
+  bool pending_read_is_flash_ = false;
+};
+
+/* Keeps a borrowed pointer to the fake while Chip owns it. */
+struct Harness {
+  FakeLink* link;
+  std::unique_ptr<Chip> chip;
+
+  Harness() {
+    auto owned = std::unique_ptr<FakeLink>(new FakeLink());
+    link = owned.get();
+    chip.reset(new Chip(std::move(owned)));
+  }
+};
+
+const Mode& Mode1080p60() { return *FindMode(1920, 1080, 60); }
+
+}  // namespace
+
+TEST(protocol, register_read_is_a_write_then_a_read) {
+  Harness harness;
+  harness.link->registers[0x0031] = 0x05;
+
+  uint8_t value = 0;
+  CHECK(harness.chip->ReadByte(0x0031, &value));
+  CHECK_EQ(static_cast<int>(value), 5);
+
+  CHECK_EQ_BECAUSE(harness.link->controls.size(), static_cast<size_t>(1),
+                   "a read is one request followed by fetching the answer; "
+                   "interleaving two of these returns each other's data");
+  CHECK_EQ(static_cast<int>(harness.link->controls[0].op()), kOpReadXdata);
+  CHECK_EQ(static_cast<int>(harness.link->controls[0].address()), 0x0031);
+}
+
+TEST(protocol, connector_type_is_decoded) {
+  Harness harness;
+  harness.link->registers[0x0031] = 0x05;
+
+  VideoPort port = VideoPort::kUnknown;
+  CHECK(harness.chip->ReadVideoPort(&port));
+  CHECK(port == VideoPort::kHdmi);
+  CHECK_EQ(std::string(VideoPortName(port)), std::string("HDMI"));
+}
+
+TEST(protocol, an_out_of_range_connector_is_reported_as_unknown) {
+  Harness harness;
+  harness.link->registers[0x0031] = 0x42;
+
+  VideoPort port = VideoPort::kHdmi;
+  CHECK(harness.chip->ReadVideoPort(&port));
+  CHECK_BECAUSE(port == VideoPort::kUnknown,
+                "an unrecognised value must not be cast into the enum and "
+                "used to pick a mode list");
+}
+
+TEST(protocol, edid_is_read_four_bytes_at_a_time) {
+  Harness harness;
+  /* A minimal valid EDID: the magic, then a correcting checksum. */
+  uint8_t block[128] = {0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00};
+  uint8_t sum = 0;
+  for (int i = 0; i < 127; ++i) {
+    sum = static_cast<uint8_t>(sum + block[i]);
+  }
+  block[127] = static_cast<uint8_t>(256 - sum);
+  for (int i = 0; i < 128; ++i) {
+    harness.link->registers[static_cast<uint16_t>(kRegEdidBase + i)] =
+        block[i];
+  }
+
+  std::vector<uint8_t> edid;
+  bool checksum_ok = false;
+  CHECK(harness.chip->ReadEdid(&edid, 1, &checksum_ok));
+  CHECK_EQ(edid.size(), static_cast<size_t>(128));
+  CHECK(checksum_ok);
+  CHECK_EQ(memcmp(edid.data(), block, 128), 0);
+
+  CHECK_EQ_BECAUSE(harness.link->reads_served, 32,
+                   "one request returns four consecutive bytes, so a block "
+                   "costs 32 round trips rather than 128; the reverse "
+                   "engineered driver read one at a time and the extra "
+                   "cost showed as a stall on every hotplug");
+}
+
+TEST(protocol, a_corrupt_edid_is_reported_rather_than_hidden) {
+  Harness harness;
+  /* A block of zeroes would pass, since its bytes sum to zero. One stray
+   * value is what a real truncated or noisy read looks like. */
+  harness.link->registers[kRegEdidBase] = 0x12;
+
+  std::vector<uint8_t> edid;
+  bool checksum_ok = true;
+  CHECK_BECAUSE(harness.chip->ReadEdid(&edid, 1, &checksum_ok),
+                "a bad checksum is not an I/O failure; the caller decides "
+                "whether to fall back rather than being told nothing");
+  CHECK(!checksum_ok);
+}
+
+TEST(protocol, chip_id_falls_back_to_the_usb2_address) {
+  Harness harness;
+  /* Nothing at the USB 3 address, an MS912C signature at the other. */
+  harness.link->registers[kRegChipId912x] = kSignaturePart912C;
+  harness.link->registers[kRegChipId912x + 1] = kSignatureFamily912x;
+  harness.link->registers[kRegChipId912x + 2] = kSignatureTail;
+
+  ChipId id;
+  CHECK(harness.chip->ReadChipId(&id));
+  CHECK_BECAUSE(id.model == ChipModel::kMs912C,
+                "the test adapter reports a USB 3 product id and contains a "
+                "USB 2 die, so the family must be probed, never inferred");
+  CHECK_EQ(id.flash_timing_base, kFlashTimingBase912x);
+}
+
+TEST(protocol, an_unknown_chip_id_is_not_an_error) {
+  Harness harness;
+  ChipId id;
+  CHECK_BECAUSE(harness.chip->ReadChipId(&id),
+                "an unrecognised signature still leaves the raw bytes for "
+                "the caller to report, which is more useful than a failure");
+  CHECK(id.model == ChipModel::kUnknown);
+}
+
+TEST(modeset, programs_the_captured_sequence_in_order) {
+  Harness harness;
+  CHECK(harness.chip->SetMode(Mode1080p60()));
+
+  const int transfer_mode = harness.link->IndexOfCommand(kVideoTransferMode);
+  const int input = harness.link->IndexOfCommand(kVideoInputInfo);
+  const int output = harness.link->IndexOfCommand(kVideoOutputInfo);
+
+  CHECK(transfer_mode >= 0 && input >= 0 && output >= 0);
+  CHECK_BECAUSE(transfer_mode < input && input < output,
+                "this order comes from a capture of the vendor driver; "
+                "rearranging it produces a dark panel with every transfer "
+                "still reporting success");
+}
+
+TEST(modeset, selects_manual_block_mode) {
+  Harness harness;
+  CHECK(harness.chip->SetMode(Mode1080p60()));
+
+  const int index = harness.link->IndexOfCommand(kVideoTransferMode);
+  CHECK(index >= 0);
+  CHECK_EQ_BECAUSE(
+      static_cast<int>(harness.link->controls[index].bytes[2]),
+      static_cast<int>(kTransferModeManualBlock),
+      "manual block is what makes partial updates possible at all; in any "
+      "other mode every update has to be a whole frame, which at 1080p is "
+      "eight refresh periods instead of one");
+}
+
+TEST(modeset, announces_uyvy_and_the_right_geometry) {
+  Harness harness;
+  CHECK(harness.chip->SetMode(Mode1080p60()));
+
+  const int index = harness.link->IndexOfCommand(kVideoInputInfo);
+  CHECK(index >= 0);
+  const FakeLink::Control& command = harness.link->controls[index];
+  const int width = (command.bytes[2] << 8) | command.bytes[3];
+  const int height = (command.bytes[4] << 8) | command.bytes[5];
+
+  CHECK_EQ(width, 1920);
+  CHECK_EQ(height, 1080);
+  CHECK_EQ_BECAUSE(static_cast<int>(command.bytes[6]),
+                   static_cast<int>(kPixelFormatUyvy),
+                   "4:2:2 at 16 bits a pixel is the cheapest format the "
+                   "adapter offers, so there is no fallback if this is wrong");
+}
+
+TEST(modeset, sends_the_timing_table_index_not_the_resolution) {
+  Harness harness;
+  CHECK(harness.chip->SetMode(Mode1080p60()));
+
+  const int index = harness.link->IndexOfCommand(kVideoOutputInfo);
+  CHECK(index >= 0);
+  CHECK_EQ(static_cast<int>(harness.link->controls[index].bytes[2]), 0x81);
+}
+
+TEST(modeset, leaves_the_output_disabled) {
+  Harness harness;
+  CHECK(harness.chip->SetMode(Mode1080p60()));
+
+  CHECK_EQ_BECAUSE(
+      harness.link->IndexOfCommand(kVideoEnable), -1,
+      "the adapter's memory still holds the previous session's picture, so "
+      "lighting the panel before a frame has landed shows that instead of "
+      "the desktop");
+}
+
+TEST(modeset, brackets_the_reprogramming_with_transfer_enable) {
+  Harness harness;
+  CHECK(harness.chip->SetMode(Mode1080p60()));
+
+  int first = -1, last = -1;
+  for (size_t i = 0; i < harness.link->controls.size(); ++i) {
+    const FakeLink::Control& command = harness.link->controls[i];
+    if (command.op() == kOpVideo && command.sub_op() == kVideoTransferEnable) {
+      if (first < 0) {
+        first = static_cast<int>(i);
+      }
+      last = static_cast<int>(i);
+    }
+  }
+  CHECK(first >= 0 && last > first);
+  CHECK_EQ_BECAUSE(static_cast<int>(harness.link->controls[first].bytes[2]), 0,
+                   "transfers are stopped before anything is reprogrammed");
+  CHECK_EQ(static_cast<int>(harness.link->controls[last].bytes[2]), 1);
+}
+
+TEST(transfer, every_frame_is_followed_by_a_zero_length_packet) {
+  Harness harness;
+  const uint8_t frame[64] = {0xFF, 0x00};
+  CHECK(harness.chip->SendFrame(frame, sizeof(frame)));
+
+  CHECK_EQ(harness.link->bulks.size(), static_cast<size_t>(2));
+  CHECK_EQ(harness.link->bulks[0].length, sizeof(frame));
+  CHECK_EQ_BECAUSE(
+      harness.link->bulks[1].length, static_cast<size_t>(0),
+      "the zero length packet is how the adapter is told the transfer is "
+      "complete; without it the adapter waits for data that never arrives "
+      "and the panel stays dark while every write reports success");
+}
+
+TEST(transfer, the_output_is_enabled_only_after_the_first_frame_lands) {
+  Harness harness;
+  CHECK(harness.chip->SetMode(Mode1080p60()));
+  const size_t before = harness.link->controls.size();
+
+  const uint8_t frame[64] = {0xFF, 0x00};
+  CHECK(harness.chip->SendFrame(frame, sizeof(frame)));
+
+  bool enabled_after = false;
+  for (size_t i = before; i < harness.link->controls.size(); ++i) {
+    const FakeLink::Control& command = harness.link->controls[i];
+    if (command.op() == kOpVideo && command.sub_op() == kVideoEnable &&
+        command.bytes[2] == 1) {
+      enabled_after = true;
+    }
+  }
+  CHECK_BECAUSE(enabled_after,
+                "the panel is lit once there is something real to show, and "
+                "not before");
+}
+
+TEST(transfer, the_output_is_not_re_enabled_on_every_frame) {
+  Harness harness;
+  const uint8_t frame[64] = {0xFF, 0x00};
+  CHECK(harness.chip->SendFrame(frame, sizeof(frame)));
+  const size_t after_first = harness.link->controls.size();
+  CHECK(harness.chip->SendFrame(frame, sizeof(frame)));
+
+  CHECK_EQ_BECAUSE(harness.link->controls.size(), after_first,
+                   "a control exchange between every pair of transfers would "
+                   "cost round trips on the critical path for no reason");
+}
+
+TEST(transfer, refuses_to_send_when_there_is_no_data_plane) {
+  Harness harness;
+  harness.link->has_panel = false;
+
+  const uint8_t frame[64] = {0xFF, 0x00};
+  CHECK_BECAUSE(!harness.chip->SendFrame(frame, sizeof(frame)),
+                "reporting success into a void makes a missing driver "
+                "package look like a hardware fault");
+  CHECK(!harness.chip->error().empty());
+}
+
+TEST(transfer, repeated_failures_reprogram_the_adapter) {
+  Harness harness;
+  CHECK(harness.chip->SetMode(Mode1080p60()));
+  harness.link->fail_bulk = true;
+
+  const uint8_t frame[64] = {0xFF, 0x00};
+  for (int i = 0; i < 3; ++i) {
+    harness.chip->SendFrame(frame, sizeof(frame));
+  }
+
+  /* A reprogram is visible as a second run of the mode sequence. */
+  int transfer_mode_commands = 0;
+  for (const FakeLink::Control& command : harness.link->controls) {
+    if (command.op() == kOpVideo && command.sub_op() == kVideoTransferMode) {
+      ++transfer_mode_commands;
+    }
+  }
+  CHECK_BECAUSE(transfer_mode_commands >= 2,
+                "once the adapter stops accepting transfers it stays that "
+                "way, and before this the only recovery was unplugging it");
+}
+
+TEST(errors, a_control_failure_is_reported_with_context) {
+  Harness harness;
+  harness.link->fail_control = true;
+
+  uint8_t value = 0;
+  CHECK(!harness.chip->ReadByte(0x0031, &value));
+  CHECK_BECAUSE(!harness.chip->error().empty(),
+                "a bare false tells whoever is reading the log nothing about "
+                "which step failed");
+}
+
+TEST(errors, resetting_before_a_mode_is_set_fails_cleanly) {
+  Harness harness;
+  CHECK(!harness.chip->Reset());
+  CHECK(!harness.chip->error().empty());
+}
