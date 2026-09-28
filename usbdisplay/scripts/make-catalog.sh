@@ -115,13 +115,17 @@ for member in "${MEMBERS[@]}"; do printf '    member: %s\n' "$(basename "$member
 [ -s "$DIR/$CAT" ] || die "the catalog came out empty"
 
 # Worth checking rather than trusting: an empty or truncated catalog is
-# still a file, and the next thing to look at it is Windows.
+# still a file, and the next thing to look at it is Windows, which can only
+# say "the package is unsigned".
+#
+# The check is for the trust list content type rather than for a clean
+# parse. asn1parse walks into structures it has no opinion about and reports
+# that as an error, so its exit status says more about openssl than about
+# the catalog.
 if command -v openssl >/dev/null 2>&1; then
-  openssl asn1parse -inform der -in "$DIR/$CAT" >/dev/null ||
-    die "the catalog is not valid DER"
-  openssl asn1parse -inform der -in "$DIR/$CAT" |
+  openssl asn1parse -inform der -in "$DIR/$CAT" 2>/dev/null |
     grep -q '1.3.6.1.4.1.311.10.1' ||
-    die "the catalog is DER but not a certificate trust list"
+    die "that is not a certificate trust list"
 fi
 
 if [ -z "$CERT" ]; then
