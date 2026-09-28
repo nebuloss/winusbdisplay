@@ -203,7 +203,7 @@ NTSTATUS EvtMonitorGetDefaultModes(
   if (!device) {
     return STATUS_DEVICE_NOT_READY;
   }
-  const std::vector<Mode>& modes = device->modes();
+  const std::vector<Mode> modes = device->modes();
 
   out->DefaultMonitorModeBufferOutputCount = FillMonitorModes(
       modes, args->DefaultMonitorModeBufferInputCount,
@@ -226,7 +226,7 @@ NTSTATUS EvtMonitorQueryModes(IDDCX_MONITOR monitor,
   if (!device) {
     return STATUS_DEVICE_NOT_READY;
   }
-  const std::vector<Mode>& modes = device->modes();
+  const std::vector<Mode> modes = device->modes();
 
   out->TargetModeBufferOutputCount =
       FillTargetModes(modes, args->TargetModeBufferInputCount,

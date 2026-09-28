@@ -15,6 +15,15 @@
  * in a user mode host process. The consequence is that two packages have to
  * be installed: this one, and the one that binds WinUSB to the display
  * interface.
+ *
+ * It also means **nothing tells this driver when the adapter is plugged in
+ * or pulled out**. A root enumerated node is not a child of the USB device,
+ * so PnP has no reason to start or stop it when the hardware comes and goes.
+ * Without something to bridge that gap, unplugging the adapter leaves a
+ * phantom monitor in Windows holding the user's windows and showing a frozen
+ * desktop, and plugging it back in does nothing at all. That is what the
+ * watcher thread below is for: it looks for the hardware, brings the monitor
+ * up when it appears, and takes it away when it goes.
  */
 
 #pragma once
@@ -26,6 +35,8 @@
 #include <iddcx.h>
 
 #include <memory>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 #include "../core/chip.h"
@@ -47,12 +58,23 @@ class IndirectDevice {
   NTSTATUS AssignSwapChain(const IDARG_IN_SETSWAPCHAIN* args);
   void UnassignSwapChain();
 
-  const std::vector<Mode>& modes() const { return modes_; }
-  const std::vector<uint8_t>& edid() const { return edid_; }
+  /* The mode list is read by callbacks on the OS thread while the watcher
+   * thread may be rebuilding it after a hot-plug, so it is copied out under
+   * the lock rather than handed out by reference. */
+  std::vector<Mode> modes();
 
  private:
   void BuildModeList();
   void CreateMonitor();
+  void AnnounceMonitor();
+  void RemoveMonitor();
+
+  /* Opens the adapter and brings the monitor up. Returns false when the
+   * hardware is not there, which is an ordinary state and not an error. */
+  bool TryAttach();
+  void Detach();
+
+  void WatcherLoop();
 
   WDFDEVICE wdf_device_;
   IDDCX_ADAPTER adapter_ = nullptr;
@@ -61,6 +83,15 @@ class IndirectDevice {
   std::unique_ptr<Chip> chip_;
   std::unique_ptr<FrameSender> sender_;
   std::unique_ptr<Pipeline> pipeline_;
+
+  /* Guards everything above and below that the watcher thread and the OS
+   * callbacks both touch. */
+  std::mutex lock_;
+
+  std::thread watcher_;
+  HANDLE watcher_stop_ = nullptr;
+  bool adapter_ready_ = false;
+  bool pending_arrival_ = false;
 
   VideoPort port_ = VideoPort::kUnknown;
   std::vector<uint8_t> edid_;

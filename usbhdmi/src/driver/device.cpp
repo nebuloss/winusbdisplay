@@ -144,70 +144,178 @@ IndirectDevice::~IndirectDevice() {
   chip_.reset();
 }
 
+/* How often to look for the adapter.
+ *
+ * Nothing notifies a root enumerated device that USB hardware has come or
+ * gone, so this polls. Once a second is far below what a person notices when
+ * plugging something in, and the check itself is a cheap enumeration that
+ * touches no hardware when there is none. */
+constexpr unsigned kWatchIntervalMs = 1000;
+
 NTSTATUS IndirectDevice::PrepareHardware() {
-  /* Distinct status codes per failure, because this return value is one of
-   * the few things that reaches the event log verbatim, and everything else
-   * the framework reports collapses into a single generic error. */
-  std::string error;
-  std::unique_ptr<UsbLink> link = UsbLink::Open(true, &error);
-  if (!link) {
-    Log("PrepareHardware: %s", error.c_str());
-    /* 0xC0000225: the other package is probably not installed. */
-    return STATUS_NOT_FOUND;
+  /* Deliberately succeeds whether or not the adapter is plugged in.
+   *
+   * Failing here would be the obvious thing and it is wrong: the device node
+   * is created once, at install time, and never restarted, so a driver that
+   * refuses to start without hardware present stays broken for good. The
+   * user plugs the adapter in, nothing happens, and the only way out is to
+   * reinstall. Starting regardless and watching for the hardware is what
+   * makes plugging it in work. */
+  watcher_stop_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+  if (!watcher_stop_) {
+    return STATUS_INSUFFICIENT_RESOURCES;
   }
-  Log("PrepareHardware: %s", link->Describe().c_str());
 
-  chip_.reset(new Chip(std::move(link)));
+  if (TryAttach()) {
+    Log("PrepareHardware: adapter present");
+  } else {
+    Log("PrepareHardware: no adapter yet, watching for one");
+  }
 
-  if (!chip_->ReadVideoPort(&port_)) {
+  watcher_ = std::thread(&IndirectDevice::WatcherLoop, this);
+  return STATUS_SUCCESS;
+}
+
+bool IndirectDevice::TryAttach() {
+  {
+    std::lock_guard<std::mutex> guard(lock_);
+    if (chip_) {
+      return true;
+    }
+
+    std::string error;
+    std::unique_ptr<UsbLink> link = UsbLink::Open(true, &error);
+    if (!link) {
+    return false;
+    }
+    Log("attach: %s", link->Describe().c_str());
+
+    std::unique_ptr<Chip> chip(new Chip(std::move(link)));
+
+    if (!chip->ReadVideoPort(&port_)) {
     port_ = VideoPort::kUnknown;
-  }
+    }
 
-  /* Reading the EDID is 32 round trips, so do it once here and keep it. */
-  edid_valid_ = false;
-  if (port_ == VideoPort::kHdmi || port_ == VideoPort::kVga ||
+    /* Reading the panel's capabilities is 32 round trips, so do it once here
+     * and keep it. It has to be re-read on every attach, because the user may
+     * have moved the adapter to a different screen while it was unplugged. */
+    edid_valid_ = false;
+    if (port_ == VideoPort::kHdmi || port_ == VideoPort::kVga ||
       port_ == VideoPort::kDigital) {
     bool checksum_ok = false;
-    if (chip_->ReadEdid(&edid_, 1, &checksum_ok) && checksum_ok) {
+    if (chip->ReadEdid(&edid_, 1, &checksum_ok) && checksum_ok) {
       edid_valid_ = true;
     }
-  }
-  if (!edid_valid_) {
-    /* Never refuse to create the monitor over this. A user with no monitor
-     * at all has nothing to work with; a user with a monitor showing the
-     * wrong resolution can at least see that something is connected. */
+    }
+    if (!edid_valid_) {
+    /* Never refuse to show a monitor over this. A user with no monitor at
+     * all has nothing to work with; a user with a monitor at the wrong
+     * resolution can at least see that something is connected. */
     BuildFallbackEdid(&edid_, 1920, 1080, 60);
-  }
+    }
 
-  BuildModeList();
-  Log("PrepareHardware: connector %s, EDID %s, %u modes",
-      VideoPortName(port_), edid_valid_ ? "read from the panel" : "synthesised",
+    chip_ = std::move(chip);
+    BuildModeList();
+    Log("attach: connector %s, capabilities %s, %u modes", VideoPortName(port_),
+      edid_valid_ ? "read from the panel" : "synthesised",
       static_cast<unsigned>(modes_.size()));
 
-  sender_.reset(new FrameSender(chip_.get()));
-  sender_->Start();
-  return STATUS_SUCCESS;
+    sender_.reset(new FrameSender(chip_.get()));
+    sender_->Start();
+
+    if (adapter_ready_) {
+      CreateMonitor();
+    }
+    }
+
+  /* Outside the lock: announcing calls straight back into this driver. */
+  AnnounceMonitor();
+  return true;
+}
+
+void IndirectDevice::Detach() {
+  std::lock_guard<std::mutex> guard(lock_);
+  if (!chip_) {
+    return;
+  }
+  Log("detach: adapter is gone, removing the monitor");
+
+  /* Order matters. Take the monitor away from Windows first, so it moves
+   * the user's windows back to a real screen rather than leaving them on a
+   * display that no longer exists. Then stop producing, then stop sending:
+   * the other way round means waiting on a transfer to hardware that has
+   * been unplugged. */
+  RemoveMonitor();
+  pipeline_.reset();
+  if (sender_) {
+    sender_->Stop();
+    sender_.reset();
+  }
+  chip_.reset();
+}
+
+void IndirectDevice::WatcherLoop() {
+  for (;;) {
+    if (WaitForSingleObject(watcher_stop_, kWatchIntervalMs) ==
+        WAIT_OBJECT_0) {
+      return;
+    }
+
+    bool attached;
+    {
+      std::lock_guard<std::mutex> guard(lock_);
+      attached = chip_ != nullptr;
+    }
+
+    if (!attached) {
+      TryAttach();
+      continue;
+    }
+
+    /* Present in the list Windows publishes is the test for "still there".
+     * Asking the adapter directly would be more direct and is not safe: a
+     * control exchange with hardware that has just been pulled can block
+     * until it times out, and this thread would then be slow to notice
+     * exactly when it most needs to be quick. */
+    bool still_present = false;
+    for (const UsbLink::Interface& entry : UsbLink::Enumerate()) {
+      if (!entry.is_hid) {
+        still_present = true;
+        break;
+      }
+    }
+    if (!still_present) {
+      Detach();
+    }
+  }
 }
 
 void IndirectDevice::ReleaseHardware() {
   const ULONGLONG started = GetTickCount64();
   Log("ReleaseHardware: stopping");
 
-  /* Stop producing before stopping the sender. The other order means waiting
-   * on a multi-megabyte transfer while the system is trying to stop the
-   * device, which it reports as a hung driver. */
-  pipeline_.reset();
-  if (sender_) {
-    sender_->Stop();
-    sender_.reset();
+  if (watcher_stop_) {
+    SetEvent(watcher_stop_);
   }
-  if (chip_) {
-    chip_->PowerOff();
-    chip_.reset();
+  if (watcher_.joinable()) {
+    watcher_.join();
+  }
+
+  Detach();
+
+  if (watcher_stop_) {
+    CloseHandle(watcher_stop_);
+    watcher_stop_ = nullptr;
   }
   Log("ReleaseHardware: done in %llu ms", GetTickCount64() - started);
 }
 
+std::vector<Mode> IndirectDevice::modes() {
+  std::lock_guard<std::mutex> guard(lock_);
+  return modes_;
+}
+
+/* Assumes lock_ is held. */
 void IndirectDevice::BuildModeList() {
   modes_.clear();
 
@@ -264,7 +372,12 @@ void IndirectDevice::BuildModeList() {
   active_mode_ = modes_.front();
 }
 
+/* Assumes lock_ is held. Creates the monitor object but does **not**
+ * announce it: see AnnounceMonitor. */
 void IndirectDevice::CreateMonitor() {
+  if (monitor_ || !adapter_) {
+    return;
+  }
   IDDCX_MONITOR_INFO info = {};
   info.Size = sizeof(info);
   info.MonitorType = DISPLAYCONFIG_OUTPUT_TECHNOLOGY_HDMI;
@@ -299,21 +412,58 @@ void IndirectDevice::CreateMonitor() {
     wrapper->device = this;
   }
   monitor_ = created.MonitorObject;
+  pending_arrival_ = true;
+}
+
+/* Announces the monitor, and must be called with lock_ **released**.
+ *
+ * Announcing arrival makes Windows turn round and call straight back into
+ * this driver, on this thread, to assign a swapchain. Holding the lock
+ * across that call deadlocks the driver against itself: the monitor never
+ * appears and the log stops mid-sentence after the create succeeded, which
+ * is a memorably unhelpful symptom. */
+void IndirectDevice::AnnounceMonitor() {
+  IDDCX_MONITOR monitor = nullptr;
+  {
+    std::lock_guard<std::mutex> guard(lock_);
+    if (!pending_arrival_ || !monitor_) {
+      return;
+    }
+    pending_arrival_ = false;
+    monitor = monitor_;
+  }
 
   IDARG_OUT_MONITORARRIVAL arrival = {};
-  status = IddCxMonitorArrival(monitor_, &arrival);
-  Log("CreateMonitor: arrival -> 0x%08X", status);
+  const NTSTATUS status = IddCxMonitorArrival(monitor, &arrival);
+  Log("AnnounceMonitor: arrival -> 0x%08X", status);
+}
+
+void IndirectDevice::RemoveMonitor() {
+  if (!monitor_) {
+    return;
+  }
+  const NTSTATUS status = IddCxMonitorDeparture(monitor_);
+  Log("RemoveMonitor: departure -> 0x%08X", status);
+  monitor_ = nullptr;
 }
 
 void IndirectDevice::OnAdapterReady(IDDCX_ADAPTER adapter) {
-  adapter_ = adapter;
-  /* Inline, as Windows' own indirect display drivers do. Deferring this to a
-   * worker means the stop path has to join a sleeping thread, and the
-   * framework reports that as a hang and takes the device offline. */
-  CreateMonitor();
+  {
+    std::lock_guard<std::mutex> guard(lock_);
+    adapter_ = adapter;
+    adapter_ready_ = true;
+
+    /* Only create a monitor if there is hardware behind it. If the adapter
+     * is not plugged in yet, the watcher does this when it arrives. */
+    if (chip_) {
+      CreateMonitor();
+    }
+  }
+  AnnounceMonitor();
 }
 
 NTSTATUS IndirectDevice::CommitModes(const IDARG_IN_COMMITMODES* args) {
+  std::lock_guard<std::mutex> guard(lock_);
   if (!chip_) {
     return STATUS_DEVICE_NOT_READY;
   }
@@ -352,6 +502,7 @@ NTSTATUS IndirectDevice::CommitModes(const IDARG_IN_COMMITMODES* args) {
 }
 
 NTSTATUS IndirectDevice::AssignSwapChain(const IDARG_IN_SETSWAPCHAIN* args) {
+  std::lock_guard<std::mutex> guard(lock_);
   pipeline_.reset();
   if (!chip_ || !sender_) {
     return STATUS_DEVICE_NOT_READY;
@@ -376,6 +527,7 @@ NTSTATUS IndirectDevice::AssignSwapChain(const IDARG_IN_SETSWAPCHAIN* args) {
 }
 
 void IndirectDevice::UnassignSwapChain() {
+  std::lock_guard<std::mutex> guard(lock_);
   if (sender_) {
     Log("UnassignSwapChain: sent=%llu dropped=%llu failed=%llu",
         sender_->sent(), sender_->dropped(), sender_->failed());
