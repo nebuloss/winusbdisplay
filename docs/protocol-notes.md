@@ -699,3 +699,60 @@ Related: Windows keeps every copy of a package ever added under a fresh
 first implementation had accumulated **59** copies of its two packages this
 way. The installer now removes its own previous copies, and skips the WinUSB
 package entirely when the installed one is already current.
+
+## Brightness: the path that does work
+
+Earlier work concluded brightness was impossible for this display and
+recorded two dead ends. Both were correctly diagnosed and both are still
+dead:
+
+- **DDC/CI**, the protocol that travels along a display cable, needs the
+  graphics card's I2C master. An indirect display is not attached to one.
+  Probing returns `ERROR_NOT_SUPPORTED` and the driver's I2C callbacks are
+  never invoked.
+- **WMI**, the path laptop panels use, needs `monitor.sys` to find a
+  brightness interface on a kernel display driver. There is no kernel driver
+  here to expose one.
+
+The investigation stopped there, and that was the mistake: there is a third
+path, and it was available the whole time.
+
+**The gamma ramp reaches us.** The display stack will hand a driver the
+gamma table that `SetDeviceGammaRamp` sets, through
+`EvtIddCxMonitorSetGammaRamp`, which exists as far back as IddCx 1.2. But it
+only does so if the driver declares it applies one. The driver was setting
+`GammaSupport` to `IDDCX_FEATURE_IMPLEMENTATION_NONE`, which is a promise not
+to, so the callback was never called and the mechanism was invisible to
+exactly the sort of probing that was done.
+
+Declaring `IDDCX_FEATURE_IMPLEMENTATION_SOFTWARE` and applying the table
+during colour conversion makes the panel dim. Verified on hardware.
+
+Two things about applying it:
+
+- **On the source colour, not the encoded result.** That is where a gamma
+  table is defined to act. Applying it afterwards would shift the chroma and
+  colours would drift as brightness changed.
+- **Identically in both conversion paths.** The same rule as the conversion
+  itself, for the same reason: an update that crosses the size threshold
+  takes a different path on consecutive frames, so any disagreement flickers.
+
+A table that only alters bits below the eighth is treated as neutral and
+skipped, since conversion discards them anyway and the neutral case is the
+common one.
+
+`usbdisplayctl`'s companion `brightnessprobe` reports which of the three
+paths each attached monitor answers, so this question never has to be
+settled by argument again.
+
+### What this does not fix
+
+Whether a given application offers a slider is that application's decision.
+Twinkle Tray, the usual choice, only gained a gamma-based mode in
+**1.18.0-beta2**; its current stable release, 1.17.2, contains no such code
+at all and will report this monitor as unsupported no matter what the driver
+does. There is a setting, `useSoftwareBrightnessFallback`, and it is off by
+default even in the versions that have it.
+
+So the driver side is done and any tool that sets a gamma ramp now works.
+Getting a slider in one specific application depends on that application.
