@@ -1,0 +1,34 @@
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# Line endings, which matter more than they sound.
+#
+# A shell script checked out with Windows line endings is rejected outright
+# by Linux: the interpreter on the first line acquires a trailing carriage
+# return and the kernel reports that no such program exists. The error names
+# a file that is plainly present, which is a memorable way to lose an hour.
+# The same applies to the makefile and the build definitions.
+#
+# Windows-only scripts are pinned the other way for the same reason in
+# reverse: a batch file is more reliable with the endings it expects.
+
+* text=auto
+
+*.sh    text eol=lf
+Makefile text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+
+*.bat   text eol=crlf
+*.ps1   text eol=crlf
+*.inf   text eol=crlf
+*.vcxproj text eol=crlf
+
+# Not text, and mangling these corrupts them.
+*.png   binary
+*.ico   binary
+*.zip   binary
+*.exe   binary
+*.dll   binary
+*.lib   binary
+*.cat   binary
+*.edid  binary
