@@ -71,7 +71,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: microsoft/setup-msbuild@v2
+      # Sets up the whole compiler environment, not just the build engine.
+      # The step that follows calls the compiler directly, and the action
+      # that only provides msbuild leaves it off the path entirely.
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Report the build environment
+        shell: pwsh
+        # Printed before anything is attempted. Without this a failure says
+        # only that a step exited non-zero, and every diagnosis becomes a
+        # guess followed by another push.
+        run: |
+          $sdk = 'C:\Program Files (x86)\Windows Kits\10'
+          Write-Host "== SDK versions present =="
+          Get-ChildItem "$sdk\Include" -Directory -EA SilentlyContinue |
+            ForEach-Object { Write-Host "   $($_.Name)" }
+          Write-Host "== compiler =="
+          $cl = Get-Command cl -EA SilentlyContinue
+          Write-Host "   cl: $(if ($cl) { $cl.Source } else { 'NOT ON PATH' })"
+          Write-Host "== shader compiler =="
+          Get-ChildItem "$sdk\bin" -Recurse -Filter 'fxc.exe' -EA SilentlyContinue |
+            ForEach-Object { Write-Host "   $($_.FullName)" }
 
       - name: Build the driver
         shell: pwsh

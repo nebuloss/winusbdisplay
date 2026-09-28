@@ -15,9 +15,8 @@
 # archives, unpack them, and compile with clang.
 #
 #   Microsoft.Windows.WDK.x64          the two stubs and the driver headers
-#   Microsoft.Windows.SDK.CPP          the shared Windows headers
+#   Microsoft.Windows.SDK.CPP          the headers, and the shader compiler
 #   Microsoft.Windows.SDK.CPP.x64      the 64 bit import libraries
-#   Microsoft.Windows.SDK.BuildTools   the shader compiler, run under Wine
 #
 # What this does not do is sign anything or build an installable catalog.
 # Those need Windows tools with no equivalent here, and the install script
@@ -102,7 +101,6 @@ mkdir -p "$WORK"
 fetch_package "Microsoft.Windows.SDK.CPP"        "$KIT_VERSION" "$SDK/sdk-headers"
 fetch_package "Microsoft.Windows.SDK.CPP.x64"    "$KIT_VERSION" "$SDK/sdk-libs"
 fetch_package "Microsoft.Windows.WDK.x64"        "$KIT_VERSION" "$SDK/wdk"
-fetch_package "Microsoft.Windows.SDK.BuildTools" "$KIT_VERSION" "$SDK/buildtools"
 
 # Each package nests its contents differently, so every root is located by
 # finding a file known to be inside it rather than by assuming a shape. The
@@ -165,9 +163,11 @@ fi
 
 SHADER_OUT="$WORK/convert_cs.h"
 if [ ! -f "$SHADER_OUT" ]; then
-  FXC="$(find "$SDK/buildtools" -type f -name 'fxc.exe' -path '*x64*' -print -quit)"
+  # The shader compiler ships with the headers package, not the build tools
+  # one, which carries the packaging and signing utilities instead.
+  FXC="$(find "$SDK/sdk-headers" -type f -name 'fxc.exe' -path '*x64*' -print -quit)"
   if [ -z "$FXC" ]; then
-    echo "error: fxc.exe was not in the build tools package." >&2
+    echo "error: fxc.exe was not found in the SDK package." >&2
     exit 1
   fi
   if ! command -v wine >/dev/null 2>&1; then

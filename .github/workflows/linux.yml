@@ -86,6 +86,18 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             clang lld curl unzip wine64 wine
 
+      - name: Report the toolchain
+        # Printed before anything is attempted, so a failure names the wrong
+        # assumption rather than only an exit code.
+        run: |
+          echo "== compilers =="
+          for t in clang clang-cl lld lld-link ld.lld wine wine64; do
+            printf '   %-10s %s\n' "$t" "$(command -v $t || echo 'not present')"
+          done
+          echo "== versions =="
+          clang --version 2>/dev/null | head -1 || true
+          wine --version 2>/dev/null || true
+
       - name: Cross compile the driver
         working-directory: usbdisplay
         run: |
