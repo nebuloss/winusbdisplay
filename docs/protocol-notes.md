@@ -598,3 +598,104 @@ The same reasoning caught a real bug: the refresh was clearing the pending
 damage for *both* buffers while writing only one, so the unwritten buffer kept
 stale content and it reappeared on the next flip. It now clears only the buffer
 it wrote and alternates, so consecutive refreshes bring both current.
+
+---
+
+# Second implementation, `usbhdmi/`
+
+Findings from the rewrite. Everything above still holds; this is what was
+learned or corrected afterwards.
+
+## The chroma coefficients had to be adjusted by one
+
+The 16 bit constants published with the reference driver cannot be used
+directly by the processor's vector instructions, which need coefficients that
+fit a signed 16 bit lane. Halving them and rounding each independently left
+the red-blue difference row summing to **-1** instead of 0, so every neutral
+grey pixel acquired a faint tint. `kCoeffVb` is rounded the other way on
+purpose to restore the sum, and a static assertion now enforces it for both
+chroma rows.
+
+The luma row deliberately still undershoots: full white converts to 234, not
+the nominal 235. That is what the reference produces and what was confirmed
+against the panel, so it is what we match.
+
+## A zero dirty rectangle count means nothing changed
+
+The metadata documents this explicitly, and it is easy to read the other way.
+Treating "no regions reported" as "assume the whole screen changed" repaints
+everything on exactly the frames where there is nothing to draw. A full
+repaint costs eight slots, sixteen once it has reached both of the adapter's
+internal copies, and the wire is blocked throughout. The symptom is a display
+that lags by hundreds of milliseconds while apparently idle.
+
+## Each region has to reach both copies, and the pair must be atomic
+
+Confirmed again, with a new failure mode. Sending the two halves of the pair
+independently means the first can go out and the second find no free buffer,
+leaving the region in one copy only. The two copies then alternate on screen.
+With a moving mouse pointer this is unmistakable: **the pointer appears in
+two places at once**, the old position refusing to erase.
+
+Both buffers are now taken before either is sent, so a region either reaches
+both copies or is not sent at all. An unsent region stays owed.
+
+Note also that sending the pair back to back costs exactly what sending it a
+frame apart costs, two transfers either way, and delivers the region a frame
+sooner.
+
+## Refinement has to compare converted pixels, not source pixels
+
+The compositor sometimes reports a single region covering the whole screen
+when almost nothing has changed. Comparing against what was last sent and
+transmitting only the part that genuinely differs turns that back into a
+one-slot update.
+
+The comparison runs **after** conversion, which sounds backwards. It is not:
+conversion costs a small fraction of a transfer, so converting a region and
+then discovering most of it was unnecessary is still a large win. More
+importantly it is the only arrangement that works for both conversion paths.
+Comparing source pixels would need a retained copy of the desktop, and the
+GPU path never reads the source into memory the processor can see, so that
+copy could never be kept current.
+
+Two rules make it correct:
+
+- The record is updated only once a region has reached **both** copies.
+  Updating it after the first transfer makes the second look unnecessary,
+  which is how the two-pointer symptom appears even with an atomic pair.
+- Abandoning a region must **not** discard the record. Nothing was sent, so
+  it is still accurate. Discarding it turns a moment of congestion into a
+  lasting one: with nothing to compare against, every later region goes out
+  in full, which causes more congestion.
+
+## Spare capacity is worth spending
+
+The link is idle most of the time, because ordinary desktop damage is far
+below the one-slot threshold. Rather than waiting out a fixed interval before
+the repaint that keeps the panel's signal alive, the driver repaints a band
+whenever the link has gone **completely** quiet, walking it down the screen.
+This keeps the signal alive and repairs anything that somehow went stale.
+
+The condition is "nothing queued and nothing on the wire", not "a buffer is
+free". Queueing speculative work keeps the adapter busy at the cost of making
+the next real update wait behind it, which is the opposite of what spare
+capacity is for.
+
+A band rather than the whole screen: one slot against eight, doubled for the
+pair. A partial repaint is only safe because it is sent twice like everything
+else; sent once it would land in one copy and reintroduce the alternation it
+exists to prevent.
+
+## Windows drops the pixel interface when its package is replaced
+
+Reinstalling the WinUSB package detaches the adapter's display interface, and
+it does not come back on its own: the device has to be disabled and re-enabled
+before Windows republishes the interface the driver looks for. Until then the
+driver reports, accurately but confusingly, that the package is not installed.
+
+Related: Windows keeps every copy of a package ever added under a fresh
+`oemNN` name, and stale copies go on competing to claim the hardware. The
+first implementation had accumulated **59** copies of its two packages this
+way. The installer now removes its own previous copies, and skips the WinUSB
+package entirely when the installed one is already current.
