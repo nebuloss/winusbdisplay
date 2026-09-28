@@ -256,5 +256,5 @@ format.
 - `../docs/troubleshooting.md` — symptoms and their usual causes, including
   several hypotheses that were measured and ruled out, so they are not
   retried.
-- The `legacy-final` tag holds the earlier implementation, whose comments
-  are the primary record of several protocol details.
+- The `legacy-final` tag holds the earlier implementation. It is kept for
+  provenance, not reference: what it knew about the hardware is all here now.

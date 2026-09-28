@@ -17,10 +17,18 @@ reference/   vendor archives, not in git
 scripts/     shared elevation helper
 ```
 
-An earlier implementation lives at the `legacy-final` tag. Its comments are
-the primary record of several protocol details, so reach for it when
-`docs/protocol-notes.md` is ambiguous:
-`git checkout legacy-final -- legacy/`.
+An earlier implementation is frozen at the `legacy-final` tag. **It has been
+mined out; do not go looking there.** Every protocol constant it contains is
+now in this tree, checked mechanically rather than assumed: of ninety, the
+only sixteen not present here are a device interface identifier deliberately
+changed so the two packages cannot claim each other's hardware, two standard
+USB request types, and the DDC/CI addresses, and DDC/CI is settled as
+impossible for an indirect display. There is no protocol fact left in it that
+`docs/protocol-notes.md` does not state better.
+
+It stays for provenance: this is a derived work under GPL-2.0 and that tag is
+where the derivation is visible. Reading it to answer a question about the
+hardware is wasted effort.
 
 `docs/AGENT_PROMPT.md` is the original specification. It is largely accurate
 and wrong in several specific places; `docs/protocol-notes.md` records every
@@ -40,9 +48,10 @@ the display had broken, and with no history there was no way to bisect.
 - `build/` is ignored, as are the vendor archives, which are large and
   separately redistributable.
 - The `reconstructed` branch is the earlier implementation's history from
-  before git existed, replayed from a session transcript. Use it to find
-  which change introduced a symptom. It is a reconstruction, not a
-  recording: trust it for sequence and intent, not exact bytes.
+  before git existed, replayed from a session transcript. It documents how
+  that implementation was arrived at, which is of historical interest only
+  now that the implementation itself is superseded. It is a reconstruction,
+  not a recording: trust it for sequence and intent, not exact bytes.
 
 ## Commands
 

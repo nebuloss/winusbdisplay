@@ -38,6 +38,6 @@ about the hardware and changed the parts that decide performance:
 - There is a test suite, which runs with no hardware attached and which
   found three real faults the first time it was run.
 
-The original is preserved at the `legacy-final` tag, since its comments are
-the primary record of several protocol details. Recover it with
-`git checkout legacy-final -- legacy/`.
+The original is preserved at the `legacy-final` tag, for provenance rather
+than reference: everything it knew about the hardware has been carried across
+and is stated more precisely in `docs/protocol-notes.md`.

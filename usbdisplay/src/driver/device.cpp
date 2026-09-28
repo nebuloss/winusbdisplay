@@ -551,4 +551,4 @@ UINT FillTargetModes(const std::vector<Mode>& modes, UINT capacity,
   return count;
 }
 
-}  // namespace usbhdmi
+}  // namespace usbdisplay

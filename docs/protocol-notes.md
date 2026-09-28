@@ -15,6 +15,16 @@ Three sources were reconciled:
 
 Where they disagree, the hardware wins, then the vendor source, then `ms912x`.
 
+A fourth source, the frozen first implementation at the `legacy-final` tag,
+used to be described as the primary record of several details. **It is
+exhausted and should not be consulted.** Its ninety protocol constants were
+compared against this tree mechanically: seventy-four appear here verbatim,
+and the sixteen that do not are a device interface identifier deliberately
+changed so the old and new packages cannot claim each other's hardware, two
+standard USB request types, and the DDC/CI addresses, which belong to a path
+measured to be impossible for an indirect display. Nothing was left behind,
+so reading it to settle a question about the hardware is wasted effort.
+
 ---
 
 ## Verified on hardware
