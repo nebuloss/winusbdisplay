@@ -46,13 +46,42 @@ if [ "${1:-}" = "--clean" ]; then
   rm -rf "$WORK"
 fi
 
-for tool in clang-cl lld-link curl unzip; do
+# clang-cl and lld-link are the same binaries as clang and lld wearing
+# different names, and the distribution packages do not always install those
+# names. Where they are missing, clang is asked for its Microsoft-compatible
+# mode directly, which is exactly what the other names do.
+if command -v clang-cl >/dev/null 2>&1; then
+  CLANG_CL=(clang-cl)
+elif command -v clang >/dev/null 2>&1; then
+  CLANG_CL=(clang --driver-mode=cl)
+else
+  echo "error: clang is not installed." >&2
+  echo "On Debian or Ubuntu: apt install clang lld curl unzip" >&2
+  exit 1
+fi
+
+if command -v lld-link >/dev/null 2>&1; then
+  LLD_LINK=(lld-link)
+elif command -v ld.lld >/dev/null 2>&1; then
+  LLD_LINK=(ld.lld -flavor link)
+elif command -v lld >/dev/null 2>&1; then
+  LLD_LINK=(lld -flavor link)
+else
+  echo "error: the LLVM linker is not installed." >&2
+  echo "On Debian or Ubuntu: apt install lld" >&2
+  exit 1
+fi
+
+for tool in curl unzip; do
   command -v "$tool" >/dev/null 2>&1 || {
     echo "error: $tool is not installed." >&2
     echo "On Debian or Ubuntu: apt install clang lld curl unzip" >&2
     exit 1
   }
 done
+
+echo "  compiler: ${CLANG_CL[*]}"
+echo "  linker:   ${LLD_LINK[*]}"
 
 # ---------------------------------------------------------------- toolchain
 
@@ -210,12 +239,15 @@ FLAGS=(
 
 for source in "${SOURCES[@]}"; do
   obj="$WORK/obj/$(basename "${source%.cpp}").obj"
-  clang-cl "${FLAGS[@]}" "${DEFINES[@]}" "${INCLUDES[@]}" \
+  "${CLANG_CL[@]}" "${FLAGS[@]}" "${DEFINES[@]}" "${INCLUDES[@]}" \
     /c "$ROOT/$source" /Fo"$obj"
 done
 
+# ntdll is in the list below because the framework stub calls a kernel debug
+# print that lives there and nowhere else. Leaving it out fails at the very
+# last step with a single unresolved symbol.
 log "Linking"
-lld-link \
+"${LLD_LINK[@]}" \
   /DLL /NOLOGO /MACHINE:X64 \
   /OUT:"$OUT/usbdisplaydd.dll" \
   /LIBPATH:"$SDK_UM_LIB" \
@@ -225,6 +257,7 @@ lld-link \
   "$WDF_STUB" \
   d3d11.lib dxgi.lib setupapi.lib hid.lib winusb.lib \
   advapi32.lib ole32.lib user32.lib gdi32.lib kernel32.lib \
+  ntdll.lib \
   libcmt.lib libcpmt.lib libucrt.lib \
   /ENTRY:_DllMainCRTStartup
 

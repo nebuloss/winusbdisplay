@@ -73,71 +73,102 @@ jobs:
 
       - uses: microsoft/setup-msbuild@v2
 
-      - name: Fetch the driver kit
+      - name: Build the driver
         shell: pwsh
-        # From NuGet rather than an installer.
+        # Compiled directly rather than through the project file.
         #
-        # The usual route is a package manager entry that installs the kit
-        # and then a Visual Studio extension that registers the driver build
-        # rules. Both steps are slow, and the second regularly fails on a
-        # fresh machine in ways that are tedious to diagnose. None of it is
-        # necessary: the only things this driver needs from the kit are two
-        # small static stubs and some headers, all of which NuGet serves as
-        # an ordinary zip file. The cross compiled build discovered this and
-        # the same reasoning applies here.
+        # The project file depends on the driver build rules, which arrive
+        # with a Visual Studio extension that has to be installed separately
+        # and is slow and unreliable to install on a fresh machine. None of
+        # it is needed: this driver links against no driver runtime at all,
+        # and wants only two small static stubs from the kit, which NuGet
+        # serves as an ordinary archive. That is what the Linux build
+        # already does, and doing the same here means both paths exercise
+        # the same reasoning rather than one hiding behind tooling.
         run: |
           $ErrorActionPreference = 'Stop'
           $version = '10.0.26100.6584'
           $work = "$env:RUNNER_TEMP\wdk"
           New-Item -ItemType Directory -Path $work -Force | Out-Null
 
+          Write-Host '==> Fetching the driver kit'
           $url = "https://api.nuget.org/v3-flatcontainer/microsoft.windows.wdk.x64/$version/microsoft.windows.wdk.x64.$version.nupkg"
           Invoke-WebRequest -Uri $url -OutFile "$work\wdk.zip"
           Expand-Archive -Path "$work\wdk.zip" -DestinationPath "$work\wdk" -Force
 
-          $iddcx = Get-ChildItem "$work\wdk" -Recurse -Filter 'iddcxstub.lib' | Select-Object -First 1
-          $wdf = Get-ChildItem "$work\wdk" -Recurse -Filter 'WdfDriverStubUm.lib' | Select-Object -First 1
-          if (-not $iddcx -or -not $wdf) { throw 'The driver kit package did not contain the expected stub libraries.' }
-          Write-Host "iddcx stub: $($iddcx.FullName)"
-          Write-Host "wdf stub:   $($wdf.FullName)"
+          # The package carries nine versions of each, so the ones this
+          # driver targets are named rather than guessed at.
+          $iddcxVersion = '1.2'
+          $wdfVersion = '2.33'
+          $iddcxStub = Get-ChildItem "$work\wdk" -Recurse -Filter 'iddcxstub.lib' |
+            Where-Object { $_.FullName -match "iddcx\\$iddcxVersion\\" } | Select-Object -First 1
+          $wdfStub = Get-ChildItem "$work\wdk" -Recurse -Filter 'WdfDriverStubUm.lib' |
+            Where-Object { $_.FullName -match "umdf\\x64\\$wdfVersion\\" } | Select-Object -First 1
+          $iddcxInc = Get-ChildItem "$work\wdk" -Recurse -Directory -Filter $iddcxVersion |
+            Where-Object { $_.FullName -match 'Include.*um\\iddcx' } | Select-Object -First 1
+          $wdfInc = Get-ChildItem "$work\wdk" -Recurse -Directory -Filter $wdfVersion |
+            Where-Object { $_.FullName -match 'Include.*wdf\\umdf' } | Select-Object -First 1
 
-          # The project locates these relative to the kit root, so the
-          # downloaded tree is grafted onto the SDK the runner already has.
-          $sdkRoot = 'C:\Program Files (x86)\Windows Kits\10'
-          $source = Split-Path (Split-Path $iddcx.FullName -Parent) -Parent  # ...\um\x64
-          $source = Split-Path (Split-Path $source -Parent) -Parent          # package lib root
-          Write-Host "copying from $source"
-          Copy-Item "$source\*" "$sdkRoot\Lib" -Recurse -Force -ErrorAction SilentlyContinue
+          foreach ($pair in @(@('iddcxstub.lib', $iddcxStub), @('WdfDriverStubUm.lib', $wdfStub),
+                              @('display extension headers', $iddcxInc), @('framework headers', $wdfInc))) {
+            if (-not $pair[1]) { throw "Could not find $($pair[0]) in the driver kit package." }
+          }
+          Write-Host "    stubs:   $($iddcxStub.Name), $($wdfStub.Name)"
+          Write-Host "    headers: $($iddcxInc.FullName)"
 
-          $includes = Get-ChildItem "$work\wdk" -Recurse -Directory -Filter 'iddcx' |
-            Where-Object { $_.FullName -match 'Include' } | Select-Object -First 1
-          if ($includes) {
-            $incRoot = Split-Path (Split-Path $includes.FullName -Parent) -Parent
-            Write-Host "copying headers from $incRoot"
-            Copy-Item "$incRoot\*" "$sdkRoot\Include" -Recurse -Force -ErrorAction SilentlyContinue
+          Write-Host '==> Compiling the shader'
+          $fxc = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Recurse -Filter 'fxc.exe' |
+            Where-Object { $_.FullName -match 'x64' } | Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $fxc) { throw 'fxc.exe was not found in the Windows SDK.' }
+          & $fxc.FullName /nologo /T cs_5_0 /E main /Vn kConvertComputeShader `
+            /Fh "$work\convert_cs.h" usbdisplay\src\render\convert_cs.hlsl
+          if ($LASTEXITCODE -ne 0) { throw 'The shader failed to compile.' }
+
+          Write-Host '==> Compiling'
+          $out = 'usbdisplay\build\driver\x64\Release'
+          $obj = "$work\obj"
+          New-Item -ItemType Directory -Path $out, $obj -Force | Out-Null
+
+          $sources = @(
+            'src/core/proto.cpp', 'src/core/usb.cpp', 'src/core/open_device.cpp',
+            'src/core/macrosilicon.cpp', 'src/render/rect.cpp', 'src/render/damage.cpp',
+            'src/render/convert.cpp', 'src/render/converter.cpp',
+            'src/driver/log.cpp', 'src/driver/settings.cpp', 'src/driver/sender.cpp',
+            'src/driver/pipeline.cpp', 'src/driver/device.cpp', 'src/driver/driver.cpp'
+          )
+
+          # IDDCX_VERSION_* are not derived from the include path and must be
+          # stated. The kit headers are not clean at high warning levels, so
+          # warnings are not errors here; the tool and the tests cover the
+          # same code with warnings as errors.
+          $common = @(
+            '/nologo', '/std:c++17', '/EHsc', '/O2', '/MT', '/W3',
+            '/DUNICODE', '/D_UNICODE', '/D_WIN32_WINNT=0x0A00',
+            '/DIDDCX_VERSION_MAJOR=1', '/DIDDCX_VERSION_MINOR=2',
+            '/DUMDF_VERSION_MAJOR=2', '/DUMDF_VERSION_MINOR=33',
+            '/DUMDF_USING_NTSTATUS',
+            "/I$($iddcxInc.FullName)", "/I$($wdfInc.FullName)", "/I$work"
+          )
+
+          foreach ($source in $sources) {
+            $name = [System.IO.Path]::GetFileNameWithoutExtension($source)
+            & cl @common /c "usbdisplay\$source" "/Fo$obj\$name.obj"
+            if ($LASTEXITCODE -ne 0) { throw "Failed to compile $source" }
           }
 
-      - name: Find the kit version to build against
-        id: kit
-        shell: pwsh
-        # Read rather than assumed: the runner decides which SDK it carries,
-        # and pinning a version here is exactly what makes a driver build
-        # break for no visible reason when the image is updated.
-        run: |
-          $version = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Include' `
-            -Directory | Where-Object { $_.Name -match '^10\.' } |
-            Sort-Object Name -Descending | Select-Object -First 1
-          if (-not $version) { throw 'No Windows SDK found on this machine.' }
-          Write-Host "Building against $($version.Name)"
-          "version=$($version.Name)" >> $env:GITHUB_OUTPUT
+          Write-Host '==> Linking'
+          & link /nologo /DLL /MACHINE:X64 "/OUT:$out\usbdisplaydd.dll" `
+            "$obj\*.obj" $iddcxStub.FullName $wdfStub.FullName `
+            d3d11.lib dxgi.lib setupapi.lib hid.lib winusb.lib `
+            advapi32.lib ole32.lib user32.lib gdi32.lib kernel32.lib `
+            ntdll.lib
+          if ($LASTEXITCODE -ne 0) { throw 'The driver failed to link.' }
 
-      - name: Build the driver
-        shell: cmd
-        run: |
-          msbuild usbdisplay\src\driver\usbdisplaydd.vcxproj ^
-            /p:Configuration=Release /p:Platform=x64 /p:SignMode=Off ^
-            /p:WindowsTargetPlatformVersion=${{ steps.kit.outputs.version }} ^
-            /v:minimal /nologo
+          # The version in the INF must move for Windows to replace an
+          # installed copy, so it is stamped the way a local build does.
+          $stamp = "$(Get-Date -Format 'MM/dd/yyyy'),$(Get-Date -Format 'HH.mm.ss').0"
+          (Get-Content usbdisplay\inf\usbdisplaydd.inf) -replace '^DriverVer\s*=.*', "DriverVer = $stamp" |
+            Set-Content "$out\usbdisplaydd.inf"
 
       - name: Check what was produced
         shell: pwsh
