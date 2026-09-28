@@ -228,10 +228,16 @@ The risk this creates is a committed artefact drifting from its source, so
 it against the processor path. Change the shader without regenerating and
 the tests say so, and say which script to run.
 
+The installer is built the same way and by the same script, so the complete
+set of binaries a user needs, driver, installer, console tool and brightness
+control, comes off a Linux machine.
+
 What cross compiling cannot do is sign the result or build an installable
-catalog; both need Windows tools with no equivalent. The install script does
-both on the machine where the driver is used, so it only matters if you
-wanted to ship from Linux.
+catalog. Both need Microsoft's own tools, which have no equivalent
+elsewhere, and the catalog one is a 32 bit program, so running it on Linux
+would mean an emulator and a second architecture for the one step where a
+translation layer is least welcome. The release job therefore runs on
+Windows; it is the only part of the project that must.
 
 Neither workflow can test against hardware, so a green build means it
 compiles and the logic holds, never that the panel lights up.

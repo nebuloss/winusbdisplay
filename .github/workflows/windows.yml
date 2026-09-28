@@ -223,13 +223,16 @@ jobs:
 
   release:
     name: release
-    # On a Windows machine only because the two tools that build and sign a
-    # driver catalog are Microsoft's own and have no equivalent elsewhere.
-    # Everything else here, assembling and publishing, would run anywhere.
-    # Running them under emulation on Linux was considered and rejected: the
-    # catalog tool is a 32 bit program, so it would need an emulator and a
-    # second architecture, and signing is the last place to want a
-    # translation layer between the tool and what it produces.
+    # Everything published here, the driver, the installer and the tools, is
+    # also built on Linux, and that path is exercised on every push. Only two
+    # steps genuinely need Windows: generating a driver catalog and signing
+    # it. Those tools are Microsoft's own, have no equivalent elsewhere, and
+    # the catalog one is a 32 bit program, so running it on Linux would mean
+    # an emulator and a second architecture. Signing is the last place to
+    # want a translation layer between a tool and what it produces.
+    #
+    # So a release is assembled where it can be signed. Nothing else about
+    # the project depends on that.
     needs: [tools, driver]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: windows-latest
