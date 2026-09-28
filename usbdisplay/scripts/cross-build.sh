@@ -169,36 +169,57 @@ if [ ! -d "$WDK" ]; then
   rm -f "$WORK/wdk.zip"
 fi
 
-# The kit's headers include each other with inconsistent capitalisation,
-# which is invisible on Windows and fatal on a case sensitive filesystem:
-# wdf.h asks for WudfWdm.h and the file is called wudfwdm.h. xwin solves
-# this for the SDK but never sees the kit, so the same is done here, in both
-# directions so that either spelling resolves.
-if [ ! -f "$WDK/.case-insensitive" ]; then
-  find "$WDK" -type f -name '*.h' -print0 |
-  while IFS= read -r -d '' header; do
-    directory="$(dirname "$header")"
-    name="$(basename "$header")"
-    lower="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')"
-    [ "$name" = "$lower" ] || [ -e "$directory/$lower" ] || \
-      ln -s "$name" "$directory/$lower"
-  done
+# Two things have to be repaired in the kit before a compiler that is not
+# Microsoft's can read it. Both are invisible on Windows and both stop the
+# build dead anywhere else.
+if [ ! -f "$WDK/.prepared" ]; then
+  log "Preparing the driver kit"
 
-  # And the mixed-case spellings the headers actually ask for. Derived by
-  # reading the includes rather than listed, so a new one cannot be missed.
+  # One: the headers include each other with inconsistent capitalisation.
+  # wdf.h asks for WudfWdm.h and the file is wudfwdm.h. The tool that
+  # fetches the compiler and the SDK solves this for them but never sees
+  # the kit, which comes from somewhere else.
+  #
+  # The spellings are derived by reading what the headers actually ask for,
+  # rather than from a list, so one that appears in a later version cannot
+  # be missed. Links are made inside the kit and, for names the kit asks of
+  # the SDK, inside the SDK as well.
   find "$WDK" -type f -name '*.h' -print0 |
   while IFS= read -r -d '' header; do
-    directory="$(dirname "$header")"
     sed -n 's/^[[:space:]]*#[[:space:]]*include[[:space:]]*["<]\([A-Za-z0-9_.]*\.h\)[">].*/\1/p' \
       "$header" |
     while IFS= read -r wanted; do
-      [ -e "$directory/$wanted" ] && continue
-      actual="$(printf '%s' "$wanted" | tr '[:upper:]' '[:lower:]')"
-      [ -f "$directory/$actual" ] || continue
-      ln -s "$actual" "$directory/$wanted" 2>/dev/null || true
+      lower="$(printf '%s' "$wanted" | tr '[:upper:]' '[:lower:]')"
+      [ "$wanted" = "$lower" ] && continue
+
+      # Beside the header that wants it, then in the SDK.
+      for directory in "$(dirname "$header")" \
+                       "$XWIN/sdk/include/um" \
+                       "$XWIN/sdk/include/shared" \
+                       "$XWIN/sdk/include/ucrt"; do
+        [ -e "$directory/$wanted" ] && break
+        if [ -f "$directory/$lower" ]; then
+          ln -s "$lower" "$directory/$wanted" 2>/dev/null || true
+          break
+        fi
+      done
     done
   done
-  touch "$WDK/.case-insensitive"
+
+  # Two: an enumeration is declared ahead of its definition with an
+  # underlying type, and defined without one. The Microsoft compiler
+  # accepts the mismatch; clang rejects it outright, and there is no flag
+  # for it because the check is not a diagnostic that can be switched off.
+  #
+  # Removing the type from the declaration makes the two agree. It changes
+  # nothing about the resulting code: an enumeration of those values has
+  # that underlying type anyway. There is exactly one of these in the
+  # framework headers, and the pattern is precise enough that it cannot
+  # match anything else.
+  find "$WDK" -type f -name '*.h' -print0 |
+  xargs -0 sed -i 's/^\([[:space:]]*enum[[:space:]][[:space:]]*_[A-Za-z0-9_]*\)[[:space:]]*:[[:space:]]*int[[:space:]]*;/\1;/'
+
+  touch "$WDK/.prepared"
 fi
 
 IDDCX_INC="$(find "$WDK" -type d -path "*um/iddcx/$IDDCX_VERSION" -print -quit)"
