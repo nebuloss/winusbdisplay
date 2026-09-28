@@ -46,7 +46,6 @@ SetCompressor /SOLID lzma
 Name "${NAME}"
 OutFile "../build/usbdisplay-setup.exe"
 InstallDir "$PROGRAMFILES64\usbdisplay"
-InstallDirRegKey HKLM "${KEY}" "InstallLocation"
 
 ; Installing a driver package is not something a user-level process may do,
 ; and asking for the rights up front means Windows raises the prompt rather
@@ -69,6 +68,16 @@ VIAddVersionKey "LegalCopyright" "GPL-2.0-only"
 !include "WinMessages.nsh"
 
 !define MUI_ABORTWARNING
+
+; The licence is GPL-2.0 and this is a derived work, so the terms are shown
+; and have to be accepted rather than merely shipped in the directory. A copy
+; is installed alongside the programs as well, because an accept button is
+; not somewhere anyone can go back and read.
+!define MUI_LICENSEPAGE_BUTTON "Agree"
+!define MUI_LICENSEPAGE_TEXT_BOTTOM "This software is free software under the \
+GNU General Public License, version 2. You may use, study, share and modify \
+it. Select Agree to continue."
+
 !define MUI_FINISHPAGE_TEXT "The adapter should appear as a second monitor \
 within a few seconds. Give it a little longer if it was only just plugged \
 in.$\r$\n$\r$\nA brightness control now runs in the notification area, and \
@@ -77,6 +86,7 @@ C:\Windows\Temp\usbdisplaydd.log records every step the driver took and \
 where it stopped."
 
 !insertmacro MUI_PAGE_LICENSE "../../LICENSE"
+!insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_PAGE_FINISH
 
@@ -125,11 +135,47 @@ Function .onInit
 this machine is not running it."
     Abort
   ${EndIf}
+
+  ; Every registry access from here on is to the real HKLM\Software.
+  ;
+  ; Without this they are not. NSIS produces a 32-bit program, and Windows
+  ; quietly redirects a 32-bit process writing to HKLM\Software into
+  ; HKLM\Software\WOW6432Node. Nothing fails; the values simply go somewhere
+  ; else. This was found on a real machine: the entry in the installed
+  ; programs list still showed the previous version, because the new one had
+  ; been written to the other hive, and the old entry was left behind
+  ; pointing at a directory that no longer existed and so could not be
+  ; removed.
+  ;
+  ; Everything else this installs is 64-bit and writes to the real hive, so
+  ; the installer has to agree with it.
+  SetRegView 64
+
+  ; Where a previous version put itself, if it did.
+  ReadRegStr $0 HKLM "${KEY}" "InstallLocation"
+  ${If} $0 != ""
+  ${AndIf} ${FileExists} "$0\*.*"
+    StrCpy $INSTDIR $0
+  ${EndIf}
+FunctionEnd
+
+Function un.onInit
+  ; The uninstaller is a separate program and gets none of the above.
+  SetRegView 64
 FunctionEnd
 
 Section "install"
   DetailPrint "Making room..."
   !insertmacro StopTheTray
+
+  ; An entry written by a version that landed in the wrong hive, and one
+  ; written by a version that installed itself somewhere else entirely.
+  ; Neither can be removed by the user once its files are gone, so an
+  ; upgrade has to clear up after its own past rather than accumulate
+  ; entries that do nothing but fail.
+  SetRegView 32
+  DeleteRegKey HKLM "${KEY}"
+  SetRegView 64
 
   SetOutPath "$INSTDIR"
 
