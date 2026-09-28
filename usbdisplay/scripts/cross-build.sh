@@ -175,15 +175,30 @@ fi
 if [ ! -f "$WDK/.prepared" ]; then
   log "Preparing the driver kit"
 
-  # One: the headers include each other with inconsistent capitalisation.
-  # wdf.h asks for WudfWdm.h and the file is wudfwdm.h. The tool that
-  # fetches the compiler and the SDK solves this for them but never sees
-  # the kit, which comes from somewhere else.
+  # One: nothing here agrees on capitalisation. The kit's headers ask each
+  # other for names that differ from the files on disk, they ask the SDK
+  # for names that differ too, and this project's own sources use a third
+  # spelling again. On Windows none of that matters; on a case sensitive
+  # filesystem every one of them is a missing file.
   #
-  # The spellings are derived by reading what the headers actually ask for,
-  # rather than from a list, so one that appears in a later version cannot
-  # be missed. Links are made inside the kit and, for names the kit asks of
-  # the SDK, inside the SDK as well.
+  # Rather than chase who asks for what, every header is given a lowercase
+  # alias, so any request that differs only in case resolves. That covers
+  # the callers that cannot be seen from here, which is what the previous
+  # attempt got wrong: it read the includes in the kit's own headers and so
+  # never learned that this project asks for iddcx.h while the file is
+  # called IddCx.h.
+  find "$WDK" -type f -name '*.h' -print0 |
+  while IFS= read -r -d '' header; do
+    directory="$(dirname "$header")"
+    name="$(basename "$header")"
+    lower="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')"
+    [ "$name" = "$lower" ] && continue
+    [ -e "$directory/$lower" ] || ln -s "$name" "$directory/$lower"
+  done
+
+  # And the reverse, for names the kit asks of the SDK: there the file is
+  # lowercase and the request is not. The SDK is not ours to reorganise, so
+  # only the specific spellings asked for are added.
   find "$WDK" -type f -name '*.h' -print0 |
   while IFS= read -r -d '' header; do
     sed -n 's/^[[:space:]]*#[[:space:]]*include[[:space:]]*["<]\([A-Za-z0-9_.]*\.h\)[">].*/\1/p' \
@@ -191,8 +206,6 @@ if [ ! -f "$WDK/.prepared" ]; then
     while IFS= read -r wanted; do
       lower="$(printf '%s' "$wanted" | tr '[:upper:]' '[:lower:]')"
       [ "$wanted" = "$lower" ] && continue
-
-      # Beside the header that wants it, then in the SDK.
       for directory in "$(dirname "$header")" \
                        "$XWIN/sdk/include/um" \
                        "$XWIN/sdk/include/shared" \
