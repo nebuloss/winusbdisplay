@@ -11,7 +11,7 @@ MacroSilicon's own GPL-2.0 Linux sources. **Do not relicense or accept
 permissively licensed reimplementations without revisiting that decision.**
 
 ```
-usbhdmi/    the active project
+usbdisplay/    the active project
 legacy/     the frozen first implementation
 docs/       protocol notes, troubleshooting, the original task specification
 reference/  vendor archives, not in git
@@ -43,12 +43,12 @@ the display had broken, and with no history there was no way to bisect.
 ## Commands
 
 ```
-usbhdmi\scripts\build-tool.bat         # usbhdmictl -> usbhdmi\build\
-usbhdmi\scripts\test.bat [filter]      # build and run the tests
-usbhdmi\scripts\build-driver.bat       # the driver
-usbhdmi\scripts\install.ps1            # both packages, elevated
-usbhdmi\scripts\reattach.ps1           # after the USB package is replaced
-usbhdmi\scripts\purge.ps1              # remove everything
+usbdisplay\scripts\build-tool.bat         # usbdisplayctl -> usbdisplay\build\
+usbdisplay\scripts\test.bat [filter]      # build and run the tests
+usbdisplay\scripts\build-driver.bat       # the driver
+usbdisplay\scripts\install.ps1            # both packages, elevated
+usbdisplay\scripts\reattach.ps1           # after the USB package is replaced
+usbdisplay\scripts\purge.ps1              # remove everything
 
 scripts\elev.ps1 -Start                # one UAC prompt per session
 scripts\elev.ps1 -Script <abs path>
@@ -66,23 +66,23 @@ The tests run with no hardware, including the protocol sequences, which talk
 to a stand-in that records what was sent:
 
 ```
-usbhdmi\scripts\test.bat
-usbhdmi\scripts\test.bat planner      # one group
+usbdisplay\scripts\test.bat
+usbdisplay\scripts\test.bat planner      # one group
 ```
 
 The tool is the hardware harness. Nothing below needs a driver installed
 except the last line:
 
 ```
-usbhdmi\build\usbhdmictl.exe list | info | edid | modes | timings
-usbhdmi\build\usbhdmictl.exe plan            # planner decisions, explained
-usbhdmi\build\usbhdmictl.exe selftest        # is this binary sane here
-usbhdmi\build\usbhdmictl.exe --dump out testpattern   # offline pipeline
-usbhdmi\build\usbhdmictl.exe benchsizes      # re-measure the cost model
-usbhdmi\build\usbhdmictl.exe testpattern --bars
+usbdisplay\build\usbdisplayctl.exe list | info | edid | modes | timings
+usbdisplay\build\usbdisplayctl.exe plan            # planner decisions, explained
+usbdisplay\build\usbdisplayctl.exe selftest        # is this binary sane here
+usbdisplay\build\usbdisplayctl.exe --dump out testpattern   # offline pipeline
+usbdisplay\build\usbdisplayctl.exe benchsizes      # re-measure the cost model
+usbdisplay\build\usbdisplayctl.exe testpattern --bars
 ```
 
-The driver writes `C:\Windows\Temp\usbhdmidd.log`. **Read it first.** The
+The driver writes `C:\Windows\Temp\usbdisplaydd.log`. **Read it first.** The
 Windows event log will generally only say "problem code 10".
 
 ## The one non-obvious thing that unblocks everything
@@ -99,18 +99,21 @@ signing and no reboot. Only pixels need WinUSB.
 ## Architecture
 
 ```
-usbhdmi/src/core/     proto.h        wire constants and packed structs, no logic
-                      usb.*          HID control handle plus WinUSB bulk handle
-                      chip.*         all device logic, owns the control lock
-usbhdmi/src/render/   rect.*         rectangles and the cost model
+usbdisplay/src/core/  display_device.h  the seam: what the rest of the driver
+                                        may assume about any adapter
+                      macrosilicon.*    the MS912x/MS913x implementation
+                      proto.h           its wire constants, no logic
+                      mode.h            device independent mode and connector
+                      usb.*             HID control plus WinUSB bulk handles
+usbdisplay/src/render/ rect.*        rectangles and the cost model interface
                       damage.*       the planner, and refinement
-                      convert.*      processor conversion and framing
-                      gpu_convert.*  the compute shader path
-usbhdmi/src/driver/   driver.cpp     the display callbacks
+                      convert.*      conversion kernels and framing
+                      converter.*    RegionConverter, processor and graphics
+usbdisplay/src/driver/   driver.cpp     the display callbacks
                       device.*       adapter, monitor, mode list
                       pipeline.*     the frame loop
                       sender.*       the thread that owns the USB write
-usbhdmi/tests/        runs without hardware
+usbdisplay/tests/        runs without hardware
 ```
 
 **The two halves of the adapter live on different USB interfaces**, and
@@ -126,6 +129,28 @@ WinUSB dispatcher. It reaches the hardware through user mode handles, which
 works because these drivers run in a user mode host process. Both packages
 must be installed.
 
+## Adding support for another adapter
+
+`core/display_device.h` is the seam, and it is the only file to read first.
+Everything above it, about four fifths of the code, is about Windows and
+about deciding what to send; everything below is one chip.
+
+To add a second one: implement `DisplayDevice`, and add a probe to
+`OpenDisplayDevice` in `macrosilicon.cpp`. Nothing else in the tree should
+need to change, and if it does, that is a bug in the seam rather than in the
+new device.
+
+The interface carries a few things that look like they belong elsewhere, and
+they are there because they differ per device and the frame loop cannot be
+written without them: what a transfer costs, how many times a region has to
+be sent, the alignment the hardware demands, and the wire format. Each was a
+MacroSilicon fact hardcoded somewhere it did not belong.
+
+`render/rect.h` defines `TransferCostModel`, which `DisplayDevice` extends.
+The damage planner merges by comparing costs and never learns what the unit
+is, which is what keeps it device independent. `tests/test_damage.cpp` proves
+that with two deliberately different models.
+
 ## Settled questions, do not re-litigate
 
 Each cost real investigation; the evidence is in `docs/protocol-notes.md`.
@@ -134,7 +159,7 @@ Each cost real investigation; the evidence is in `docs/protocol-notes.md`.
   slots: up to ~520 KB is one slot, the next byte costs a whole extra one. So
   a 2 KB update and a 490 KB update cost the same, and ordinary desktop
   damage runs at full rate. Only full repaints are slow. Re-measure with
-  `usbhdmictl benchsizes`.
+  `usbdisplayctl benchsizes`.
 - **Every region must reach both of the adapter's internal copies.** It
   alternates between them on every transfer, so a region sent once lands in
   one and leaves the other stale, and the two alternate visibly: with a
@@ -210,7 +235,7 @@ Each cost real investigation; the evidence is in `docs/protocol-notes.md`.
   plain `10_ARM64` (use `10_RS3_ARM64`). `signtool` needs `/sm` to see a
   certificate in the machine store.
 - `pnputil` keeps the old binary if `DriverVer` has not changed. Always
-  install the **build-stamped** INF from `usbhdmi/build/driver/...`.
+  install the **build-stamped** INF from `usbdisplay/build/driver/...`.
 - `pnputil` exit code 3010 means "installed, restart to tidy up". Success.
 - Windows keeps every copy of a package ever added under a fresh `oemNN`
   name. Stale copies compete to claim the hardware; the first driver left 59

@@ -601,7 +601,7 @@ it wrote and alternates, so consecutive refreshes bring both current.
 
 ---
 
-# Second implementation, `usbhdmi/`
+# Second implementation, `usbdisplay/`
 
 Findings from the rewrite. Everything above still holds; this is what was
 learned or corrected afterwards.

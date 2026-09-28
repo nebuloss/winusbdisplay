@@ -1,0 +1,98 @@
+; SPDX-License-Identifier: GPL-2.0-only
+;
+; Indirect display driver for MacroSilicon MS912x / MS913x USB display
+; adapters.
+;
+; The structure deliberately mirrors Windows' own indirect display package,
+; which is known good. The parts that matter and are easy to get wrong:
+;
+;   ClassVer = 2.0            required for the Display class
+;   Include/Needs wudfrd.inf  sets up the user mode reflector properly; hand
+;                             writing the service entry is not enough
+;   UpperFilters IndirectKmd  required by the indirect display stack
+;   Security descriptor       the device has to be openable by the OS
+;
+; This is a root enumerated software device rather than a driver bound to the
+; adapter's USB interface, which is how every shipping indirect display
+; driver is built. The stack needs the IndirectKmd filter, and that turns out
+; to be incompatible with the framework's WinUSB dispatcher: a driver bound to
+; the USB interface cannot create its USB target and never starts.
+;
+; It reaches the adapter from user mode instead, exactly as the console tool
+; does: control over the HID interface, pixels over the WinUSB interface bound
+; by inf\usbdisplay_winusb.inf. BOTH packages have to be installed.
+
+[Version]
+Signature   = "$Windows NT$"
+ClassGUID   = {4D36E968-E325-11CE-BFC1-08002BE10318}
+Class       = Display
+ClassVer    = 2.0
+Provider    = %ManufacturerName%
+CatalogFile = usbdisplaydd.cat
+DriverVer   = 01/01/2026,2.0.0.0
+PnpLockdown = 1
+
+[ControlFlags]
+PreConfigureDriver = *
+
+[DestinationDirs]
+UMDriverCopy = 13
+
+[SourceDisksNames]
+1 = %DiskName%
+
+[SourceDisksFiles]
+usbdisplaydd.dll = 1
+
+[Manufacturer]
+%ManufacturerName% = Standard, NTamd64, NTarm64
+
+[Standard.NTamd64]
+%UsbDisplay.DeviceDesc% = UsbDisplay_Install, root\usbdisplaydd
+
+[Standard.NTarm64]
+%UsbDisplay.DeviceDesc% = UsbDisplay_Install, root\usbdisplaydd
+
+[UsbDisplay_Install.NT]
+CopyFiles = UMDriverCopy
+Include   = wudfrd.inf
+Needs     = WUDFRD.NT
+
+[UsbDisplay_Install.NT.hw]
+AddReg    = UsbDisplay_HardwareDeviceSettings
+Include   = wudfrd.inf
+Needs     = WUDFRD.NT.HW
+
+[UsbDisplay_Install.NT.Services]
+Include   = wudfrd.inf
+Needs     = WUDFRD.NT.Services
+
+[UsbDisplay_Install.NT.Wdf]
+UmdfService                = usbdisplaydd, UsbDisplay_Install
+UmdfServiceOrder           = usbdisplaydd
+UmdfKernelModeClientPolicy = AllowKernelModeClients
+UmdfHostProcessSharing     = ProcessSharingDisabled
+; Impersonation rather than Identification: the host process has to open the
+; HID and WinUSB device interfaces belonging to the adapter.
+UmdfImpersonationLevel     = Impersonation
+
+[UsbDisplay_Install]
+; Must match the version the binary was built against, in
+; src\driver\usbdisplaydd.vcxproj, not whatever an in-box package happens to use.
+UmdfLibraryVersion = 2.33.0
+ServiceBinary      = %13%\usbdisplaydd.dll
+UmdfExtensions     = IddCx0102
+
+[UMDriverCopy]
+usbdisplaydd.dll,,,0x100
+
+[UsbDisplay_HardwareDeviceSettings]
+HKR,, "UpperFilters", %REG_MULTI_SZ%, "IndirectKmd"
+HKR,, Security, , "D:P(A;;GA;;;WD)"
+
+[Strings]
+REG_MULTI_SZ = 0x00010000
+
+ManufacturerName   = "usbdisplay"
+UsbDisplay.DeviceDesc = "USB Display (indirect display driver)"
+DiskName           = "USB Display Installation Disk"

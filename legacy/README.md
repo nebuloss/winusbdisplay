@@ -6,7 +6,7 @@ It is here for two reasons.
 
 1. **It works, or at least it did.** An earlier revision drove the panel
    correctly. Later changes regressed it and the regression was never
-   isolated, which is what prompted the rewrite in `../usbhdmi`. The proven
+   isolated, which is what prompted the rewrite in `../usbdisplay`. The proven
    parts, chiefly the control plane and the wire framing, were carried across
    rather than rediscovered.
 2. **It is the written record of the protocol.** Almost every comment in

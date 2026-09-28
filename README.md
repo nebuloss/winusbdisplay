@@ -3,10 +3,10 @@
 Open Windows drivers for MacroSilicon MS912x / MS913x USB display adapters,
 the cheap dongles that turn a USB port into an HDMI or VGA output.
 
-The active project is **[`usbhdmi/`](usbhdmi/README.md)**. Start there.
+The active project is **[`usbdisplay/`](usbdisplay/README.md)**. Start there.
 
 ```
-usbhdmi/    the driver, the tool and the tests. This is the project.
+usbdisplay/    the driver, the tool and the tests. This is the project.
 legacy/     the first implementation, frozen. Kept because it is the
             written record of how the hardware behaves, and because it
             can still be built and run for comparison.
