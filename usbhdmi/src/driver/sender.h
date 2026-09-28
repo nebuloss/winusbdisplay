@@ -35,10 +35,12 @@
 
 namespace usbhdmi {
 
-/* Two buffers is enough to keep the bus busy while the next update is being
- * converted, and more would only add latency: the adapter, not the queue, is
- * the bottleneck. */
-constexpr size_t kTransferSlots = 2;
+/* Every region goes out twice, once for each of the adapter's two internal
+ * copies of the picture, so two buffers is exactly one region and the
+ * producer stalls on every single update. Four lets one region be queued
+ * while another is on the wire. More than that would only add latency: the
+ * adapter, not the queue, is the bottleneck. */
+constexpr size_t kTransferSlots = 4;
 
 class FrameSender {
  public:
@@ -58,6 +60,15 @@ class FrameSender {
 
   /* Hands a buffer back without sending it. */
   void Release(std::vector<uint8_t>* buffer);
+
+  /* True when nothing is queued and nothing is on the wire.
+   *
+   * Used to decide whether the link has spare capacity. Deliberately "the
+   * queue is completely empty" rather than "a buffer is free": filling the
+   * queue with speculative work would keep the adapter busy at the cost of
+   * making every real update wait behind it, which is the opposite of what
+   * spare capacity is for. */
+  bool Idle();
 
   uint64_t sent() const { return sent_; }
   uint64_t dropped() const { return dropped_; }
@@ -85,6 +96,7 @@ class FrameSender {
   std::condition_variable work_cv_;
   std::thread worker_;
   bool running_ = false;
+  bool busy_ = false;  /* a transfer is on the wire right now */
 
   std::atomic<uint64_t> sent_{0};
   std::atomic<uint64_t> dropped_{0};

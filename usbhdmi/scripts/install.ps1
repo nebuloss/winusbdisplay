@@ -97,12 +97,47 @@ function Publish-Package([string]$stage, [string]$infName) {
     }
 }
 
+# Reinstalling this package detaches the adapter's pixel interface, and it
+# does not come back on its own: the device has to be cycled before Windows
+# republishes the interface the driver looks for. Since the package almost
+# never changes, skip it when the installed copy is already current. This is
+# not a micro-optimisation, it is the difference between reinstalling the
+# display driver and having to repair the USB binding afterwards.
+function Test-WinUsbPackageCurrent {
+    $wanted = (Select-String -Path (Join-Path $root 'inf\usbhdmi_winusb.inf') `
+        -Pattern '^DriverVer').Line
+    $blocks = (pnputil /enum-drivers | Out-String) -split "`r?`n`r?`n"
+    foreach ($block in $blocks) {
+        if ($block -match 'usbhdmi_winusb\.inf') {
+            $version = [regex]::Match($wanted, '[\d/]+,([\d.]+)').Groups[1].Value
+            if ($version -and $block -match [regex]::Escape($version)) { return $true }
+        }
+    }
+    return $false
+}
+
+function Reset-PixelInterfaces {
+    Get-PnpDevice | Where-Object {
+        $_.InstanceId -match 'VID_345F.*MI_03' -or $_.InstanceId -match 'VID_534D'
+    } | ForEach-Object {
+        Disable-PnpDevice -InstanceId $_.InstanceId -Confirm:$false -ErrorAction SilentlyContinue
+        Enable-PnpDevice -InstanceId $_.InstanceId -Confirm:$false -ErrorAction SilentlyContinue
+    }
+    Start-Sleep -Seconds 2
+}
+
 Write-Host '=== 1. raw USB access to the pixel interface ==='
-$stage1 = Join-Path $root 'build\package-winusb'
-if (Test-Path $stage1) { Remove-Item $stage1 -Recurse -Force }
-New-Item -ItemType Directory -Path $stage1 | Out-Null
-Copy-Item (Join-Path $root 'inf\usbhdmi_winusb.inf') $stage1
-Publish-Package $stage1 'usbhdmi_winusb.inf'
+if (Test-WinUsbPackageCurrent) {
+    Write-Host '    already installed and current, leaving it alone'
+} else {
+    $stage1 = Join-Path $root 'build\package-winusb'
+    if (Test-Path $stage1) { Remove-Item $stage1 -Recurse -Force }
+    New-Item -ItemType Directory -Path $stage1 | Out-Null
+    Copy-Item (Join-Path $root 'inf\usbhdmi_winusb.inf') $stage1
+    Publish-Package $stage1 'usbhdmi_winusb.inf'
+    Write-Host '    cycling the adapter so the interface is republished'
+    Reset-PixelInterfaces
+}
 
 Write-Host ''
 Write-Host '=== 2. display driver ==='

@@ -19,9 +19,10 @@ namespace {
  * that the acquire loop never looks stalled. */
 constexpr unsigned kBufferWaitMs = 10;
 
-/* The panel drops its signal after a second or two of silence. */
-constexpr unsigned long long kIdleRefreshMs = 1200;
-
+/* The panel drops its signal after a second or two of silence, which is why
+ * the repaint below exists at all. There is deliberately no interval: it runs
+ * whenever the link is idle, so the spare capacity is used rather than
+ * waited out. */
 /* Rows per keepalive update. At 1920 wide this is about 490 KB, which is
  * just inside one of the adapter's slots, so it is as large as it can be
  * without costing a second one. */
@@ -249,50 +250,61 @@ bool Pipeline::SendRegion(ID3D11Texture2D* source, const Rect& rect,
     return true;
   }
 
-  /* Twice, back to back.
+  /* Twice, back to back, and both buffers are taken before either is sent.
    *
    * The adapter keeps two copies of the picture and alternates between them
    * on every transfer, so a region carried by a single transfer lands in one
    * copy and leaves the other holding what was there before. The two then
-   * alternate on screen, which is seen as the picture blinking between the
-   * old and new content whenever anything moves.
+   * alternate on screen. With a moving mouse pointer that is unmistakable:
+   * the pointer appears in two places at once, the old position refusing to
+   * erase.
    *
-   * Sending the same bytes twice in a row puts the region in both copies
-   * without the driver having to know which copy is next, which is a thing
-   * nothing keeps reliably in step. It is also no more expensive than the
-   * obvious alternative of repeating last frame's region on the next
-   * transfer: the same two transfers either way, except that this way the
-   * region is complete one frame sooner. */
-  for (int attempt = 0; attempt < 2; ++attempt) {
-    std::vector<uint8_t>* transfer = sender_->Acquire(kBufferWaitMs);
-    if (!transfer) {
-      /* No buffer free. The damage stays owed, so a later frame carries it,
-       * and the caller abandons the rest of this frame so that nothing
-       * arrives ahead of what should have preceded it.
+   * Which is why the pair is all or nothing. Sending the first and then
+   * discovering there is no buffer for the second produces exactly that
+   * symptom, occasionally, under load. Taking both up front means the region
+   * either reaches both copies or is not sent at all, and an unsent region
+   * stays owed and goes out later.
+   *
+   * Sending the same bytes twice is also no more expensive than the obvious
+   * alternative of repeating last frame's region on the next transfer: the
+   * same two transfers either way, except that this way the region is
+   * complete a frame sooner. */
+  std::vector<uint8_t>* transfers[2] = {nullptr, nullptr};
+  for (int i = 0; i < 2; ++i) {
+    transfers[i] = sender_->Acquire(kBufferWaitMs);
+    if (!transfers[i]) {
+      for (int j = 0; j < i; ++j) {
+        sender_->Release(transfers[j]);
+      }
+      /* The damage stays owed, so a later frame carries it, and the caller
+       * abandons the rest of this frame so nothing arrives ahead of what
+       * should have preceded it.
        *
        * Note what is deliberately not done here: the record of what the
        * panel is showing is left alone rather than thrown away. It still
-       * describes this region correctly, because the record is only updated
-       * once a region has reached both of the adapter's copies, and this one
-       * has reached at most one. Discarding it instead turns a moment of
-       * congestion into a lasting one: with no record there is nothing to
-       * compare against, so every later region is sent in full, which causes
-       * more congestion, which discards the record again. */
+       * describes this region correctly, because nothing was sent.
+       * Discarding it would turn a moment of congestion into a lasting one,
+       * since with no record to compare against every later region is sent
+       * in full, which causes more congestion. */
       sender_->CountDropped();
       return false;
     }
+  }
 
-    const size_t length = FrameSubRegion(transfer->data(), transfer->size(),
+  for (int i = 0; i < 2; ++i) {
+    const size_t length = FrameSubRegion(transfers[i]->data(),
+                                         transfers[i]->size(),
                                          scratch_.data(), rect, changed);
     if (length == 0) {
-      sender_->Release(transfer);
+      for (int j = i; j < 2; ++j) {
+        sender_->Release(transfers[j]);
+      }
       Log("pipeline: could not frame %d,%d %dx%d inside %d,%d %dx%d",
           changed.x1, changed.y1, changed.width(), changed.height(), rect.x1,
           rect.y1, rect.width(), rect.height());
       return false;
     }
-
-    sender_->Submit(transfer, length);
+    sender_->Submit(transfers[i], length);
     ++regions_sent_;
   }
 
@@ -365,11 +377,14 @@ void Pipeline::ProcessFrame(const IDARG_OUT_RELEASEANDACQUIREBUFFER& buffer) {
     }
   }
 
-  /* No damage information at all means the compositor is not telling us what
-   * changed, so the whole screen has to be assumed dirty. The comparison in
-   * SendRegion usually rescues this. */
-  if (!have_damage) {
-    damage_.MarkAll();
+  /* No regions at all means the desktop did not change, which the compositor
+   * documents explicitly. It emphatically does not mean "assume everything
+   * changed": doing that repaints the whole screen on every such frame, and
+   * a full repaint costs sixteen times an ordinary update and blocks the
+   * wire while it goes out. The result is a display that lags behind by
+   * hundreds of milliseconds precisely when there is nothing to draw. */
+  if (!have_damage && damage_.Empty()) {
+    return;
   }
 
   Rect planned[kMaxTransfersPerFrame];
@@ -388,7 +403,7 @@ void Pipeline::ProcessFrame(const IDARG_OUT_RELEASEANDACQUIREBUFFER& buffer) {
 }
 
 void Pipeline::RefreshIdle() {
-  if (!last_surface_ || !settings_.idle_refresh) {
+  if (!last_surface_) {
     return;
   }
 
@@ -470,7 +485,17 @@ void Pipeline::Run() {
         RefreshSettings();
       }
 
-      if (last_send_ms_ != 0 && now - last_send_ms_ >= kIdleRefreshMs) {
+      /* Nothing new to draw. Rather than waiting for a timer, repaint a
+       * band whenever the link has gone completely quiet: the capacity is
+       * there and unused, and spending it walks a repaint down the screen
+       * continuously, which keeps the panel's signal alive and repairs any
+       * region that somehow went stale.
+       *
+       * The condition is "nothing queued and nothing on the wire", not "a
+       * buffer is free". Queueing speculative work would keep the adapter
+       * busy at the cost of making the next real update wait behind it,
+       * which is the opposite of what spare capacity is for. */
+      if (last_send_ms_ != 0 && settings_.idle_refresh && sender_->Idle()) {
         RefreshIdle();
       }
 

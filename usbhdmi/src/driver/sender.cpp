@@ -100,6 +100,16 @@ void FrameSender::Release(std::vector<uint8_t>* buffer) {
   free_cv_.notify_one();
 }
 
+bool FrameSender::Idle() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  for (const Slot& slot : slots_) {
+    if (slot.queued || slot.owned_by_producer) {
+      return false;
+    }
+  }
+  return !busy_;
+}
+
 void FrameSender::Worker() {
   for (;;) {
     Slot* slot = nullptr;
@@ -132,6 +142,7 @@ void FrameSender::Worker() {
         }
         continue;
       }
+      busy_ = true;
     }
 
     if (!chip_->SendFrame(slot->data.data(), slot->length)) {
@@ -145,6 +156,7 @@ void FrameSender::Worker() {
     {
       std::lock_guard<std::mutex> lock(mutex_);
       slot->queued = false;
+      busy_ = false;
     }
     free_cv_.notify_one();
   }
