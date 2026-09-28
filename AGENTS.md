@@ -159,21 +159,22 @@ through function tables, so the only things the link needs from the driver
 kit are two small static stubs, `iddcxstub.lib` and `WdfDriverStubUm.lib`,
 together about 600 KB.
 
-Everything else is the ordinary Windows SDK, and all of it, kit included, is
-published on NuGet, which is a plain HTTPS file server serving zip files:
+Everything else is the ordinary Microsoft toolchain, and
+`scripts/cross-build.sh` fetches it from two places:
 
-```
-Microsoft.Windows.WDK.x64          the stubs and the driver headers
-Microsoft.Windows.SDK.CPP          the shared Windows headers
-Microsoft.Windows.SDK.CPP.x64      the 64 bit import libraries
-Microsoft.Windows.SDK.BuildTools   the shader compiler
-```
+- **xwin** for the compiler's own runtime and the Windows SDK. Those do not
+  come from a package feed: they are distributed through the Visual Studio
+  installer, and xwin is the tool that reads that manifest and lays the
+  result out for a case sensitive filesystem. Rolling this by hand was
+  tried and fails at the first include, because Windows headers include
+  each other with inconsistent capitalisation and the compiler's own
+  runtime headers, `excpt.h` and its neighbours, are not in the SDK at all.
+- **NuGet** for the driver kit, which is not part of that feed but is
+  published as an ordinary archive.
 
-`scripts/cross-build.sh` downloads those and compiles with `clang-cl` and
-`lld-link`. Two details it handles that are easy to trip over: Windows
-headers include each other with inconsistent capitalisation, which only
-matters on a case sensitive filesystem, and `IDDCX_VERSION_MAJOR` and its
-companions are not derived from the include path and must be defined.
+It then compiles with `clang-cl` and `lld-link`. One detail that is easy to
+trip over: `IDDCX_VERSION_MAJOR` and its companions are not derived from the
+include path and must be defined explicitly.
 
 ### The compiled shader is committed
 

@@ -77,9 +77,19 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install the toolchain
+        # Four ordinary packages. The Microsoft compiler runtime, the
+        # Windows SDK and the driver kit are all downloaded by the build
+        # script itself.
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends clang lld curl unzip
+
+      - name: Cache the downloaded Microsoft toolchain
+        # It is a few hundred megabytes and does not change between runs.
+        uses: actions/cache@v4
+        with:
+          path: usbdisplay/build/cross/toolchain
+          key: msvc-toolchain-x86_64-desktop-v1
 
       - name: Report the toolchain
         # Printed before anything is attempted, so a failure names the wrong

@@ -3,168 +3,146 @@
 #
 # Builds the Windows driver from Linux.
 #
-# This works, and the reason it works is worth stating, because the received
-# wisdom is that it cannot be done. A user-mode driver of this kind is an
-# ordinary Windows DLL. It links against no driver runtime at all: both the
-# framework and the display extension are bound at load time through function
-# tables, so the only things needed from the driver kit are two small static
-# stubs and a handful of headers. Everything else is the ordinary Windows SDK.
+# This works, and it is worth saying why, because the received wisdom is
+# that it cannot be done. A user-mode driver of this kind is an ordinary
+# Windows library. It links against no driver runtime at all: both the
+# framework and the display extension are bound at load time through
+# function tables, so the only things needed from the driver kit are two
+# small static stubs and a handful of headers.
 #
-# All of it is published on NuGet, which is a plain HTTPS file server, and a
-# NuGet package is a zip file. So the whole toolchain is: download four
-# archives, unpack them, and compile with clang.
+# Everything else is the ordinary Microsoft toolchain, which comes from two
+# places:
 #
-#   Microsoft.Windows.WDK.x64          the two stubs and the driver headers
-#   Microsoft.Windows.SDK.CPP          the headers, and the shader compiler
-#   Microsoft.Windows.SDK.CPP.x64      the 64 bit import libraries
+#   xwin    the compiler's own runtime and the Windows SDK, downloaded from
+#           Microsoft's installer feed and laid out for a case sensitive
+#           filesystem. That last part matters more than it sounds: Windows
+#           headers include each other with inconsistent capitalisation, so
+#           without the symlinks it adds, the first include fails.
 #
-# The shader is not compiled here. Its compiler runs only on Windows, and
+#   NuGet   the driver kit, which is not part of that feed but is published
+#           as an ordinary archive.
+#
+# The shader is not compiled here. Its compiler runs only on Windows and
 # Direct3D 11 accepts no other form of it, so the compiled bytecode is
-# committed to the tree instead: see src/render/generated/convert_cs.h.
-# That removes the only reason this script would have needed an emulator.
+# committed to the tree instead; see src/render/generated/convert_cs.h.
 #
-# What this does not do is sign anything or build an installable catalog.
+# What this does not do is sign anything or produce an installable catalog.
 # Those need Windows tools with no equivalent here, and the install script
 # does both on the machine where the driver is actually used.
 #
 #   ./cross-build.sh            build
-#   ./cross-build.sh --clean    start from nothing
+#   ./cross-build.sh --clean    discard the downloaded toolchain first
 
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 WORK="$ROOT/build/cross"
-SDK="$WORK/sdk"
+XWIN="$WORK/toolchain"
+WDK="$WORK/wdk"
 OUT="$ROOT/build/driver/x64/Release"
 
-# One version for everything. The kit and the SDK have to agree, and all of
-# these are published together under the same number.
+# The kit package carries several versions of each framework, so the ones
+# this driver targets are named rather than guessed at: picking the wrong
+# one builds against a different framework and fails in ways that look
+# nothing like a version mismatch.
 KIT_VERSION="${KIT_VERSION:-10.0.26100.6584}"
+XWIN_VERSION="${XWIN_VERSION:-0.10.0}"
 WDF_VERSION="2.33"
 IDDCX_VERSION="1.2"
 
 log() { printf '\n==> %s\n' "$*"; }
+die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
-if [ "${1:-}" = "--clean" ]; then
-  rm -rf "$WORK"
-fi
+[ "${1:-}" = "--clean" ] && rm -rf "$WORK"
 
-# clang-cl and lld-link are the same binaries as clang and lld wearing
-# different names, and the distribution packages do not always install those
-# names. Where they are missing, clang is asked for its Microsoft-compatible
-# mode directly, which is exactly what the other names do.
+# clang-cl and lld-link are clang and lld under different names, and the
+# distribution packages do not always install the extra names.
 if command -v clang-cl >/dev/null 2>&1; then
   CLANG_CL=(clang-cl)
 elif command -v clang >/dev/null 2>&1; then
   CLANG_CL=(clang --driver-mode=cl)
 else
-  echo "error: clang is not installed." >&2
-  echo "On Debian or Ubuntu: apt install clang lld curl unzip" >&2
-  exit 1
+  die "clang is not installed. On Debian or Ubuntu: apt install clang lld curl"
 fi
 
 if command -v lld-link >/dev/null 2>&1; then
   LLD_LINK=(lld-link)
 elif command -v ld.lld >/dev/null 2>&1; then
   LLD_LINK=(ld.lld -flavor link)
-elif command -v lld >/dev/null 2>&1; then
-  LLD_LINK=(lld -flavor link)
 else
-  echo "error: the LLVM linker is not installed." >&2
-  echo "On Debian or Ubuntu: apt install lld" >&2
-  exit 1
+  die "the LLVM linker is not installed. On Debian or Ubuntu: apt install lld"
 fi
 
-for tool in curl unzip; do
-  command -v "$tool" >/dev/null 2>&1 || {
-    echo "error: $tool is not installed." >&2
-    echo "On Debian or Ubuntu: apt install clang lld curl unzip" >&2
-    exit 1
-  }
+for tool in curl tar unzip; do
+  command -v "$tool" >/dev/null 2>&1 || die "$tool is not installed"
 done
 
-echo "  compiler: ${CLANG_CL[*]}"
-echo "  linker:   ${LLD_LINK[*]}"
-
-# ---------------------------------------------------------------- toolchain
-
-fetch_package() {
-  local name="$1" version="$2" dest="$3"
-  if [ -d "$dest" ]; then
-    return
-  fi
-  log "Fetching $name $version"
-  local url="https://api.nuget.org/v3-flatcontainer/${name,,}/${version}/${name,,}.${version}.nupkg"
-  mkdir -p "$dest"
-  curl --fail --location --silent --show-error "$url" -o "$WORK/pkg.zip"
-  unzip -q -o "$WORK/pkg.zip" -d "$dest"
-  rm -f "$WORK/pkg.zip"
-}
-
 mkdir -p "$WORK"
-fetch_package "Microsoft.Windows.SDK.CPP"        "$KIT_VERSION" "$SDK/sdk-headers"
-fetch_package "Microsoft.Windows.SDK.CPP.x64"    "$KIT_VERSION" "$SDK/sdk-libs"
-fetch_package "Microsoft.Windows.WDK.x64"        "$KIT_VERSION" "$SDK/wdk"
 
-# Each package nests its contents differently, so every root is located by
-# finding a file known to be inside it rather than by assuming a shape. The
-# header package puts things under a versioned directory; the library
-# package does not.
-SDK_INC="$(dirname "$(dirname "$(find "$SDK/sdk-headers" -type f -iname 'windows.h' -path '*/um/*' -print -quit)")")"
-SDK_UM_LIB="$(dirname "$(find "$SDK/sdk-libs" -type f -iname 'kernel32.lib' -print -quit)")"
-SDK_UCRT_LIB="$(dirname "$(find "$SDK/sdk-libs" -type f -iname 'libucrt.lib' -print -quit)")"
+# ------------------------------------------------------- compiler and SDK
 
-# The kit's own headers and the two stub libraries.
-#
-# Found by searching, because these packages have rearranged themselves
-# between versions, but pinned to the versions this driver targets: the
-# package carries nine of each, and taking whichever turns up first would
-# silently build against the wrong framework.
-WDK_IDDCX_INC="$(find "$SDK/wdk" -type d -path "*um/iddcx/$IDDCX_VERSION" -print -quit)"
-WDK_WDF_INC="$(find "$SDK/wdk" -type d -path "*wdf/umdf/$WDF_VERSION" -print -quit)"
-IDDCX_STUB="$(find "$SDK/wdk" -type f -ipath "*um/x64/iddcx/$IDDCX_VERSION/iddcxstub.lib" -print -quit)"
-WDF_STUB="$(find "$SDK/wdk" -type f -ipath "*wdf/umdf/x64/$WDF_VERSION/WdfDriverStubUm.lib" -print -quit)"
+if [ ! -f "$XWIN/crt/include/excpt.h" ]; then
+  log "Fetching the Microsoft toolchain"
 
-fail_missing() {
-  echo "error: $1 was not found in the driver kit package." >&2
-  echo "Look under $SDK/wdk; the layout may have changed." >&2
-  exit 1
-}
-[ -d "$SDK_INC/um" ]    || { echo "error: no SDK headers found under $SDK/sdk-headers" >&2; exit 1; }
-[ -d "$SDK_UM_LIB" ]    || { echo "error: no SDK import libraries found under $SDK/sdk-libs" >&2; exit 1; }
-[ -d "$SDK_UCRT_LIB" ]  || { echo "error: no C runtime libraries found under $SDK/sdk-libs" >&2; exit 1; }
-[ -n "$WDK_IDDCX_INC" ] || fail_missing "the display extension headers, version $IDDCX_VERSION"
-[ -n "$WDK_WDF_INC" ]   || fail_missing "the framework headers, version $WDF_VERSION"
-[ -n "$IDDCX_STUB" ]    || fail_missing "iddcxstub.lib, version $IDDCX_VERSION"
-[ -n "$WDF_STUB" ]      || fail_missing "WdfDriverStubUm.lib, version $WDF_VERSION"
+  XWIN_BIN="$(command -v xwin 2>/dev/null || true)"
+  if [ -z "$XWIN_BIN" ]; then
+    XWIN_BIN="$WORK/bin/xwin"
+    if [ ! -x "$XWIN_BIN" ]; then
+      mkdir -p "$WORK/bin"
+      name="xwin-$XWIN_VERSION-x86_64-unknown-linux-musl"
+      curl --fail --location --silent --show-error \
+        "https://github.com/Jake-Shadle/xwin/releases/download/$XWIN_VERSION/$name.tar.gz" \
+        | tar -xz -C "$WORK/bin" --strip-components=1 "$name/xwin"
+      chmod +x "$XWIN_BIN"
+    fi
+  fi
 
-echo "  SDK headers:               $SDK_INC"
-echo "  SDK libraries:             $SDK_UM_LIB"
-echo "  display extension headers: $WDK_IDDCX_INC"
-echo "  framework headers:         $WDK_WDF_INC"
-echo "  stubs:                     $(basename "$IDDCX_STUB"), $(basename "$WDF_STUB")"
-
-# Windows headers include each other with inconsistent capitalisation, which
-# only matters on a case sensitive filesystem. Symlinking every name to its
-# lowercase form costs nothing and saves a long afternoon.
-if [ ! -f "$WORK/.case-fixed" ]; then
-  log "Making the headers case insensitive"
-  find "$SDK_INC" "$SDK/wdk" -type f \
-    \( -name '*.h' -o -name '*.H' \) -print0 2>/dev/null |
-  while IFS= read -r -d '' f; do
-    lower="$(dirname "$f")/$(basename "$f" | tr '[:upper:]' '[:lower:]')"
-    [ "$f" = "$lower" ] || [ -e "$lower" ] || ln -s "$(basename "$f")" "$lower"
-  done
-  find "$SDK/sdk-libs" -type f -name '*.Lib' -print0 2>/dev/null |
-  while IFS= read -r -d '' f; do
-    lower="${f%.Lib}.lib"
-    [ -e "$lower" ] || ln -s "$(basename "$f")" "$lower"
-  done
-  touch "$WORK/.case-fixed"
+  # Only the 64 bit desktop pieces, a fraction of the whole and all this
+  # driver targets.
+  "$XWIN_BIN" --accept-license --arch x86_64 --variant desktop \
+    --cache-dir "$WORK/xwin-cache" splat --output "$XWIN"
+  rm -rf "$WORK/xwin-cache"
 fi
 
-# -------------------------------------------------------------------- build
+[ -f "$XWIN/crt/include/excpt.h" ] || die "the compiler runtime headers are missing from $XWIN"
+[ -d "$XWIN/sdk/include/um" ]      || die "the SDK headers are missing from $XWIN"
+
+# --------------------------------------------------------- the driver kit
+
+if [ ! -d "$WDK" ]; then
+  log "Fetching the driver kit"
+  mkdir -p "$WDK"
+  name="microsoft.windows.wdk.x64"
+  curl --fail --location --silent --show-error \
+    "https://api.nuget.org/v3-flatcontainer/$name/$KIT_VERSION/$name.$KIT_VERSION.nupkg" \
+    -o "$WORK/wdk.zip"
+  # Only the parts this driver needs: a few megabytes of a hundred megabyte
+  # archive.
+  ( cd "$WDK" && unzip -q -o "$WORK/wdk.zip" \
+      "c/Include/*/um/iddcx/$IDDCX_VERSION/*" \
+      "c/Include/wdf/umdf/$WDF_VERSION/*" \
+      "c/Lib/*/um/x64/iddcx/$IDDCX_VERSION/*" \
+      "c/Lib/wdf/umdf/x64/$WDF_VERSION/*" )
+  rm -f "$WORK/wdk.zip"
+fi
+
+IDDCX_INC="$(find "$WDK" -type d -path "*um/iddcx/$IDDCX_VERSION" -print -quit)"
+WDF_INC="$(find "$WDK" -type d -path "*wdf/umdf/$WDF_VERSION" -print -quit)"
+IDDCX_STUB="$(find "$WDK" -type f -ipath "*iddcx/$IDDCX_VERSION/iddcxstub.lib" -print -quit)"
+WDF_STUB="$(find "$WDK" -type f -ipath "*umdf/x64/$WDF_VERSION/WdfDriverStubUm.lib" -print -quit)"
+
+[ -n "$IDDCX_INC" ]  || die "the display extension headers, version $IDDCX_VERSION, were not in the kit"
+[ -n "$WDF_INC" ]    || die "the framework headers, version $WDF_VERSION, were not in the kit"
+[ -n "$IDDCX_STUB" ] || die "iddcxstub.lib, version $IDDCX_VERSION, was not in the kit"
+[ -n "$WDF_STUB" ]   || die "WdfDriverStubUm.lib, version $WDF_VERSION, was not in the kit"
+
+echo "  compiler:  ${CLANG_CL[*]}"
+echo "  linker:    ${LLD_LINK[*]}"
+echo "  toolchain: $XWIN"
+echo "  kit:       $IDDCX_INC"
+
+# ------------------------------------------------------------------ build
 
 log "Compiling"
 mkdir -p "$WORK/obj" "$OUT"
@@ -186,36 +164,38 @@ SOURCES=(
   src/driver/driver.cpp
 )
 
+# -imsvc rather than -I, so these count as system headers and their warnings
+# stay out of the way. The Microsoft headers are not clean at the level this
+# project holds its own code to.
 INCLUDES=(
-  -imsvc "$SDK_INC/um"
-  -imsvc "$SDK_INC/shared"
-  -imsvc "$SDK_INC/ucrt"
-  -imsvc "$SDK_INC/winrt"
-  -imsvc "$SDK_INC/cppwinrt"
-  -imsvc "$WDK_IDDCX_INC"
-  -imsvc "$WDK_WDF_INC"
+  -imsvc "$XWIN/crt/include"
+  -imsvc "$XWIN/sdk/include/ucrt"
+  -imsvc "$XWIN/sdk/include/um"
+  -imsvc "$XWIN/sdk/include/shared"
+  -imsvc "$XWIN/sdk/include/winrt"
+  -imsvc "$IDDCX_INC"
+  -imsvc "$WDF_INC"
   -I "$ROOT/src/render/generated"
 )
 
-
-# IDDCX_VERSION_* are not derived from the include path and have to be told.
-# UMDF_USING_NTSTATUS keeps the status codes consistent between the framework
-# headers and the ordinary Windows ones.
+# IDDCX_VERSION_* are not derived from the include path and have to be
+# stated. UMDF_USING_NTSTATUS keeps status codes consistent between the
+# framework headers and the ordinary Windows ones.
 DEFINES=(
   -DUNICODE -D_UNICODE
+  -D_WIN32_WINNT=0x0A00
   -DIDDCX_VERSION_MAJOR=1 -DIDDCX_VERSION_MINOR=2
   -DUMDF_VERSION_MAJOR=2 -DUMDF_VERSION_MINOR=33
   -DUMDF_USING_NTSTATUS
-  -D_WIN32_WINNT=0x0A00
 )
 
-# The driver kit headers are not clean at high warning levels and never have
-# been, so warnings are not errors here. The tool and the tests are built
-# with warnings as errors and cover the same code.
 FLAGS=(
   --target=x86_64-pc-windows-msvc
   /std:c++17 /EHsc /O2 /MT /W3 /GS-
-  /clang:-fno-strict-aliasing
+  -Wno-unused-command-line-argument
+  -Wno-microsoft-enum-value
+  -Wno-ignored-attributes
+  -Wno-nonportable-include-path
 )
 
 for source in "${SOURCES[@]}"; do
@@ -224,28 +204,24 @@ for source in "${SOURCES[@]}"; do
     /c "$ROOT/$source" /Fo"$obj"
 done
 
-# ntdll is in the list below because the framework stub calls a kernel debug
+# ntdll is in the list because the framework stub calls a kernel debug
 # print that lives there and nowhere else. Leaving it out fails at the very
-# last step with a single unresolved symbol.
+# last step with one unresolved symbol.
 log "Linking"
 "${LLD_LINK[@]}" \
   /DLL /NOLOGO /MACHINE:X64 \
   /OUT:"$OUT/usbdisplaydd.dll" \
-  /LIBPATH:"$SDK_UM_LIB" \
-  /LIBPATH:"$SDK_UCRT_LIB" \
+  /LIBPATH:"$XWIN/crt/lib/x86_64" \
+  /LIBPATH:"$XWIN/sdk/lib/um/x86_64" \
+  /LIBPATH:"$XWIN/sdk/lib/ucrt/x86_64" \
   "$WORK"/obj/*.obj \
-  "$IDDCX_STUB" \
-  "$WDF_STUB" \
+  "$IDDCX_STUB" "$WDF_STUB" \
   d3d11.lib dxgi.lib setupapi.lib hid.lib winusb.lib \
-  advapi32.lib ole32.lib user32.lib gdi32.lib kernel32.lib \
-  ntdll.lib \
-  libcmt.lib libcpmt.lib libucrt.lib \
-  /ENTRY:_DllMainCRTStartup
+  advapi32.lib ole32.lib user32.lib gdi32.lib kernel32.lib ntdll.lib
 
-# The INF carries a version that must move for Windows to replace an
-# installed copy, so it is stamped the same way the Windows build does.
-STAMP="$(date +%m/%d/%Y),$(date +%H.%M.%S).0"
-sed "s|^DriverVer *=.*|DriverVer = $STAMP|" \
+# The version in the INF must move for Windows to replace an installed
+# copy, so it is stamped the way the Windows build does.
+sed "s|^DriverVer *=.*|DriverVer = $(date +%m/%d/%Y),$(date +%H.%M.%S).0|" \
   "$ROOT/inf/usbdisplaydd.inf" > "$OUT/usbdisplaydd.inf"
 
 log "Built $OUT/usbdisplaydd.dll"
