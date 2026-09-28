@@ -90,7 +90,11 @@ function Publish-Package([string]$stage, [string]$infName) {
     }
 
     pnputil /add-driver (Join-Path $stage $infName) /install
-    if ($LASTEXITCODE -ne 0) { throw "installing $infName failed" }
+    # 3010 is "installed, but a restart would finish tidying up", which
+    # happens when the package being replaced is in use. It is a success.
+    if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 3010) {
+        throw "installing $infName failed with code $LASTEXITCODE"
+    }
 }
 
 Write-Host '=== 1. raw USB access to the pixel interface ==='

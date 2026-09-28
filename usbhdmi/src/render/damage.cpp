@@ -141,7 +141,6 @@ void DamageTracker::Configure(int width, int height) {
   width_ = width;
   height_ = height;
   pending_.Clear();
-  previous_.Clear();
   MarkAll();
 }
 
@@ -166,43 +165,21 @@ size_t DamageTracker::Plan(Rect* out, size_t capacity) {
   if (capacity > kMaxTransfersPerFrame) {
     capacity = kMaxTransfersPerFrame;
   }
-
-  /* This frame's damage plus whatever the last transfer carried, because the
-   * adapter wrote that into only one of its two internal images. */
-  RectSet combined;
-  combined.AddAll(pending_);
-  combined.AddAll(previous_);
-  if (combined.empty()) {
+  if (pending_.empty()) {
     return 0;
   }
 
   Rect planned[kMaxTransfersPerFrame];
-  const size_t count = PlanTransfers(combined, planned, capacity);
+  const size_t count = PlanTransfers(pending_, planned, capacity);
 
   size_t emitted = 0;
   for (size_t i = 0; i < count; ++i) {
     const Rect aligned = AlignDamageRect(planned[i], width_, height_);
-    if (aligned.empty()) {
-      continue;
+    if (!aligned.empty()) {
+      out[emitted++] = aligned;
     }
-    out[emitted++] = aligned;
   }
 
-  /* Only the genuinely new damage is carried forward, not everything that
-   * went out. A region needs to appear in exactly two consecutive transfers,
-   * once for each of the adapter's two images; remembering the whole plan
-   * instead would repeat it forever and the bus would never go quiet.
-   *
-   * Repeating the new damage alone is enough, because anything else in the
-   * plan was itself a repeat and has now reached both images. */
-  RectSet carried;
-  for (size_t i = 0; i < pending_.size(); ++i) {
-    const Rect aligned = AlignDamageRect(pending_[i], width_, height_);
-    if (!aligned.empty()) {
-      carried.Add(aligned);
-    }
-  }
-  previous_ = carried;
   pending_.Clear();
   return emitted;
 }

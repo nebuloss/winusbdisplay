@@ -18,19 +18,10 @@
  * transfer is not more expensive than the two separate ones. The planner then
  * emits up to a handful of transfers per frame.
  *
- * The second thing going on here is the chip's double buffering. The chip
- * alternates between two internal images on every transfer, so a region
- * carried by only one transfer lands in one image and leaves the other
- * holding older content, and the two alternate visibly on screen. Every
- * transfer therefore carries this frame's damage *and* the previous
- * transfer's.
- *
- * Tracking which image is next and writing them one at a time is the
- * efficient answer and it does not work. It was implemented twice. It is
- * correct only while the driver's idea of the next image stays in step with
- * the chip's, nothing enforces that, and once they drift every update is
- * written to the image that is not on screen. Sending the union needs no
- * agreement with the chip at all.
+ * The adapter's habit of keeping two copies of the picture and alternating
+ * between them is handled elsewhere, by sending each region twice; see
+ * Pipeline::SendRegion. It is worth knowing about here only because it means
+ * every region planned costs two transfers, not one.
  */
 
 #pragma once
@@ -85,13 +76,17 @@ class DamageTracker {
 
   void Add(const Rect& rect);
 
-  bool Empty() const { return pending_.empty() && previous_.empty(); }
+  bool Empty() const { return pending_.empty(); }
 
-  /* Fills `out` with the transfers to send now, aligned to the chip's pixel
+  /* Fills `out` with the regions to send now, aligned to the adapter's pixel
    * pair requirements and clipped to the screen, and returns how many.
+   * Consumes the accumulated damage.
    *
-   * Consumes the accumulated damage: what was planned becomes the "previous
-   * transfer" that the next call will repeat for the chip's other image. */
+   * Each region still has to reach the adapter twice, once for each of its
+   * two internal copies of the picture. That is the sender's business, not
+   * this class's: see Pipeline::SendRegion. Doing it here instead, by
+   * repeating the previous plan on the next call, works but delivers each
+   * region a frame later for no saving. */
   size_t Plan(Rect* out, size_t capacity);
 
   int width() const { return width_; }
@@ -100,8 +95,7 @@ class DamageTracker {
  private:
   int width_ = 0;
   int height_ = 0;
-  RectSet pending_;   /* changed since the last transfer */
-  RectSet previous_;  /* what the last transfer carried */
+  RectSet pending_;  /* changed since the last plan */
 };
 
 /* Coalesces `in` into at most `capacity` rectangles, merging a pair whenever

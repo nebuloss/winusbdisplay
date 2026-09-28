@@ -74,17 +74,25 @@ class Pipeline {
   bool ConvertForSending(ID3D11Texture2D* source, const Rect& rect);
   bool ConvertOnCpu(ID3D11Texture2D* source, const Rect& rect);
 
-  /* Converts, refines and submits one region. Returns false when the update
-   * had to be abandoned, which obliges the caller to abandon the rest of the
-   * frame too so nothing arrives out of order. */
-  bool SendRegion(ID3D11Texture2D* source, const Rect& rect);
+  /* Converts, refines and submits one region, twice, because the adapter
+   * keeps two copies of the picture and alternates between them.
+   *
+   * `force` sends even when the region turns out to be identical to what is
+   * already on screen; the idle repaint needs that, since its purpose is to
+   * keep the signal alive rather than to change anything.
+   *
+   * Returns false when the update had to be abandoned, which obliges the
+   * caller to abandon the rest of the frame too so nothing arrives out of
+   * order. */
+  bool SendRegion(ID3D11Texture2D* source, const Rect& rect, bool force);
 
   void ProcessFrame(const IDARG_OUT_RELEASEANDACQUIREBUFFER& buffer);
 
-  /* Repaints from the last surface the compositor gave us, which IddCx
-   * guarantees stays valid until the next acquire. Without this the panel
-   * blanks whenever the desktop is still, because the compositor stops
-   * presenting and nothing would arrive to keep the signal alive. */
+  /* Puts traffic on the wire when the desktop is still, repainting a band
+   * from the last surface the compositor gave us, which stays valid until
+   * the next acquire. Without this the panel blanks whenever nothing is
+   * moving, because the compositor stops presenting and nothing else would
+   * arrive to keep the signal alive. */
   void RefreshIdle();
 
   void RefreshSettings();
@@ -126,6 +134,7 @@ class Pipeline {
 
   Settings settings_;
   unsigned long long last_settings_poll_ms_ = 0;
+  int idle_band_row_ = 0;
   unsigned long long last_send_ms_ = 0;
 
   std::thread thread_;

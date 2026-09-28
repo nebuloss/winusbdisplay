@@ -22,6 +22,11 @@ constexpr unsigned kBufferWaitMs = 10;
 /* The panel drops its signal after a second or two of silence. */
 constexpr unsigned long long kIdleRefreshMs = 1200;
 
+/* Rows per keepalive update. At 1920 wide this is about 490 KB, which is
+ * just inside one of the adapter's slots, so it is as large as it can be
+ * without costing a second one. */
+constexpr int kIdleBandHeight = 128;
+
 constexpr unsigned long long kSettingsPollMs = 500;
 
 Rect FromRECT(const RECT& rect) {
@@ -201,7 +206,8 @@ bool Pipeline::ConvertForSending(ID3D11Texture2D* source,
   return ConvertOnCpu(source, rect);
 }
 
-bool Pipeline::SendRegion(ID3D11Texture2D* source, const Rect& rect) {
+bool Pipeline::SendRegion(ID3D11Texture2D* source, const Rect& rect,
+                          bool force) {
   if (rect.empty()) {
     return true;
   }
@@ -212,23 +218,18 @@ bool Pipeline::SendRegion(ID3D11Texture2D* source, const Rect& rect) {
 
   /* Send only what actually differs from what the panel is showing. The
    * compositor sometimes reports far more than it needs to, and a full
-   * screen update costs eight refresh periods against one for a typical
-   * region. */
+   * screen update costs eight refresh slots against one for a typical
+   * region.
+   *
+   * `force` skips this, and exists for the idle repaint. That repaint's
+   * whole purpose is to put traffic on the wire, because the panel drops its
+   * signal after a second or two of silence. Letting the comparison decide
+   * there is nothing to send would defeat it exactly when the desktop is
+   * still, which is precisely when it is needed. */
   Rect changed = rect;
-  if (onscreen_valid_) {
+  if (onscreen_valid_ && !force) {
     changed = ShrinkChangedUyvy(rect, scratch_.data(), onscreen_.data(),
                                 onscreen_stride_);
-  }
-
-  /* Either way the panel's copy is now known for the whole converted region,
-   * including any part that turned out not to need sending. Once a region
-   * covering the entire screen has been stored, comparisons everywhere are
-   * meaningful and refinement can start. */
-  StoreUyvyReference(rect, scratch_.data(), onscreen_.data(),
-                     onscreen_stride_);
-  if (rect.x1 == 0 && rect.y1 == 0 && rect.x2 >= mode_.width &&
-      rect.y2 >= mode_.height) {
-    onscreen_valid_ = true;
   }
 
   if (changed.empty()) {
@@ -248,31 +249,64 @@ bool Pipeline::SendRegion(ID3D11Texture2D* source, const Rect& rect) {
     return true;
   }
 
-  std::vector<uint8_t>* transfer = sender_->Acquire(kBufferWaitMs);
-  if (!transfer) {
-    /* No buffer free. The damage stays owed, so a later frame carries it.
-     * The caller must abandon the rest of this frame as well, or a region
-     * would reach the adapter without the one that should have preceded it.
-     *
-     * The panel's copy is deliberately invalidated here rather than left
-     * claiming this region was sent, since it was not. */
-    onscreen_valid_ = false;
-    sender_->CountDropped();
-    return false;
+  /* Twice, back to back.
+   *
+   * The adapter keeps two copies of the picture and alternates between them
+   * on every transfer, so a region carried by a single transfer lands in one
+   * copy and leaves the other holding what was there before. The two then
+   * alternate on screen, which is seen as the picture blinking between the
+   * old and new content whenever anything moves.
+   *
+   * Sending the same bytes twice in a row puts the region in both copies
+   * without the driver having to know which copy is next, which is a thing
+   * nothing keeps reliably in step. It is also no more expensive than the
+   * obvious alternative of repeating last frame's region on the next
+   * transfer: the same two transfers either way, except that this way the
+   * region is complete one frame sooner. */
+  for (int attempt = 0; attempt < 2; ++attempt) {
+    std::vector<uint8_t>* transfer = sender_->Acquire(kBufferWaitMs);
+    if (!transfer) {
+      /* No buffer free. The damage stays owed, so a later frame carries it,
+       * and the caller abandons the rest of this frame so that nothing
+       * arrives ahead of what should have preceded it.
+       *
+       * Note what is deliberately not done here: the record of what the
+       * panel is showing is left alone rather than thrown away. It still
+       * describes this region correctly, because the record is only updated
+       * once a region has reached both of the adapter's copies, and this one
+       * has reached at most one. Discarding it instead turns a moment of
+       * congestion into a lasting one: with no record there is nothing to
+       * compare against, so every later region is sent in full, which causes
+       * more congestion, which discards the record again. */
+      sender_->CountDropped();
+      return false;
+    }
+
+    const size_t length = FrameSubRegion(transfer->data(), transfer->size(),
+                                         scratch_.data(), rect, changed);
+    if (length == 0) {
+      sender_->Release(transfer);
+      Log("pipeline: could not frame %d,%d %dx%d inside %d,%d %dx%d",
+          changed.x1, changed.y1, changed.width(), changed.height(), rect.x1,
+          rect.y1, rect.width(), rect.height());
+      return false;
+    }
+
+    sender_->Submit(transfer, length);
+    ++regions_sent_;
   }
 
-  const size_t length = FrameSubRegion(transfer->data(), transfer->size(),
-                                       scratch_.data(), rect, changed);
-  if (length == 0) {
-    sender_->Release(transfer);
-    Log("pipeline: could not frame %d,%d %dx%d inside %d,%d %dx%d",
-        changed.x1, changed.y1, changed.width(), changed.height(), rect.x1,
-        rect.y1, rect.width(), rect.height());
-    return false;
+  /* Both copies now hold this region, so it is safe to record it as what the
+   * panel is showing. Recording it after only one transfer would make the
+   * next comparison decide the second copy already had it, and the region
+   * would be left stale in one of them forever. */
+  StoreUyvyReference(rect, scratch_.data(), onscreen_.data(),
+                     onscreen_stride_);
+  if (rect.x1 == 0 && rect.y1 == 0 && rect.x2 >= mode_.width &&
+      rect.y2 >= mode_.height) {
+    onscreen_valid_ = true;
   }
 
-  sender_->Submit(transfer, length);
-  ++regions_sent_;
   last_send_ms_ = GetTickCount64();
   return true;
 }
@@ -342,7 +376,7 @@ void Pipeline::ProcessFrame(const IDARG_OUT_RELEASEANDACQUIREBUFFER& buffer) {
   const size_t count = damage_.Plan(planned, kMaxTransfersPerFrame);
 
   for (size_t i = 0; i < count; ++i) {
-    if (!SendRegion(surface.Get(), planned[i])) {
+    if (!SendRegion(surface.Get(), planned[i], false)) {
       /* Abandoning the rest of the frame keeps the order intact. Whatever
        * was not sent is still owed and goes out with the next frame. */
       for (size_t j = i; j < count; ++j) {
@@ -358,26 +392,41 @@ void Pipeline::RefreshIdle() {
     return;
   }
 
-  /* The whole screen, not a band. A partial update lands in only one of the
-   * adapter's two internal images and leaves the other holding older
-   * content, which alternates visibly; a repaint whose entire purpose is to
-   * resynchronise has to cover everything. */
-  damage_.MarkAll();
+  /* The panel drops its signal after a second or two of silence, and a still
+   * desktop means the compositor stops presenting entirely, so something has
+   * to keep the wire busy.
+   *
+   * A band rather than the whole screen. A full repaint costs eight slots,
+   * sixteen once it is sent to both of the adapter's copies, during which
+   * nothing else can go out; a band costs one slot each. The band is safe
+   * only because it is sent twice like everything else. Sent once it would
+   * land in one copy and leave the other holding older content, and the two
+   * would alternate visibly, which is exactly the trap a partial repaint
+   * looks like a good idea right up until you fall into it.
+   *
+   * The band walks down the screen so that any region which somehow went
+   * stale is eventually repainted anyway. */
+  Rect band;
+  band.x1 = 0;
+  band.x2 = mode_.width;
+  band.y1 = idle_band_row_;
+  band.y2 = idle_band_row_ + kIdleBandHeight;
+  if (band.y2 > mode_.height) {
+    band.y2 = mode_.height;
+  }
+  band = AlignDamageRect(band, mode_.width, mode_.height);
 
-  Rect planned[kMaxTransfersPerFrame];
-  const size_t count = damage_.Plan(planned, kMaxTransfersPerFrame);
-  for (size_t i = 0; i < count; ++i) {
-    if (!SendRegion(last_surface_.Get(), planned[i])) {
-      for (size_t j = i; j < count; ++j) {
-        damage_.Add(planned[j]);
-      }
-      break;
-    }
+  idle_band_row_ += kIdleBandHeight;
+  if (idle_band_row_ >= mode_.height) {
+    idle_band_row_ = 0;
   }
 
-  /* Even if the comparison found nothing to send, the panel has now been
-   * checked and the clock restarts. Otherwise a completely static desktop
-   * would retry every frame. */
+  if (!band.empty()) {
+    SendRegion(last_surface_.Get(), band, true);
+  }
+
+  /* Restart the clock even if nothing went out, so a completely static
+   * desktop does not retry on every pass through the loop. */
   last_send_ms_ = GetTickCount64();
 }
 

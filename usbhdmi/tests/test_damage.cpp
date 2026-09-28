@@ -151,10 +151,7 @@ TEST(rectset, ignores_empty_additions) {
   CHECK(set.empty());
 }
 
-TEST(tracker, repeats_the_previous_transfer_for_the_other_image) {
-  /* The adapter alternates between two internal images on every transfer, so
-   * a region carried by only one transfer lands in one image and leaves the
-   * other holding older content. The two then alternate visibly. */
+TEST(tracker, damage_is_consumed_by_planning) {
   DamageTracker tracker;
   tracker.Configure(1920, 1080);
 
@@ -162,22 +159,15 @@ TEST(tracker, repeats_the_previous_transfer_for_the_other_image) {
   tracker.Plan(planned, kMaxTransfersPerFrame);  /* the initial full repaint */
 
   tracker.Add(Make(100, 100, 200, 200));
-  const size_t first = tracker.Plan(planned, kMaxTransfersPerFrame);
-  CHECK(first > 0);
+  CHECK(tracker.Plan(planned, kMaxTransfersPerFrame) > 0);
 
-  /* Nothing new has changed, but the previous transfer still has to be
-   * repeated so it reaches the other image. */
-  const size_t second = tracker.Plan(planned, kMaxTransfersPerFrame);
-  CHECK_EQ_BECAUSE(second, static_cast<size_t>(1),
-                   "without repeating the last transfer, half the updates "
-                   "land in the image that is not on screen and the picture "
-                   "flickers between two versions of itself");
-
-  /* And then there is genuinely nothing left owed. */
-  const size_t third = tracker.Plan(planned, kMaxTransfersPerFrame);
-  CHECK_EQ_BECAUSE(third, static_cast<size_t>(0),
-                   "a region owed to both images is settled after two "
-                   "transfers, and repeating forever would waste the bus");
+  CHECK_EQ_BECAUSE(
+      tracker.Plan(planned, kMaxTransfersPerFrame), static_cast<size_t>(0),
+      "a region is planned once and then sent twice by the pipeline, once "
+      "for each of the adapter's two internal copies of the picture; "
+      "planning it again as well would send it four times and the "
+      "connection would never go quiet");
+  CHECK(tracker.Empty());
 }
 
 TEST(tracker, configure_marks_the_whole_screen) {
