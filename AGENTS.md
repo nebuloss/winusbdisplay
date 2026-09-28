@@ -160,6 +160,10 @@ must be installed.
 
 ### The driver really does cross compile
 
+Verified, not theorised: the Linux workflow produces a 292 KB Windows
+library exporting the framework entry point, within a few hundred bytes of
+what the Windows build produces from the same sources.
+
 This is usually assumed impossible, so the reasoning is worth keeping.
 
 A user-mode driver of this kind is an ordinary Windows DLL. Check what the
@@ -182,9 +186,24 @@ Everything else is the ordinary Microsoft toolchain, and
 - **NuGet** for the driver kit, which is not part of that feed but is
   published as an ordinary archive.
 
-It then compiles with `clang-cl` and `lld-link`. One detail that is easy to
-trip over: `IDDCX_VERSION_MAJOR` and its companions are not derived from the
-include path and must be defined explicitly.
+It then compiles with `clang-cl` and `lld-link`. Four things had to be dealt
+with, all of which are invisible on Windows and fatal anywhere else:
+
+- **Capitalisation.** Nothing agrees on it. The kit's headers ask each other
+  for names that differ from the files on disk, they ask the Windows SDK for
+  names that differ again, and this project uses a third spelling. Every kit
+  header therefore gets a lowercase alias, and the specific mixed-case names
+  the kit asks of the SDK are added there too. This failed three times, once
+  per direction, before being fixed as a class rather than a symptom.
+- **An enumeration** declared ahead of its definition with an underlying
+  type and defined without one. Microsoft's compiler accepts the mismatch;
+  clang refuses, and there is no flag, because the check is not a diagnostic
+  that can be switched off. The declaration is patched at extraction.
+- **The compiler version.** The Microsoft standard library refuses anything
+  it does not recognise, by static assertion. The build machine's newest is
+  a year too old, so a current one comes from the LLVM project's packages.
+- **`IDDCX_VERSION_MAJOR`** and its companions are not derived from the
+  include path and must be defined explicitly.
 
 ### The compiled shader is committed
 

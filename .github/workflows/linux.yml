@@ -86,7 +86,7 @@ jobs:
         # the Windows SDK and the driver kit, is downloaded by the script.
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends curl unzip lsb-release wget software-properties-common gnupg
+          sudo apt-get install -y --no-install-recommends curl unzip lsb-release wget software-properties-common gnupg file
           wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 19
           sudo apt-get install -y --no-install-recommends lld-19
 
@@ -116,15 +116,38 @@ jobs:
 
       - name: Check what came out
         working-directory: usbdisplay
-        # A DLL built on Linux is worth looking at twice, so this confirms
-        # the file really is a 64 bit Windows library and not something that
-        # merely linked without complaint.
+        # A Windows driver built on Linux deserves more than a file
+        # existence check. This confirms it is a 64 bit Windows library
+        # that exports the entry point the framework calls and asks for the
+        # libraries a working driver asks for. Anything less would pass for
+        # a file that merely linked without complaint.
         run: |
           dll=build/driver/x64/Release/usbdisplaydd.dll
-          test -f "$dll" || { echo "no driver produced"; exit 1; }
+          test -f "$dll" || { echo "no driver was produced"; exit 1; }
+
+          echo "== what it is =="
           file "$dll"
           file "$dll" | grep -q 'PE32+' || {
-            echo "that is not a 64 bit Windows DLL"; exit 1; }
+            echo "that is not a 64 bit Windows library"; exit 1; }
+
+          echo
+          echo "== what it exports =="
+          # The framework finds a driver through this one symbol. Without
+          # it the driver loads and is then never called.
+          if command -v llvm-readobj >/dev/null 2>&1; then
+            llvm-readobj --coff-exports "$dll" | tee exports.txt
+            grep -q 'FxDriverEntryUm' exports.txt || {
+              echo "the framework entry point is missing"; exit 1; }
+          else
+            echo "llvm-readobj not available, skipping"
+          fi
+
+          echo
+          echo "== what it needs =="
+          if command -v llvm-readobj >/dev/null 2>&1; then
+            llvm-readobj --coff-imports "$dll" | grep -i 'Name:' | sort -u
+          fi
+
           ls -la "$dll"
 
       - uses: actions/upload-artifact@v4

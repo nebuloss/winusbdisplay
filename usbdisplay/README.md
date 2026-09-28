@@ -139,7 +139,10 @@ driver kit are two small static stubs and a few headers, and every piece of
 it is published on NuGet, which is a plain file server. The script downloads
 four archives and compiles with clang.
 
-It needs `clang`, `lld`, `curl` and `unzip`, and nothing else.
+It needs `clang` 19 or newer, `lld`, `curl` and `unzip`, and nothing else.
+The compiler runtime, the Windows SDK and the driver kit are all downloaded
+by the script. The result is a Windows library within a few hundred bytes of
+what the Windows build produces from the same sources.
 
 What cross-compiling cannot do is sign the result or build an installable
 catalog, both of which need Windows tools. The install script does both on

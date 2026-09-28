@@ -307,6 +307,10 @@ FLAGS=(
   # The framework hands a driver a handle it may never need to use again;
   # keeping it is deliberate rather than an oversight.
   -Wno-unused-private-field
+  # The macro that declares a context type says extern twice: once through
+  # a wrapper that expands to extern "C", and again on the next line. It is
+  # harmless, it is the kit's own code, and there is nothing to fix here.
+  -Wno-duplicate-decl-specifier
 )
 
 for source in "${SOURCES[@]}"; do
