@@ -11,6 +11,8 @@
  */
 
 #include <cmath>
+#include <fstream>
+#include <iterator>
 #include <cstring>
 #include <vector>
 
@@ -473,33 +475,32 @@ TEST(brightness, rises_with_the_setting) {
 
 TEST(shader, source_coefficients_match_the_processor_path) {
   /* Read from the shader source rather than duplicated here, so the two
-   * cannot drift apart silently. */
-  FILE* file = nullptr;
-  const char* paths[] = {
-      "src/render/convert_cs.hlsl",
-      "../src/render/convert_cs.hlsl",
-      "usbdisplay/src/render/convert_cs.hlsl",
-  };
-  for (const char* path : paths) {
-    if (fopen_s(&file, path, "rb") == 0 && file) {
+   * cannot drift apart silently.
+   *
+   * The working directory depends on how the tests were started, so a few
+   * likely places are tried. std::ifstream rather than the C calls: the
+   * checked variants of those are a Microsoft extension, and these tests
+   * build on Linux too. */
+  std::ifstream shader;
+  for (const char* path : {"src/render/convert_cs.hlsl",
+                           "../src/render/convert_cs.hlsl",
+                           "usbdisplay/src/render/convert_cs.hlsl"}) {
+    shader.open(path);
+    if (shader.is_open()) {
       break;
     }
-    file = nullptr;
+    shader.clear();
   }
-  CHECK_BECAUSE(file != nullptr,
+
+  CHECK_BECAUSE(shader.is_open(),
                 "the shader source should be findable from the test working "
-                "directory; if this moved, update the paths above");
-  if (!file) {
+                "directory; if it moved, update the paths above");
+  if (!shader.is_open()) {
     return;
   }
 
-  std::string text;
-  char buffer[4096];
-  size_t read = 0;
-  while ((read = fread(buffer, 1, sizeof(buffer), file)) > 0) {
-    text.append(buffer, read);
-  }
-  fclose(file);
+  const std::string text((std::istreambuf_iterator<char>(shader)),
+                         std::istreambuf_iterator<char>());
 
   /* Each coefficient must appear in the shader exactly as the processor
    * path defines it. Both paths run, chosen by update size, so a
@@ -515,10 +516,10 @@ TEST(shader, source_coefficients_match_the_processor_path) {
   };
 
   for (const auto& coefficient : coefficients) {
-    const std::string wanted =
-        std::string(coefficient.name) + " = " + std::to_string(coefficient.value);
-    CHECK_EQ_BECAUSE(
-        text.find(wanted) != std::string::npos, true,
+    const std::string wanted = std::string(coefficient.name) + " = " +
+                               std::to_string(coefficient.value);
+    CHECK_BECAUSE(
+        text.find(wanted) != std::string::npos,
         std::string("the shader should contain \"") + wanted +
             "\"; if the arithmetic changed, the compiled copy in "
             "src/render/generated must be regenerated with "

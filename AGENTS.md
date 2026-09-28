@@ -81,6 +81,16 @@ that way: if a change to `src/core` or `src/render` starts needing
 `windows.h`, it has been put in the wrong layer. Platform-specific code goes
 in `src/core/usb.*`, `src/core/open_device.cpp` or `src/driver`.
 
+`test_portable.cpp` enforces this by reading the sources rather than
+compiling them, which is unusual for a test and is the point: the fault is
+in what was written, and only visible before a compiler has had a chance to
+forgive it. It checks for Microsoft's own spellings of standard functions,
+for platform headers creeping into the portable layer, and for files using
+things they never included. That last one matters because the Microsoft
+compiler supplies a great deal transitively that others do not, so such a
+file builds cleanly here and fails elsewhere. Every one of these has
+actually happened.
+
 The tool is the hardware harness. Nothing below needs a driver installed
 except the last line:
 
