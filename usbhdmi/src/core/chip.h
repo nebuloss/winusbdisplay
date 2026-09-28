@@ -13,6 +13,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -80,6 +81,16 @@ class Chip {
   bool SetMode(const Mode& mode);
   bool EnableOutput(bool enable);
 
+  /* Counts how many times the adapter has been programmed.
+   *
+   * Reprogramming clears the adapter's picture memory and disables the
+   * output, so anything a caller believed was on screen no longer is. It can
+   * happen without the caller asking: a run of failed transfers triggers a
+   * reset from whichever thread was sending. Watching this value is how the
+   * frame pipeline learns that its record of the panel's contents is void
+   * and it must repaint rather than send differences against it. */
+  uint64_t generation() const { return generation_; }
+
   /* Re-runs power on and the last mode. The way back from a chip that has
    * stopped accepting transfers, which otherwise stays dark until the dongle
    * is physically unplugged. */
@@ -115,14 +126,39 @@ class Chip {
   bool Fail(const std::string& message);
   bool FailLink(const char* what);
 
+  /* Variants that assume device_lock_ is already held, so the paths that
+   * need to reprogram from inside a transfer do not deadlock on it. */
+  bool SetModeLocked(const Mode& mode);
+  bool EnableOutputLocked(bool enable);
+  bool ResetLocked();
+
   std::unique_ptr<Link> link_;
+
+  /* Serialises one control exchange against another. A register read is a
+   * write followed by a read, and two interleaved return each other's
+   * answers. */
   std::mutex control_lock_;
+
+  /* Serialises programming the adapter against sending it pixels, and
+   * guards the state below.
+   *
+   * Without this, a mode change on the OS thread interleaves command by
+   * command with a transfer already in flight describing the old geometry,
+   * and the panel ends up garbled in a way only a replug clears. Held for
+   * the duration of a transfer, which is why programming a new mode can
+   * block for as long as one: that is the correct thing for it to do. */
+  std::mutex device_lock_;
+
+  /* Written under device_lock_ but read without it for error reporting, so
+   * it is deliberately not a std::string: a torn read of one of those from
+   * another thread is a crash rather than a garbled message. */
   std::string error_;
 
   bool output_enabled_ = false;
   Mode last_mode_ = {};
   bool have_last_mode_ = false;
   unsigned consecutive_failures_ = 0;
+  std::atomic<uint64_t> generation_{0};
 };
 
 bool EdidBlockChecksumOk(const uint8_t* block);

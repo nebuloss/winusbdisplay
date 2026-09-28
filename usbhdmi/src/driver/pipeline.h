@@ -97,6 +97,10 @@ class Pipeline {
 
   void RefreshSettings();
 
+  /* Notices that the adapter has been reprogrammed behind this thread's
+   * back, which voids everything known about what the panel is showing. */
+  void CheckAdapterReprogrammed();
+
   IDDCX_SWAPCHAIN swapchain_;
   LUID render_adapter_;
   HANDLE new_frame_event_;
@@ -132,6 +136,7 @@ class Pipeline {
   size_t onscreen_stride_ = 0;
   bool onscreen_valid_ = false;
 
+  uint64_t adapter_generation_ = 0;
   Settings settings_;
   unsigned long long last_settings_poll_ms_ = 0;
   int idle_band_row_ = 0;

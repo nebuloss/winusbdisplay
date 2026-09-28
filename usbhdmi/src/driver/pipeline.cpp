@@ -15,9 +15,17 @@ namespace usbhdmi {
 namespace {
 
 /* How long to wait for a free transfer buffer before abandoning the update.
- * Long enough to ride out a transfer that is nearly finished, short enough
- * that the acquire loop never looks stalled. */
-constexpr unsigned kBufferWaitMs = 10;
+ *
+ * A buffer can only come free when a transfer finishes, and a transfer cannot
+ * finish faster than one of the adapter's 16.7 ms slots. Waiting less than
+ * that therefore guarantees a timeout: the wait is dead time, the region is
+ * dropped after paying its full conversion cost, and it has to be converted
+ * again next frame. The previous value of 10 ms did exactly that.
+ *
+ * Slightly over two slots, so a wait can ride out a transfer that had only
+ * just started, while still bounding how long the compositor's thread is
+ * held. */
+constexpr unsigned kBufferWaitMs = 36;
 
 /* The panel drops its signal after a second or two of silence, which is why
  * the repaint below exists at all. There is deliberately no interval: it runs
@@ -291,19 +299,24 @@ bool Pipeline::SendRegion(ID3D11Texture2D* source, const Rect& rect,
     }
   }
 
+  /* Frame both before submitting either. Framing the first, submitting it,
+   * and only then discovering the second cannot be framed would leave the
+   * region in one copy and reintroduce the very alternation this pair
+   * exists to prevent. The two are identical, so the second is a copy. */
+  const size_t length = FrameSubRegion(transfers[0]->data(),
+                                       transfers[0]->size(), scratch_.data(),
+                                       rect, changed);
+  if (length == 0 || transfers[1]->size() < length) {
+    sender_->Release(transfers[0]);
+    sender_->Release(transfers[1]);
+    Log("pipeline: could not frame %d,%d %dx%d inside %d,%d %dx%d",
+        changed.x1, changed.y1, changed.width(), changed.height(), rect.x1,
+        rect.y1, rect.width(), rect.height());
+    return false;
+  }
+  memcpy(transfers[1]->data(), transfers[0]->data(), length);
+
   for (int i = 0; i < 2; ++i) {
-    const size_t length = FrameSubRegion(transfers[i]->data(),
-                                         transfers[i]->size(),
-                                         scratch_.data(), rect, changed);
-    if (length == 0) {
-      for (int j = i; j < 2; ++j) {
-        sender_->Release(transfers[j]);
-      }
-      Log("pipeline: could not frame %d,%d %dx%d inside %d,%d %dx%d",
-          changed.x1, changed.y1, changed.width(), changed.height(), rect.x1,
-          rect.y1, rect.width(), rect.height());
-      return false;
-    }
     sender_->Submit(transfers[i], length);
     ++regions_sent_;
   }
@@ -445,6 +458,23 @@ void Pipeline::RefreshIdle() {
   last_send_ms_ = GetTickCount64();
 }
 
+void Pipeline::CheckAdapterReprogrammed() {
+  /* Reprogramming clears the adapter's picture memory, and it can happen
+   * without this thread asking: a run of failed transfers makes the sender
+   * reset the adapter, and a mode change comes from the OS thread. Either
+   * way what is on the panel no longer resembles the record kept here, and
+   * sending differences against that record would leave the screen showing
+   * fragments of whatever came before. */
+  const uint64_t generation = chip_->generation();
+  if (generation == adapter_generation_) {
+    return;
+  }
+  Log("pipeline: adapter was reprogrammed, repainting everything");
+  adapter_generation_ = generation;
+  onscreen_valid_ = false;
+  damage_.MarkAll();
+}
+
 void Pipeline::RefreshSettings() {
   const Settings updated = ReadSettings();
   const bool picture_changed = !(updated.picture() == settings_.picture());
@@ -483,6 +513,7 @@ void Pipeline::Run() {
       if (now - last_settings_poll_ms_ >= kSettingsPollMs) {
         last_settings_poll_ms_ = now;
         RefreshSettings();
+        CheckAdapterReprogrammed();
       }
 
       /* Nothing new to draw. Rather than waiting for a timer, repaint a
@@ -515,6 +546,7 @@ void Pipeline::Run() {
       break;
     }
 
+    CheckAdapterReprogrammed();
     ProcessFrame(buffer);
     IddCxSwapChainFinishedProcessingFrame(swapchain_);
 

@@ -128,6 +128,11 @@ bool Chip::PowerOff() {
 }
 
 bool Chip::SetMode(const Mode& mode) {
+  std::lock_guard<std::mutex> lock(device_lock_);
+  return SetModeLocked(mode);
+}
+
+bool Chip::SetModeLocked(const Mode& mode) {
   uint8_t payload[6];
   uint8_t discard = 0;
 
@@ -186,10 +191,18 @@ bool Chip::SetMode(const Mode& mode) {
 
   last_mode_ = mode;
   have_last_mode_ = true;
+  /* Announce that the adapter's picture memory is now undefined, so anyone
+   * sending differences against a remembered image starts over. */
+  ++generation_;
   return true;
 }
 
 bool Chip::EnableOutput(bool enable) {
+  std::lock_guard<std::mutex> lock(device_lock_);
+  return EnableOutputLocked(enable);
+}
+
+bool Chip::EnableOutputLocked(bool enable) {
   uint8_t payload[6];
   memset(payload, 0, sizeof(payload));
   payload[0] = enable ? 1 : 0;
@@ -201,6 +214,11 @@ bool Chip::EnableOutput(bool enable) {
 }
 
 bool Chip::Reset() {
+  std::lock_guard<std::mutex> lock(device_lock_);
+  return ResetLocked();
+}
+
+bool Chip::ResetLocked() {
   if (!have_last_mode_) {
     return Fail("no mode has been programmed yet, nothing to reset to");
   }
@@ -208,7 +226,7 @@ bool Chip::Reset() {
   if (!PowerOn()) {
     return false;
   }
-  return SetMode(last_mode_);
+  return SetModeLocked(last_mode_);
 }
 
 bool Chip::ReadVideoPort(VideoPort* port) {
@@ -392,6 +410,10 @@ bool Chip::SendFrame(const uint8_t* data, size_t len) {
     return Fail("this link has no data plane, so pixels have nowhere to go");
   }
 
+  /* Held for the whole transfer, so the adapter cannot be reprogrammed out
+   * from under a transfer describing the previous geometry. */
+  std::lock_guard<std::mutex> lock(device_lock_);
+
   if (!link_->BulkWrite(data, len)) {
     /* Several failures in a row means the chip has stopped accepting data
      * rather than that one transfer was unlucky, and reprogramming is the
@@ -399,7 +421,7 @@ bool Chip::SendFrame(const uint8_t* data, size_t len) {
      * physically replugged. */
     if (++consecutive_failures_ >= 3) {
       consecutive_failures_ = 0;
-      Reset();
+      ResetLocked();
     }
     return FailLink("bulk write");
   }
@@ -414,7 +436,7 @@ bool Chip::SendFrame(const uint8_t* data, size_t len) {
   }
 
   if (!output_enabled_) {
-    output_enabled_ = EnableOutput(true);
+    output_enabled_ = EnableOutputLocked(true);
   }
   return true;
 }

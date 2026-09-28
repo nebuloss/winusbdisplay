@@ -127,6 +127,18 @@ void FrameSender::Worker() {
         return false;
       });
 
+      /* Stopping discards whatever is still queued rather than draining it.
+       *
+       * Draining looks tidier and is a trap: the pipe has just been aborted,
+       * so every queued transfer fails, and three failures in a row make the
+       * adapter be reprogrammed, which is a dozen more round trips. All of
+       * it happens on the thread that teardown is waiting to join, and the
+       * framework reports the delay as a hung driver and takes the device
+       * offline. */
+      if (!running_) {
+        return;
+      }
+
       /* Oldest queued transfer first. Sending them out of order would let a
        * later update be overwritten by an earlier one covering the same
        * pixels, because the adapter applies each transfer as it arrives. */
@@ -137,9 +149,6 @@ void FrameSender::Worker() {
         }
       }
       if (!slot) {
-        if (!running_) {
-          return;
-        }
         continue;
       }
       busy_ = true;
