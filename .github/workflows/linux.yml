@@ -1,0 +1,114 @@
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# The whole project, built on Linux.
+#
+# Including the driver, which is the part usually assumed to need Windows.
+# It does not: a user-mode driver of this kind is an ordinary DLL that links
+# against no driver runtime at all, both the framework and the display
+# extension being bound at load time through function tables. The only
+# things needed from the driver kit are two small static stubs and some
+# headers, and all of it is published on NuGet, which is a plain file
+# server.
+#
+# The Windows workflow is still the one that matters for a release, because
+# only it can sign a package and check the driver actually starts. This one
+# exists to give a complete answer in a couple of minutes on every push,
+# rather than waiting on a Windows machine to install a driver kit.
+
+name: linux
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  tests:
+    name: tests (${{ matrix.compiler }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [g++, clang++]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            $([ "${{ matrix.compiler }}" = "clang++" ] && echo clang || echo g++)
+
+      - name: Build and run the tests
+        working-directory: usbdisplay
+        env:
+          CXX: ${{ matrix.compiler }}
+        run: make test
+
+  sanitised:
+    # The same tests with the address and undefined behaviour checkers on.
+    # Worth its own job: these catch the sort of fault that otherwise shows
+    # up as a display glitch on somebody's desk rather than as a red build.
+    name: tests with checks enabled
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang
+
+      - name: Build and run under the sanitisers
+        working-directory: usbdisplay
+        env:
+          CXX: clang++
+          CXXFLAGS: >-
+            -std=c++17 -O1 -g -Wall -Wextra -Werror
+            -fsanitize=address,undefined -fno-omit-frame-pointer
+          LDFLAGS: -fsanitize=address,undefined
+        run: make test
+
+  driver:
+    name: driver, cross compiled
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the toolchain
+        # Wine is here only for the shader compiler. There is no native
+        # Linux compiler for this shader model: the modern one emits a
+        # different bytecode that Direct3D 11 will not accept.
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang lld curl unzip wine64 wine
+
+      - name: Cross compile the driver
+        working-directory: usbdisplay
+        run: |
+          chmod +x scripts/cross-build.sh
+          ./scripts/cross-build.sh
+
+      - name: Check what came out
+        working-directory: usbdisplay
+        # A DLL built on Linux is worth looking at twice, so this confirms
+        # the file really is a 64 bit Windows library and not something that
+        # merely linked without complaint.
+        run: |
+          dll=build/driver/x64/Release/usbdisplaydd.dll
+          test -f "$dll" || { echo "no driver produced"; exit 1; }
+          file "$dll"
+          file "$dll" | grep -q 'PE32+' || {
+            echo "that is not a 64 bit Windows DLL"; exit 1; }
+          ls -la "$dll"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: driver-cross-compiled
+          path: |
+            usbdisplay/build/driver/x64/Release/usbdisplaydd.dll
+            usbdisplay/build/driver/x64/Release/usbdisplaydd.inf
+          if-no-files-found: error

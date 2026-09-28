@@ -125,9 +125,29 @@ anywhere. The benefit is quick feedback without a Windows machine, and a
 second compiler's opinion on the same code, which catches the undefined
 behaviour that any one compiler happens to forgive.
 
-The driver is a different matter and cannot be built anywhere but Windows:
-it needs the driver kit, the indirect display stub library and a shader
-compiler, none of which exist elsewhere.
+The driver can be built on Linux too:
+
+```
+scripts/cross-build.sh
+```
+
+That surprises people, so it is worth saying why it works. A user-mode
+driver of this kind is an ordinary Windows DLL, and it links against no
+driver runtime at all: both the framework and the display extension are
+bound at load time through function tables. The only things needed from the
+driver kit are two small static stubs and a few headers, and every piece of
+it is published on NuGet, which is a plain file server. The script downloads
+four archives and compiles with clang.
+
+It needs `clang`, `lld`, `curl`, `unzip` and `wine`. Wine is there for one
+job only, compiling the shader: there is no native Linux compiler for this
+shader model, because the modern one emits a bytecode Direct3D 11 will not
+accept.
+
+What cross-compiling cannot do is sign the result or build an installable
+catalog, both of which need Windows tools. The install script does both on
+the machine where the driver is actually used, so this matters only if you
+wanted to ship from Linux.
 
 ## Diagnosing
 

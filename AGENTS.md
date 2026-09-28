@@ -142,20 +142,50 @@ must be installed.
 
 ## Continuous integration
 
-Two workflows, split by what each machine can actually do.
+- `.github/workflows/linux.yml` runs the test suite under two compilers and
+  again under the address and undefined behaviour checkers, **and cross
+  compiles the driver**. A few minutes, on every push.
+- `.github/workflows/windows.yml` builds everything natively and publishes
+  a package when a tag starting with `v` is pushed.
 
-- `.github/workflows/logic.yml` runs on Linux and covers the whole test
-  suite, twice over with two compilers, and once more with the address and
-  undefined behaviour checkers on. Quick, and it runs on every push.
-- `.github/workflows/windows.yml` builds the tool, the brightness control
-  and the driver, and publishes a package when a tag starting with `v` is
-  pushed. The driver job installs the driver kit on the fly, which is the
-  most fragile step in either file; it is deliberately a separate job so a
-  problem there does not mask a real compile error in everything else.
+### The driver really does cross compile
 
-Neither can test against hardware, so a green build means it compiles and
-the logic holds, not that the panel lights up. That still needs a person
-with an adapter.
+This is usually assumed impossible, so the reasoning is worth keeping.
+
+A user-mode driver of this kind is an ordinary Windows DLL. Check what the
+built one actually depends on and there is no driver runtime in the list at
+all: the framework and the display extension are both bound at load time
+through function tables, so the only things the link needs from the driver
+kit are two small static stubs, `iddcxstub.lib` and `WdfDriverStubUm.lib`,
+together about 600 KB.
+
+Everything else is the ordinary Windows SDK, and all of it, kit included, is
+published on NuGet, which is a plain HTTPS file server serving zip files:
+
+```
+Microsoft.Windows.WDK.x64          the stubs and the driver headers
+Microsoft.Windows.SDK.CPP          the shared Windows headers
+Microsoft.Windows.SDK.CPP.x64      the 64 bit import libraries
+Microsoft.Windows.SDK.BuildTools   the shader compiler
+```
+
+`scripts/cross-build.sh` downloads those and compiles with `clang-cl` and
+`lld-link`. Two details it handles that are easy to trip over: Windows
+headers include each other with inconsistent capitalisation, which only
+matters on a case sensitive filesystem, and `IDDCX_VERSION_MAJOR` and its
+companions are not derived from the include path and must be defined.
+
+Wine is needed for one step, compiling the shader. There is no native Linux
+compiler for this shader model, because the modern one emits a different
+bytecode that Direct3D 11 will not accept.
+
+What cross compiling cannot do is sign the result or build an installable
+catalog; both need Windows tools with no equivalent. The install script does
+both on the machine where the driver is used, so it only matters if you
+wanted to ship from Linux.
+
+Neither workflow can test against hardware, so a green build means it
+compiles and the logic holds, never that the panel lights up.
 
 ## Adding support for another adapter
 
