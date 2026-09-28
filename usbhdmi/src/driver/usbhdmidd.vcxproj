@@ -1,0 +1,147 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: GPL-2.0-only -->
+<Project DefaultTargets="Build" ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|ARM64">
+      <Configuration>Release</Configuration>
+      <Platform>ARM64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{095A9BFC-581E-4281-BB4F-C5621D5C2CFD}</ProjectGuid>
+    <RootNamespace>usbhdmidd</RootNamespace>
+    <TargetName>usbhdmidd</TargetName>
+    <WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion>
+    <TargetVersion>Windows10</TargetVersion>
+    <DriverTargetPlatform>Universal</DriverTargetPlatform>
+    <MinimumVisualStudioVersion>17.0</MinimumVisualStudioVersion>
+    <DriverType>UMDF</DriverType>
+    <!-- The build reads UmdfVersion, not the UmdfVersionMajor/Minor pair older
+         templates use. Getting it wrong fails with a thoroughly confusing
+         "unsupported property value '.'". -->
+    <UmdfVersion>2.33</UmdfVersion>
+    <UMDF_VERSION_MAJOR>2</UMDF_VERSION_MAJOR>
+    <UMDF_VERSION_MINOR>33</UMDF_VERSION_MINOR>
+    <!-- Must match UmdfExtensions in inf/usbhdmidd.inf. 1.2 is the version
+         Windows' own indirect display drivers declare; declaring 1.2 there
+         while compiling against a newer one makes the device refuse to start
+         with nothing but "problem code 10" to go on. -->
+    <IddCxVersion>1.2</IddCxVersion>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <PlatformToolset>WindowsUserModeDriver10.0</PlatformToolset>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)'=='Debug'">
+    <UseDebugLibraries>true</UseDebugLibraries>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)'=='Release'">
+    <UseDebugLibraries>false</UseDebugLibraries>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+
+  <PropertyGroup>
+    <ProjectRoot>$(MSBuildThisFileDirectory)..\..\</ProjectRoot>
+    <OutDir>$(ProjectRoot)build\driver\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(ProjectRoot)build\driver\obj\$(Platform)\$(Configuration)\</IntDir>
+    <SdkIddCxInc>$(WindowsSdkDir)Include\$(WindowsTargetPlatformVersion)\um\iddcx\$(IddCxVersion)</SdkIddCxInc>
+    <SdkIddCxLib>$(WindowsSdkDir)Lib\$(WindowsTargetPlatformVersion)\um\$(Platform)\iddcx\$(IddCxVersion)</SdkIddCxLib>
+    <!-- The standalone build tools ship no 32 bit INF verifier, so that step
+         cannot run here. The INF is still checked by the installer. -->
+    <SkipPackageVerification>true</SkipPackageVerification>
+    <!-- The catalog is produced and signed by scripts\install.ps1, which
+         stages the INF and the binary into one directory first. The in-build
+         step fails because it does not do that staging. -->
+    <EnableInf2cat>false</EnableInf2cat>
+    <SignMode>Off</SignMode>
+  </PropertyGroup>
+
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <ExceptionHandling>Sync</ExceptionHandling>
+      <RuntimeTypeInfo>true</RuntimeTypeInfo>
+      <WarningLevel>Level4</WarningLevel>
+      <!-- Not warnings as errors, and not out of laziness: the driver kit
+           headers are not clean at this level and never have been. The tool
+           and the tests do build with warnings as errors. -->
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <PreprocessorDefinitions>_UNICODE;UNICODE;IDDCX_VERSION_MAJOR=1;IDDCX_VERSION_MINOR=2;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(SdkIddCxInc);$(IntDir);$(ProjectRoot)src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>$(SdkIddCxLib)\IddCxStub.lib;d3d11.lib;dxgi.lib;setupapi.lib;hid.lib;winusb.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+    <Inf>
+      <SpecifyArchitecture>true</SpecifyArchitecture>
+    </Inf>
+  </ItemDefinitionGroup>
+
+  <ItemGroup>
+    <ClCompile Include="..\core\proto.cpp" />
+    <ClCompile Include="..\core\usb.cpp" />
+    <ClCompile Include="..\core\chip.cpp" />
+    <ClCompile Include="..\render\rect.cpp" />
+    <ClCompile Include="..\render\damage.cpp" />
+    <ClCompile Include="..\render\convert.cpp" />
+    <ClCompile Include="..\render\gpu_convert.cpp" />
+    <ClCompile Include="log.cpp" />
+    <ClCompile Include="settings.cpp" />
+    <ClCompile Include="sender.cpp" />
+    <ClCompile Include="pipeline.cpp" />
+    <ClCompile Include="device.cpp" />
+    <ClCompile Include="driver.cpp" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ClInclude Include="..\core\proto.h" />
+    <ClInclude Include="..\core\usb.h" />
+    <ClInclude Include="..\core\chip.h" />
+    <ClInclude Include="..\render\rect.h" />
+    <ClInclude Include="..\render\damage.h" />
+    <ClInclude Include="..\render\convert.h" />
+    <ClInclude Include="..\render\gpu_convert.h" />
+    <ClInclude Include="log.h" />
+    <ClInclude Include="settings.h" />
+    <ClInclude Include="sender.h" />
+    <ClInclude Include="pipeline.h" />
+    <ClInclude Include="device.h" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Inf Include="..\..\inf\usbhdmidd.inf" />
+  </ItemGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+
+  <!-- The conversion shader is compiled here and emitted as a C array, so the
+       driver carries it in its own binary and never needs a shader compiler
+       on the machine it runs on. -->
+  <Target Name="CompileConversionShader" BeforeTargets="ClCompile"
+          Inputs="$(ProjectRoot)src\render\convert_cs.hlsl"
+          Outputs="$(IntDir)convert_cs.h">
+    <!-- WindowsSdkVerBinPath is not set by the driver toolset, so the
+         compiler is located from the kit root instead. -->
+    <PropertyGroup>
+      <FxcPath>$(WindowsSdkDir)bin\$(WindowsTargetPlatformVersion)\x64\fxc.exe</FxcPath>
+    </PropertyGroup>
+    <Error Condition="!Exists('$(FxcPath)')"
+           Text="fxc.exe not found at $(FxcPath). The Windows SDK component that ships it is required to build the conversion shader." />
+    <MakeDir Directories="$(IntDir)" />
+    <Exec Command="&quot;$(FxcPath)&quot; /nologo /T cs_5_0 /E main /Vn kConvertComputeShader /Fh &quot;$(IntDir)convert_cs.h&quot; &quot;$(ProjectRoot)src\render\convert_cs.hlsl&quot;" />
+  </Target>
+</Project>

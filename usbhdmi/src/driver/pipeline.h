@@ -71,7 +71,7 @@ class Pipeline {
 
   /* Converts `rect` of `source` into scratch_, choosing the path by size.
    * Returns false if neither path could do it. */
-  bool ConvertRegion(ID3D11Texture2D* source, const Rect& rect);
+  bool ConvertForSending(ID3D11Texture2D* source, const Rect& rect);
   bool ConvertOnCpu(ID3D11Texture2D* source, const Rect& rect);
 
   /* Converts, refines and submits one region. Returns false when the update
@@ -108,6 +108,12 @@ class Pipeline {
   bool gpu_usable_ = false;
 
   DamageTracker damage_;
+
+  /* Reused every frame. The compositor reports how many regions changed and
+   * then copies them into buffers we hand it, so these exist to avoid an
+   * allocation on the frame path. */
+  std::vector<RECT> dirty_rects_;
+  std::vector<IDDCX_MOVEREGION> move_regions_;
 
   /* Converted pixels for the region being worked on, packed. */
   std::vector<uint8_t> scratch_;

@@ -1,0 +1,73 @@
+; SPDX-License-Identifier: GPL-2.0-only
+;
+; Binds WinUSB to the vendor specific display interface of MacroSilicon
+; MS912x / MS913x USB display adapters, so a user mode driver can drive the
+; bulk pixel pipe on endpoint 4.
+;
+; This claims only the display interface. The adapter's HID, audio and mass
+; storage interfaces keep their in-box drivers, which matters: the control
+; plane runs over the HID interface and would stop working if this package
+; took it over.
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = USBDevice
+ClassGuid   = {88BAE032-5A81-49F0-BC3D-A4FF138216D6}
+Provider    = %ProviderName%
+CatalogFile = usbhdmi_winusb.cat
+DriverVer   = 01/01/2026,2.0.0.0
+PnpLockdown = 1
+
+[Manufacturer]
+%ManufacturerName% = Standard, NTamd64, NTarm64
+
+; USB 3 parts are composite and the display interface is MI_03, verified
+; against 345F:9133 hardware. USB 2 parts are listed by bare device id
+; because those adapters are reported to expose the vendor specific interface
+; with no composite parent; that half is unverified, so confirm the hardware
+; id with "pnputil /enum-devices /connected" before trusting it.
+
+[Standard.NTamd64]
+%DeviceName% = USB_Install, USB\VID_345F&PID_9132&MI_03
+%DeviceName% = USB_Install, USB\VID_345F&PID_9133&MI_03
+%DeviceName% = USB_Install, USB\VID_345F&PID_9135&MI_03
+%DeviceName% = USB_Install, USB\VID_534D&PID_6021
+%DeviceName% = USB_Install, USB\VID_534D&PID_0821
+
+[Standard.NTarm64]
+%DeviceName% = USB_Install, USB\VID_345F&PID_9132&MI_03
+%DeviceName% = USB_Install, USB\VID_345F&PID_9133&MI_03
+%DeviceName% = USB_Install, USB\VID_345F&PID_9135&MI_03
+%DeviceName% = USB_Install, USB\VID_534D&PID_6021
+%DeviceName% = USB_Install, USB\VID_534D&PID_0821
+
+[USB_Install]
+Include = winusb.inf
+Needs   = WINUSB.NT
+
+[USB_Install.Services]
+Include = winusb.inf
+Needs   = WINUSB.NT.Services
+
+[USB_Install.Wdf]
+KmdfLibraryVersion = 1.11
+
+[USB_Install.HW]
+AddReg = Dev_AddReg
+
+[Dev_AddReg]
+; Must match kDataInterfaceGuid in src/core/usb.cpp. Deliberately different
+; from the frozen first driver's, so the two packages cannot find each
+; other's devices if both happen to be present.
+HKR,,DeviceInterfaceGUIDs,0x10000,"{C32EB32B-5AAA-41C2-90E3-380CC3B0E031}"
+; The display driver runs in a host process as LOCAL SERVICE, which the
+; default WinUSB permissions do not cover. Grant it access explicitly, plus
+; SYSTEM, administrators and ordinary users so the console tool still works
+; from an unelevated shell.
+HKR,,DeviceCharacteristics,0x10001,0x0100
+HKR,,Security,,"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;LS)(A;;GA;;;AU)"
+
+[Strings]
+ProviderName     = "usbhdmi"
+ManufacturerName = "MacroSilicon"
+DeviceName       = "USB HDMI Display (WinUSB)"

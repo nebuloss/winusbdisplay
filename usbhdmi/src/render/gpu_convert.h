@@ -66,10 +66,6 @@
 
 namespace usbhdmi {
 
-/* Updates at least this many pixels convert on the GPU. Roughly a quarter of
- * a 1080p screen. */
-constexpr int64_t kGpuThresholdPixels = 1920 * 1080 / 4;
-
 class GpuConverter {
  public:
   /* Compiles nothing at runtime: the shader is built into the binary by the

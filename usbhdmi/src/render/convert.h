@@ -49,6 +49,17 @@ constexpr int kCoeffVr = 14336, kCoeffVg = -12005, kCoeffVb = -2331;
 static_assert(kCoeffUr + kCoeffUg + kCoeffUb == 0, "U must be neutral on grey");
 static_assert(kCoeffVr + kCoeffVg + kCoeffVb == 0, "V must be neutral on grey");
 
+/* Updates at least this many pixels convert on the GPU, the rest on the
+ * processor. Roughly a quarter of a 1080p screen.
+ *
+ * A compute shader has a fixed dispatch and readback cost that a small update
+ * cannot repay, while a large one is dominated by dragging the source across
+ * the bus, which is what the GPU path avoids. This is a starting point rather
+ * than a law: on a discrete card the crossover should move down, since the
+ * processor path has to drag four bytes per pixel back across the bus where
+ * the GPU path drags two. It is overridable at runtime for that reason. */
+constexpr int64_t kGpuThresholdPixels = 1920 * 1080 / 4;
+
 /* Picture adjustment applied while converting, expressed the way a monitor
  * reports it: brightness and contrast each 0..100, with 100 and 50 meaning
  * "leave the image alone".
@@ -78,9 +89,23 @@ size_t FrameRect(uint8_t* dst, size_t dst_capacity, const uint8_t* src,
                  const Rect& rect,
                  const PictureAdjust& adjust = PictureAdjust());
 
-/* Writes just the header and footer around `pixel_bytes` of pixel data that
- * something else, in practice the GPU path, has already produced. */
+/* Writes just the header and footer around pixel data that something else,
+ * in practice the GPU path, has already produced. */
 size_t FrameExisting(uint8_t* dst, size_t dst_capacity, const Rect& rect);
+
+/* Converts a region into packed UYVY with no framing: `rect.height()` rows of
+ * `rect.width() * 2` bytes, one after another. This is what the pipeline
+ * works in, because a region has to be converted before it can be compared
+ * against what is already on screen, and only the part that differs is then
+ * wrapped up and sent. */
+void ConvertRegion(uint8_t* dst, const uint8_t* src, size_t stride,
+                   const Rect& rect, const PictureAdjust& adjust);
+
+/* Copies a sub-region out of a buffer produced by ConvertRegion and frames
+ * it for the wire. `sub` must lie inside `region`. Returns bytes written. */
+size_t FrameSubRegion(uint8_t* dst, size_t dst_capacity,
+                      const uint8_t* converted, const Rect& region,
+                      const Rect& sub);
 
 /* One row. Dispatches to SIMD; SSE2 is part of the x64 baseline so there is
  * no runtime check. */

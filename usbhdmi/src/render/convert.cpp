@@ -334,6 +334,50 @@ size_t FrameExisting(uint8_t* dst, size_t dst_capacity, const Rect& rect) {
   return needed;
 }
 
+void ConvertRegion(uint8_t* dst, const uint8_t* src, size_t stride,
+                   const Rect& rect, const PictureAdjust& adjust) {
+  const size_t row_bytes = static_cast<size_t>(rect.width()) * 2;
+  const int width = rect.width();
+
+  RowPool::Instance().Run(rect.height(), [&](int first, int last) {
+    for (int i = first; i < last; ++i) {
+      const uint8_t* row = src +
+                           static_cast<size_t>(rect.y1 + i) * stride +
+                           static_cast<size_t>(rect.x1) * 4;
+      uint8_t* target = dst + static_cast<size_t>(i) * row_bytes;
+      ConvertRow(target, row, width);
+      ApplyPictureAdjust(target, width, adjust);
+    }
+  });
+}
+
+size_t FrameSubRegion(uint8_t* dst, size_t dst_capacity,
+                      const uint8_t* converted, const Rect& region,
+                      const Rect& sub) {
+  if (sub.empty() || sub.x1 < region.x1 || sub.y1 < region.y1 ||
+      sub.x2 > region.x2 || sub.y2 > region.y2 || (sub.x1 & 1) ||
+      (sub.width() & 1)) {
+    return 0;
+  }
+
+  const size_t needed = FrameExisting(dst, dst_capacity, sub);
+  if (needed == 0) {
+    return 0;
+  }
+
+  const size_t region_row = static_cast<size_t>(region.width()) * 2;
+  const size_t sub_row = static_cast<size_t>(sub.width()) * 2;
+  uint8_t* out = dst + kFrameHeaderSize;
+
+  for (int y = sub.y1; y < sub.y2; ++y) {
+    memcpy(out, converted + static_cast<size_t>(y - region.y1) * region_row +
+                    static_cast<size_t>(sub.x1 - region.x1) * 2,
+           sub_row);
+    out += sub_row;
+  }
+  return needed;
+}
+
 size_t FrameRect(uint8_t* dst, size_t dst_capacity, const uint8_t* src,
                  size_t stride, int image_width, int image_height,
                  const Rect& rect, const PictureAdjust& adjust) {
@@ -347,21 +391,7 @@ size_t FrameRect(uint8_t* dst, size_t dst_capacity, const uint8_t* src,
     return 0;
   }
 
-  uint8_t* const pixels = dst + kFrameHeaderSize;
-  const size_t row_bytes = static_cast<size_t>(rect.width()) * 2;
-  const int width = rect.width();
-
-  RowPool::Instance().Run(rect.height(), [&](int first, int last) {
-    for (int i = first; i < last; ++i) {
-      const uint8_t* row = src +
-                           static_cast<size_t>(rect.y1 + i) * stride +
-                           static_cast<size_t>(rect.x1) * 4;
-      uint8_t* target = pixels + static_cast<size_t>(i) * row_bytes;
-      ConvertRow(target, row, width);
-      ApplyPictureAdjust(target, width, adjust);
-    }
-  });
-
+  ConvertRegion(dst + kFrameHeaderSize, src, stride, rect, adjust);
   return needed;
 }
 
