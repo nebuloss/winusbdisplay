@@ -334,9 +334,16 @@ size_t FrameExisting(uint8_t* dst, size_t dst_capacity, const Rect& rect) {
   return needed;
 }
 
-void ConvertRegion(uint8_t* dst, const uint8_t* src, size_t stride,
-                   const Rect& rect, const PictureAdjust& adjust) {
+bool ConvertRegion(uint8_t* dst, size_t dst_capacity, const uint8_t* src,
+                   size_t stride, const Rect& rect,
+                   const PictureAdjust& adjust) {
   const size_t row_bytes = static_cast<size_t>(rect.width()) * 2;
+  /* Checked rather than assumed. The destination is sized from the display
+   * mode, and the mode can change under a caller that has not noticed. */
+  if (rect.empty() ||
+      dst_capacity < row_bytes * static_cast<size_t>(rect.height())) {
+    return false;
+  }
   const int width = rect.width();
 
   RowPool::Instance().Run(rect.height(), [&](int first, int last) {
@@ -349,6 +356,7 @@ void ConvertRegion(uint8_t* dst, const uint8_t* src, size_t stride,
       ApplyPictureAdjust(target, width, adjust);
     }
   });
+  return true;
 }
 
 size_t FrameSubRegion(uint8_t* dst, size_t dst_capacity,
@@ -391,7 +399,10 @@ size_t FrameRect(uint8_t* dst, size_t dst_capacity, const uint8_t* src,
     return 0;
   }
 
-  ConvertRegion(dst + kFrameHeaderSize, src, stride, rect, adjust);
+  if (!ConvertRegion(dst + kFrameHeaderSize, dst_capacity - kFrameOverhead,
+                     src, stride, rect, adjust)) {
+    return 0;
+  }
   return needed;
 }
 

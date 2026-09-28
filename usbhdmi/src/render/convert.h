@@ -98,8 +98,9 @@ size_t FrameExisting(uint8_t* dst, size_t dst_capacity, const Rect& rect);
  * works in, because a region has to be converted before it can be compared
  * against what is already on screen, and only the part that differs is then
  * wrapped up and sent. */
-void ConvertRegion(uint8_t* dst, const uint8_t* src, size_t stride,
-                   const Rect& rect, const PictureAdjust& adjust);
+bool ConvertRegion(uint8_t* dst, size_t dst_capacity, const uint8_t* src,
+                   size_t stride, const Rect& rect,
+                   const PictureAdjust& adjust);
 
 /* Copies a sub-region out of a buffer produced by ConvertRegion and frames
  * it for the wire. `sub` must lie inside `region`. Returns bytes written. */

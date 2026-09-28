@@ -20,6 +20,11 @@ if "%VSCMD_ARG_TGT_ARCH%"=="" (
       set VCVARS=%%i\VC\Auxiliary\Build\vcvars64.bat
     )
   )
+  if not exist "!VCVARS!" (
+    echo error: could not locate vcvars64.bat.
+    echo Visual Studio 2022 Build Tools with the C++ workload is required.
+    exit /b 1
+  )
   call "!VCVARS!" >nul
 )
 
@@ -38,7 +43,11 @@ rem once the INF and the binary have been staged into one directory.
   /v:minimal /nologo
 
 if errorlevel 1 (
-  echo build failed
+  echo.
+  echo build failed. The usual cause is a missing WDK: this needs the
+  echo Windows Driver Kit *extension for Visual Studio*, not just the SDK.
+  echo Check that "Windows Driver Kit" appears in the Visual Studio
+  echo Installer under Individual Components.
   exit /b 1
 )
 echo built %ROOT%\build\driver\%PLATFORM%\%CONFIG%\usbhdmidd.dll

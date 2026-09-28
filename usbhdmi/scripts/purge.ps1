@@ -13,13 +13,30 @@
 $ErrorActionPreference = 'SilentlyContinue'
 
 Write-Output "==> removing device nodes"
-$devcon = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\Tools" -Recurse -Filter devcon.exe |
-    Where-Object { $_.FullName -match '\\x64\\' } | Select-Object -First 1
+# Searched in every place the kit puts it. Looking in only one worked on the
+# machine it was written on and silently skipped the removal everywhere else,
+# leaving a device node behind while the script still reported success.
+$devconRoots = @(
+    "${env:ProgramFiles(x86)}\Windows Kits\10\Tools",
+    "${env:ProgramFiles(x86)}\Windows Kits\10\bin",
+    "${env:ProgramFiles}\Windows Kits\10\Tools",
+    "${env:ProgramFiles}\Windows Kits\10\bin"
+) | Where-Object { Test-Path $_ }
+
+$devcon = $null
+foreach ($r in $devconRoots) {
+    $hit = Get-ChildItem $r -Recurse -Filter devcon.exe -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -match '\\x64\\' } | Select-Object -First 1
+    if ($hit) { $devcon = $hit; break }
+}
+
 if ($devcon) {
     & $devcon.FullName remove 'root\usbhdmidd'
     & $devcon.FullName remove 'root\ms912xidd'
 } else {
-    Write-Output "  devcon not found, skipping"
+    Write-Output "  devcon not found in the Windows Kits."
+    Write-Output "  The driver packages below will still be removed, but the"
+    Write-Output "  device node will remain and reappear as a phantom monitor."
 }
 
 Write-Output ""
@@ -39,6 +56,28 @@ Write-Output ""
 Write-Output "==> rescanning"
 pnputil /scan-devices | Out-Null
 Start-Sleep -Seconds 2
+
+Write-Output ""
+Write-Output "==> settings"
+# Left behind otherwise, along with the widened permissions on it.
+if (Test-Path 'HKLM:\SOFTWARE\usbhdmi') {
+    Remove-Item 'HKLM:\SOFTWARE\usbhdmi' -Recurse -Force
+    Write-Output "  removed HKLM\SOFTWARE\usbhdmi"
+}
+
+Write-Output ""
+Write-Output "==> signing certificate"
+# The installer creates a code signing certificate and trusts it machine
+# wide. Leaving that behind after an uninstall is not acceptable: it is a
+# trust root with years left on it that the user did not ask to keep.
+$subject = 'CN=usbhdmi local signing'
+foreach ($store in 'My', 'Root', 'TrustedPublisher') {
+    Get-ChildItem "Cert:\LocalMachine\$store" -ErrorAction SilentlyContinue |
+        Where-Object { $_.Subject -eq $subject } | ForEach-Object {
+            Write-Output "  removing from $store"
+            Remove-Item $_.PSPath -Force -ErrorAction SilentlyContinue
+        }
+}
 
 Write-Output ""
 Write-Output "==> what is left"

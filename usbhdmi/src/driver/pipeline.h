@@ -86,6 +86,11 @@ class Pipeline {
    * order. */
   bool SendRegion(ID3D11Texture2D* source, const Rect& rect, bool force);
 
+  /* Sends `sub` from the converted pixels already in scratch_, which cover
+   * `region`. Twice and all or nothing, because the adapter keeps two copies
+   * of the picture. */
+  bool SubmitConverted(const Rect& region, const Rect& sub);
+
   void ProcessFrame(const IDARG_OUT_RELEASEANDACQUIREBUFFER& buffer);
 
   /* Puts traffic on the wire when the desktop is still, repainting a band
@@ -113,8 +118,6 @@ class Pipeline {
   Microsoft::WRL::ComPtr<ID3D11Texture2D> staging_;
   int staging_width_ = 0;
   int staging_height_ = 0;
-
-  Microsoft::WRL::ComPtr<ID3D11Texture2D> last_surface_;
 
   GpuConverter gpu_;
   bool gpu_usable_ = false;

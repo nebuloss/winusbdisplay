@@ -184,10 +184,14 @@ bool Pipeline::ConvertOnCpu(ID3D11Texture2D* source, const Rect& rect) {
   local.y1 = 0;
   local.x2 = rect.width();
   local.y2 = rect.height();
-  ConvertRegion(scratch_.data(), static_cast<const uint8_t*>(mapped.pData),
-                mapped.RowPitch, local, settings_.picture());
+  const bool ok = ConvertRegion(scratch_.data(), scratch_.size(),
+                                static_cast<const uint8_t*>(mapped.pData),
+                                mapped.RowPitch, local, settings_.picture());
 
   context_->Unmap(staging_.Get(), 0);
+  if (!ok) {
+    return false;
+  }
   ++cpu_conversions_;
   return true;
 }
@@ -258,6 +262,28 @@ bool Pipeline::SendRegion(ID3D11Texture2D* source, const Rect& rect,
     return true;
   }
 
+  if (!SubmitConverted(rect, changed)) {
+    return false;
+  }
+
+  /* Both copies now hold this region, so it is safe to record it as what the
+   * panel is showing. Recording it after only one transfer would make the
+   * next comparison decide the second copy already had it, and the region
+   * would be left stale in one of them forever. */
+  StoreUyvyReference(rect, scratch_.data(), onscreen_.data(),
+                     onscreen_stride_);
+  if (rect.x1 == 0 && rect.y1 == 0 && rect.x2 >= mode_.width &&
+      rect.y2 >= mode_.height) {
+    onscreen_valid_ = true;
+  }
+
+  last_send_ms_ = GetTickCount64();
+  return true;
+}
+
+/* Sends `sub` out of the converted pixels sitting in scratch_, which cover
+ * `region`. Twice, and all or nothing: see the comment below. */
+bool Pipeline::SubmitConverted(const Rect& region, const Rect& sub) {
   /* Twice, back to back, and both buffers are taken before either is sent.
    *
    * The adapter keeps two copies of the picture and alternates between them
@@ -305,13 +331,13 @@ bool Pipeline::SendRegion(ID3D11Texture2D* source, const Rect& rect,
    * exists to prevent. The two are identical, so the second is a copy. */
   const size_t length = FrameSubRegion(transfers[0]->data(),
                                        transfers[0]->size(), scratch_.data(),
-                                       rect, changed);
+                                       region, sub);
   if (length == 0 || transfers[1]->size() < length) {
     sender_->Release(transfers[0]);
     sender_->Release(transfers[1]);
     Log("pipeline: could not frame %d,%d %dx%d inside %d,%d %dx%d",
-        changed.x1, changed.y1, changed.width(), changed.height(), rect.x1,
-        rect.y1, rect.width(), rect.height());
+        sub.x1, sub.y1, sub.width(), sub.height(), region.x1,
+        region.y1, region.width(), region.height());
     return false;
   }
   memcpy(transfers[1]->data(), transfers[0]->data(), length);
@@ -319,17 +345,6 @@ bool Pipeline::SendRegion(ID3D11Texture2D* source, const Rect& rect,
   for (int i = 0; i < 2; ++i) {
     sender_->Submit(transfers[i], length);
     ++regions_sent_;
-  }
-
-  /* Both copies now hold this region, so it is safe to record it as what the
-   * panel is showing. Recording it after only one transfer would make the
-   * next comparison decide the second copy already had it, and the region
-   * would be left stale in one of them forever. */
-  StoreUyvyReference(rect, scratch_.data(), onscreen_.data(),
-                     onscreen_stride_);
-  if (rect.x1 == 0 && rect.y1 == 0 && rect.x2 >= mode_.width &&
-      rect.y2 >= mode_.height) {
-    onscreen_valid_ = true;
   }
 
   last_send_ms_ = GetTickCount64();
@@ -344,7 +359,6 @@ void Pipeline::ProcessFrame(const IDARG_OUT_RELEASEANDACQUIREBUFFER& buffer) {
           IID_PPV_ARGS(surface.GetAddressOf())))) {
     return;
   }
-  last_surface_ = surface;
 
   /* The metadata carries only the counts; the regions themselves have to be
    * fetched into buffers we provide. */
@@ -416,24 +430,27 @@ void Pipeline::ProcessFrame(const IDARG_OUT_RELEASEANDACQUIREBUFFER& buffer) {
 }
 
 void Pipeline::RefreshIdle() {
-  if (!last_surface_) {
-    return;
-  }
-
   /* The panel drops its signal after a second or two of silence, and a still
    * desktop means the compositor stops presenting entirely, so something has
    * to keep the wire busy.
    *
-   * A band rather than the whole screen. A full repaint costs eight slots,
-   * sixteen once it is sent to both of the adapter's copies, during which
-   * nothing else can go out; a band costs one slot each. The band is safe
-   * only because it is sent twice like everything else. Sent once it would
-   * land in one copy and leave the other holding older content, and the two
-   * would alternate visibly, which is exactly the trap a partial repaint
-   * looks like a good idea right up until you fall into it.
+   * The bytes come straight out of the record of what the panel is showing,
+   * which is already in the adapter's own format. That makes this both safe
+   * and nearly free: no surface is touched, so there is no question of
+   * reading one the compositor has taken back, and no conversion or graphics
+   * work happens at all. Re-reading the last surface instead was the obvious
+   * approach and is the riskier one, because that surface belongs to the
+   * compositor again the moment the next buffer is asked for.
    *
-   * The band walks down the screen so that any region which somehow went
-   * stale is eventually repainted anyway. */
+   * A band rather than the whole screen: one slot against eight, doubled
+   * because everything is sent twice. It walks down the screen so anything
+   * that somehow went stale is eventually repainted anyway. */
+  if (!onscreen_valid_) {
+    /* Nothing trustworthy to resend. Ask for a real repaint instead. */
+    damage_.MarkAll();
+    return;
+  }
+
   Rect band;
   band.x1 = 0;
   band.x2 = mode_.width;
@@ -450,7 +467,16 @@ void Pipeline::RefreshIdle() {
   }
 
   if (!band.empty()) {
-    SendRegion(last_surface_.Get(), band, true);
+    /* Copy the band out of the screen record into the packed layout the
+     * framing step expects. */
+    const size_t row_bytes = static_cast<size_t>(band.width()) * 2;
+    for (int y = band.y1; y < band.y2; ++y) {
+      memcpy(scratch_.data() + static_cast<size_t>(y - band.y1) * row_bytes,
+             onscreen_.data() + static_cast<size_t>(y) * onscreen_stride_ +
+                 static_cast<size_t>(band.x1) * 2,
+             row_bytes);
+    }
+    SubmitConverted(band, band);
   }
 
   /* Restart the clock even if nothing went out, so a completely static
