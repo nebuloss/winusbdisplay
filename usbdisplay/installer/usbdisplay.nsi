@@ -63,6 +63,10 @@ VIAddVersionKey "LegalCopyright" "GPL-2.0-only"
 
 !include "MUI2.nsh"
 !include "x64.nsh"
+!include "LogicLib.nsh"
+; Where WM_CLOSE comes from. Included by name rather than relied on through
+; another header, because which headers pull in which is not stable.
+!include "WinMessages.nsh"
 
 !define MUI_ABORTWARNING
 !define MUI_FINISHPAGE_TEXT "The adapter should appear as a second monitor \
@@ -81,9 +85,41 @@ where it stopped."
 
 !insertmacro MUI_LANGUAGE "English"
 
-; The driver is built for x64 only, so saying so here is better than
-; installing successfully on a machine where nothing can then load.
+; Asks the brightness control to close, and waits for it to.
+;
+; This has to happen before anything is written, and it is the whole reason
+; the ordering here matters: on an upgrade that program is running, and
+; Windows will not overwrite a program that is in memory. Left until later it
+; fails at the first file, having already asked the user for permission.
+;
+; WM_CLOSE rather than terminating it, so it takes its icon out of the
+; notification area on the way; killed instead, the icon stays there until
+; something makes the shell notice, which can be hours.
+!macro StopTheTray
+  Push $0
+  Push $1
+  StrCpy $1 0
+  ${Do}
+    FindWindow $0 "UsbDisplayBrightnessTray"
+    ${If} $0 == 0
+      ${ExitDo}
+    ${EndIf}
+    SendMessage $0 ${WM_CLOSE} 0 0
+    Sleep 500
+    IntOp $1 $1 + 1
+    ; Ten tries is five seconds. If it is still there after that it is wedged,
+    ; and the file copy will report that plainly enough.
+    ${If} $1 >= 10
+      ${ExitDo}
+    ${EndIf}
+  ${Loop}
+  Pop $1
+  Pop $0
+!macroend
+
 Function .onInit
+  ; The driver is built for x64 only, so saying so here is better than
+  ; installing successfully on a machine where nothing can then load.
   ${IfNot} ${RunningX64}
     MessageBox MB_ICONSTOP "This driver is built for 64-bit Windows, and \
 this machine is not running it."
@@ -92,7 +128,14 @@ this machine is not running it."
 FunctionEnd
 
 Section "install"
+  DetailPrint "Making room..."
+  !insertmacro StopTheTray
+
   SetOutPath "$INSTDIR"
+
+  ; Left by a version that installed more than this one does. Deleting it
+  ; here rather than leaving it means an upgrade does not accumulate.
+  Delete "$INSTDIR\brightnessprobe.exe"
 
   ; Everything the driver step needs, in the layout it expects: each package
   ; is its own directory, because that is what Windows is handed and what
@@ -124,9 +167,24 @@ Section "install"
 
   ; Per user, because it is that user's brightness and it needs no rights of
   ; its own to change it.
+  ;
+  ; Written to the hive of whoever is running this, which is right when an
+  ; administrator is prompted for consent and wrong when a standard user
+  ; types someone else's credentials: the entry then belongs to the account
+  ; that authorised the install rather than the one using the machine. The
+  ; second case is rare enough, and the consequence small enough, that the
+  ; alternative of writing every loaded user hive is not worth it. Anyone
+  ; affected can start the program once from the Start menu.
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" \
     "usbdisplay brightness" '"$INSTDIR\usbdisplaytray.exe"'
-  Exec '"$INSTDIR\usbdisplaytray.exe"'
+
+  ; Started through Explorer rather than directly, because this program is
+  ; elevated and anything it launches inherits that. A notification area icon
+  ; running as administrator is the wrong thing on its own terms, and it also
+  ; would not be the same program the Run entry above starts at sign-in, so
+  ; the two would behave differently. Explorer runs as the signed-in user,
+  ; so what it launches does too.
+  Exec '"$WINDIR\explorer.exe" "$INSTDIR\usbdisplaytray.exe"'
 
   WriteUninstaller "$INSTDIR\uninstall.exe"
 
@@ -144,9 +202,14 @@ Section "install"
 SectionEnd
 
 Section "uninstall"
-  ; The driver step first: it stops the brightness control and retires the
-  ; device nodes, and removing the files under it would leave Windows with a
-  ; driver package pointing at nothing.
+  ; The brightness control first, for the same reason as on the way in: a
+  ; running program cannot be deleted, and here the failure would be an
+  ; uninstall that silently leaves things behind.
+  !insertmacro StopTheTray
+
+  ; Then the driver step, before its own file is removed: it retires the
+  ; device nodes and the driver packages, and deleting what it needs first
+  ; would leave Windows holding a package that points at nothing.
   nsExec::ExecToLog '"$INSTDIR\driversetup.exe" /uninstall /nowait'
   Pop $0
 
