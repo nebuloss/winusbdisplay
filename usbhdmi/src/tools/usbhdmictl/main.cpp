@@ -405,35 +405,56 @@ int CmdSelfTest() {
   printf("\ndamage refinement\n");
   {
     /* The compositor sometimes reports the whole screen as dirty when almost
-     * nothing changed. Believing it costs eight periods. */
+     * nothing changed. Believing it costs eight periods. The check runs on
+     * converted pixels, so it works the same whichever conversion path
+     * produced them. */
     const int width = 1920, height = 1080;
-    const size_t stride = static_cast<size_t>(width) * 4;
-    std::vector<uint8_t> before(stride * height, 0);
-    std::vector<uint8_t> after = before;
-    for (int y = 500; y < 520; ++y) {
-      for (int x = 800; x < 840; ++x) {
-        after[y * stride + x * 4] = 0xFF;
+    const size_t reference_stride = static_cast<size_t>(width) * 2;
+
+    std::vector<uint8_t> source(static_cast<size_t>(width) * height * 4, 0);
+    std::vector<uint8_t> reference(reference_stride * height, 0);
+
+    const Rect whole = MakeRect(0, 0, width, height);
+    std::vector<uint8_t> converted(reference_stride * height);
+    const size_t source_stride = static_cast<size_t>(width) * 4;
+
+    const auto convert_whole = [&]() {
+      for (int y = 0; y < height; ++y) {
+        ConvertRow(converted.data() + static_cast<size_t>(y) * reference_stride,
+                   source.data() + static_cast<size_t>(y) * source_stride,
+                   width);
       }
-    }
+    };
 
-    const Rect claimed = MakeRect(0, 0, width, height);
-    const Rect actual =
-        ShrinkToChangedArea(claimed, after.data(), before.data(), stride);
-    const bool ok = actual.x1 == 800 && actual.x2 == 840 &&
-                    actual.y1 == 500 && actual.y2 == 520;
-    failures += ok ? 0 : 1;
-    printf("  %-5s whole screen claimed, %d,%d %dx%d actually changed"
-           " (%d periods instead of %d)\n",
-           ok ? "ok" : "FAIL", actual.x1, actual.y1, actual.width(),
-           actual.height(), TransferPeriods(actual),
-           TransferPeriods(claimed));
+    convert_whole();
+    StoreUyvyReference(whole, converted.data(), reference.data(),
+                       reference_stride);
 
-    const Rect unchanged =
-        ShrinkToChangedArea(claimed, before.data(), before.data(), stride);
+    const Rect unchanged = ShrinkChangedUyvy(whole, converted.data(),
+                                             reference.data(),
+                                             reference_stride);
     const bool empty_ok = unchanged.empty();
     failures += empty_ok ? 0 : 1;
     printf("  %-5s an unchanged screen shrinks to nothing\n",
            empty_ok ? "ok" : "FAIL");
+
+    for (int y = 500; y < 520; ++y) {
+      for (int x = 800; x < 840; ++x) {
+        source[y * source_stride + x * 4] = 0xFF;
+      }
+    }
+    convert_whole();
+
+    const Rect actual = ShrinkChangedUyvy(whole, converted.data(),
+                                          reference.data(), reference_stride);
+    const bool ok = actual.x1 == 800 && actual.x2 == 840 &&
+                    actual.y1 == 500 && actual.y2 == 520;
+    failures += ok ? 0 : 1;
+    printf("  %-5s whole screen claimed, %d,%d %dx%d actually changed"
+           " (%d period instead of %d)\n",
+           ok ? "ok" : "FAIL", actual.x1, actual.y1, actual.width(),
+           actual.height(), TransferPeriods(actual),
+           TransferPeriods(whole));
   }
 
   printf("\ntransfer planning\n");

@@ -113,19 +113,33 @@ class DamageTracker {
  * so the cost reasoning can be checked without hardware.  */
 size_t PlanTransfers(const RectSet& in, Rect* out, size_t capacity);
 
-/* Shrinks `rect` to the area that actually differs between two XRGB8888
- * images, or returns an empty rectangle when they are identical.
+/* Shrinks `rect` to the part that actually differs from the last thing sent,
+ * or returns an empty rectangle if nothing does.
  *
  * The compositor sometimes reports a single dirty rectangle covering the
  * whole screen when very little has changed. Believing it costs eight periods
- * and is visible as a sweep down the panel. Comparing costs well under a
- * millisecond, so for any rectangle spanning more than one period it is worth
- * checking before paying for it.
+ * and is visible as a sweep down the panel, so it is worth checking.
  *
- * Both images must have the same geometry; `stride` is in bytes and is not
- * necessarily width * 4, because a mapped GPU staging texture has its own
- * row pitch. */
-Rect ShrinkToChangedArea(const Rect& rect, const uint8_t* current,
-                         const uint8_t* previous, size_t stride);
+ * The comparison is deliberately made on **converted** pixels rather than on
+ * the source image, which sounds backwards and is not. What this saves is
+ * transfer time, and a transfer costs twenty to fifty times what a conversion
+ * does, so converting the claimed region first and then discovering most of
+ * it was unnecessary is still a large win. Doing it this way also means it
+ * works identically whichever conversion path ran, which the obvious
+ * arrangement does not: comparing source pixels would need a copy of the
+ * desktop that the GPU path never reads and therefore could never keep
+ * current.
+ *
+ * `converted` holds rect.height() packed rows of rect.width() * 2 bytes.
+ * `reference` is the whole screen in UYVY with `reference_stride` bytes per
+ * row. Results are on a two pixel boundary, which is the granularity UYVY
+ * has anyway. */
+Rect ShrinkChangedUyvy(const Rect& rect, const uint8_t* converted,
+                       const uint8_t* reference, size_t reference_stride);
+
+/* Copies `rect` of `converted` into the whole-screen `reference` buffer, so
+ * the next comparison has something current to work against. */
+void StoreUyvyReference(const Rect& rect, const uint8_t* converted,
+                        uint8_t* reference, size_t reference_stride);
 
 }  // namespace usbhdmi

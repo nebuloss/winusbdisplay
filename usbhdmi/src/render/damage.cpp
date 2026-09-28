@@ -196,82 +196,81 @@ size_t DamageTracker::Plan(Rect* out, size_t capacity) {
 
 namespace {
 
-/* True if any of `pixels` 32 bit pixels differ. */
-bool RowDiffers(const uint8_t* a, const uint8_t* b, int pixels) {
-  int i = 0;
-  for (; i + 4 <= pixels; i += 4) {
-    const __m128i va =
-        _mm_loadu_si128(reinterpret_cast<const __m128i*>(a + i * 4));
-    const __m128i vb =
-        _mm_loadu_si128(reinterpret_cast<const __m128i*>(b + i * 4));
+/* True if any byte in the range differs. UYVY is compared in whole four byte
+ * groups, which is one pixel pair and also the granularity the chip wants. */
+bool BytesDiffer(const uint8_t* a, const uint8_t* b, size_t bytes) {
+  size_t i = 0;
+  for (; i + 16 <= bytes; i += 16) {
+    const __m128i va = _mm_loadu_si128(reinterpret_cast<const __m128i*>(a + i));
+    const __m128i vb = _mm_loadu_si128(reinterpret_cast<const __m128i*>(b + i));
     if (_mm_movemask_epi8(_mm_cmpeq_epi8(va, vb)) != 0xFFFF) {
       return true;
     }
   }
-  if (i < pixels) {
-    return memcmp(a + i * 4, b + i * 4, static_cast<size_t>(pixels - i) * 4) !=
-           0;
-  }
-  return false;
+  return i < bytes && memcmp(a + i, b + i, bytes - i) != 0;
 }
 
 }  // namespace
 
-Rect ShrinkToChangedArea(const Rect& rect, const uint8_t* current,
-                         const uint8_t* previous, size_t stride) {
+Rect ShrinkChangedUyvy(const Rect& rect, const uint8_t* converted,
+                       const uint8_t* reference, size_t reference_stride) {
   if (rect.empty()) {
     return rect;
   }
 
-  const int width = rect.width();
-  const size_t x_offset = static_cast<size_t>(rect.x1) * 4;
+  const size_t row_bytes = static_cast<size_t>(rect.width()) * 2;
+  const size_t x_offset = static_cast<size_t>(rect.x1) * 2;
+
+  const auto row_of = [&](int y) {
+    return converted + static_cast<size_t>(y - rect.y1) * row_bytes;
+  };
+  const auto reference_row = [&](int y) {
+    return reference + static_cast<size_t>(y) * reference_stride + x_offset;
+  };
 
   int top = rect.y2;
   for (int y = rect.y1; y < rect.y2; ++y) {
-    const size_t row = static_cast<size_t>(y) * stride + x_offset;
-    if (RowDiffers(current + row, previous + row, width)) {
+    if (BytesDiffer(row_of(y), reference_row(y), row_bytes)) {
       top = y;
       break;
     }
   }
   if (top == rect.y2) {
     Rect none;
-    return none; /* identical, nothing owed */
+    return none; /* the claimed region is exactly what is already on screen */
   }
 
   int bottom = top + 1;
   for (int y = rect.y2 - 1; y >= bottom; --y) {
-    const size_t row = static_cast<size_t>(y) * stride + x_offset;
-    if (RowDiffers(current + row, previous + row, width)) {
+    if (BytesDiffer(row_of(y), reference_row(y), row_bytes)) {
       bottom = y + 1;
       break;
     }
   }
 
-  /* Columns, over the rows now known to contain a change. Scanning a column
-   * touches one pixel per row and is cache hostile, so this walks inwards
+  /* Now the columns, over the rows known to contain a change. Walking a
+   * column touches four bytes per row and is cache hostile, so this comes in
    * from each edge and stops at the first difference rather than scanning
-   * the whole span. */
-  int left = rect.x1;
-  for (; left < rect.x2; ++left) {
+   * every column. */
+  const int pairs = rect.width() / 2;
+  int first_pair = 0;
+  for (; first_pair < pairs; ++first_pair) {
     bool differs = false;
     for (int y = top; y < bottom && !differs; ++y) {
-      const size_t at = static_cast<size_t>(y) * stride +
-                        static_cast<size_t>(left) * 4;
-      differs = memcmp(current + at, previous + at, 4) != 0;
+      const size_t at = static_cast<size_t>(first_pair) * 4;
+      differs = memcmp(row_of(y) + at, reference_row(y) + at, 4) != 0;
     }
     if (differs) {
       break;
     }
   }
 
-  int right = rect.x2;
-  for (; right > left; --right) {
+  int last_pair = pairs;
+  for (; last_pair > first_pair; --last_pair) {
     bool differs = false;
     for (int y = top; y < bottom && !differs; ++y) {
-      const size_t at = static_cast<size_t>(y) * stride +
-                        static_cast<size_t>(right - 1) * 4;
-      differs = memcmp(current + at, previous + at, 4) != 0;
+      const size_t at = static_cast<size_t>(last_pair - 1) * 4;
+      differs = memcmp(row_of(y) + at, reference_row(y) + at, 4) != 0;
     }
     if (differs) {
       break;
@@ -279,11 +278,25 @@ Rect ShrinkToChangedArea(const Rect& rect, const uint8_t* current,
   }
 
   Rect out;
-  out.x1 = left;
+  out.x1 = rect.x1 + first_pair * 2;
+  out.x2 = rect.x1 + last_pair * 2;
   out.y1 = top;
-  out.x2 = right;
   out.y2 = bottom;
   return out;
+}
+
+void StoreUyvyReference(const Rect& rect, const uint8_t* converted,
+                        uint8_t* reference, size_t reference_stride) {
+  if (rect.empty()) {
+    return;
+  }
+  const size_t row_bytes = static_cast<size_t>(rect.width()) * 2;
+  for (int y = rect.y1; y < rect.y2; ++y) {
+    memcpy(reference + static_cast<size_t>(y) * reference_stride +
+               static_cast<size_t>(rect.x1) * 2,
+           converted + static_cast<size_t>(y - rect.y1) * row_bytes,
+           row_bytes);
+  }
 }
 
 }  // namespace usbhdmi
