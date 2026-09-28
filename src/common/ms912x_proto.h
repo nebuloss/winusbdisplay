@@ -33,6 +33,13 @@ constexpr size_t kControlPayloadSize = 8;
 constexpr uint16_t kRegSdramType = 0x0030;
 constexpr uint16_t kRegVideoPort = 0x0031;
 constexpr uint16_t kRegDisplayStatus = 0x0032; /* hot plug detect */
+/* Which of the chip's two frame buffers is live. The vendor HAL reads this at
+ * enable time to seed its own alternation counter, because the chip does not
+ * necessarily start on buffer 0: after a mode change or a warm replug it can
+ * come up on either. A driver that assumes zero gets the parity wrong half the
+ * time, and then every partial update lands in the buffer that is not on
+ * screen. */
+constexpr uint16_t kRegFrameSwitch = 0xD003;
 constexpr uint16_t kRegEdidBase = 0xC000;
 constexpr uint16_t kRegModeSequence0 = kRegSdramType;
 constexpr uint16_t kRegModeSequence1 = 0x0033;

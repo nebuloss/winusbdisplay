@@ -207,6 +207,25 @@ bool Device::ReadDisplayStatus(uint8_t* status) {
   return ReadByte(kRegDisplayStatus, status);
 }
 
+bool Device::ReadCurrentFrameIndex(int* index) {
+  uint8_t value = 0;
+  if (!ReadByte(kRegFrameSwitch, &value)) {
+    return false;
+  }
+  /* The vendor HAL treats this as a flag rather than a counter: any
+   * non-zero value means buffer 1. */
+  *index = value ? 1 : 0;
+  return true;
+}
+
+bool Device::TriggerFrame(uint8_t index, uint8_t delay) {
+  uint8_t data[6];
+  memset(data, 0, sizeof(data));
+  data[0] = index;
+  data[1] = delay;
+  return WriteCommand(kCmdTriggerFrame, data);
+}
+
 bool EdidBlockChecksumOk(const uint8_t* block) {
   uint8_t sum = 0;
   for (int i = 0; i < 128; ++i) {

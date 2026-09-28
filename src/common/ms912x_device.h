@@ -70,6 +70,22 @@ class Device {
   bool ReadVideoPort(VideoPort* port);
   bool ReadDisplayStatus(uint8_t* status);
 
+  /* Which frame buffer the chip is displaying right now, 0 or 1.
+   *
+   * The chip swaps buffers on every transfer, so a driver sending partial
+   * updates has to know which one its next transfer lands in. The vendor HAL
+   * reads this once when it enables video and then simply alternates. It
+   * matters because the chip does not reliably come up on buffer 0: assuming
+   * so leaves the parity inverted half the time, and every update then goes to
+   * the buffer that is not on screen, which looks like ghosting, stale window
+   * fragments and a picture flickering between two images. */
+  bool ReadCurrentFrameIndex(int* index);
+
+  /* Asks the chip to display buffer `index` after `delay`. Present in the
+   * vendor's Linux HAL, live in the framebuffer variant and commented out in
+   * the DRM one, so a failure here is not fatal. */
+  bool TriggerFrame(uint8_t index, uint8_t delay);
+
   /* Reads `blocks` * 128 bytes of EDID. Returns false only on I/O failure;
    * a bad checksum is reported through `checksum_ok`. */
   bool ReadEdid(std::vector<uint8_t>* edid, int blocks, bool* checksum_ok);

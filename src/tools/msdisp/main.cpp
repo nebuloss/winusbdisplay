@@ -49,6 +49,7 @@ void PrintUsage() {
       "  list                    interfaces visible to Windows\n"
       "  dump                    USB descriptors and pipes (WinUSB only)\n"
       "  info                    chip id, connector type, display status\n"
+      "  frameindex [--samples N] read the chip's live frame buffer register\n"
       "  edid [--blocks N] [--out FILE]\n"
       "  timings                 custom timings stored in flash\n"
       "  modes                   built-in mode table\n"
@@ -221,6 +222,58 @@ int CmdDump() {
     printf(
         "bos:       none -> the device is USB 2 silicon, so ~30 MB/s is its\n"
         "           ceiling regardless of which port it is plugged into\n");
+  }
+  return 0;
+}
+
+int CmdFrameIndex(int argc, char** argv) {
+  int samples = 10;
+  for (int i = 0; i < argc; ++i) {
+    if (strcmp(argv[i], "--samples") == 0 && i + 1 < argc) {
+      samples = atoi(argv[++i]);
+    }
+  }
+
+  std::unique_ptr<Device> device = OpenDevice(false);
+  if (!device) {
+    return 1;
+  }
+
+  /* Raw register first, so a nonsense value is visible rather than hidden
+   * behind the flag conversion the vendor HAL applies. */
+  printf("register 0x%04X, %d samples:\n", kRegFrameSwitch, samples);
+  int zero = 0, one = 0, other = 0, failed = 0;
+  for (int i = 0; i < samples; ++i) {
+    uint8_t raw = 0;
+    if (!device->ReadByte(kRegFrameSwitch, &raw)) {
+      printf("  %2d: read failed: %s\n", i, device->last_error().c_str());
+      ++failed;
+      continue;
+    }
+    printf("  %2d: 0x%02X -> buffer %d\n", i, raw, raw ? 1 : 0);
+    if (raw == 0) {
+      ++zero;
+    } else if (raw == 1) {
+      ++one;
+    } else {
+      ++other;
+    }
+    Sleep(120);
+  }
+
+  printf("\nsummary: 0x00 x%d, 0x01 x%d, other x%d, failed x%d\n", zero, one,
+         other, failed);
+  if (failed == samples) {
+    printf("verdict: register unreadable, the parity theory cannot be tested\n");
+    return 1;
+  }
+  if (other > 0) {
+    printf("verdict: unexpected values, this is probably not a buffer flag\n");
+  } else if (zero > 0 && one > 0) {
+    printf("verdict: alternates while idle, the chip is flipping buffers\n");
+  } else {
+    printf("verdict: stable at buffer %d with no traffic, as expected\n",
+           one > 0 ? 1 : 0);
   }
   return 0;
 }
@@ -1034,6 +1087,9 @@ int main(int argc, char** argv) {
   }
   if (strcmp(command, "dump") == 0) {
     return CmdDump();
+  }
+  if (strcmp(command, "frameindex") == 0) {
+    return CmdFrameIndex(argc - index - 1, argv + index + 1);
   }
   if (strcmp(command, "info") == 0) {
     return CmdInfo();

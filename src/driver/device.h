@@ -145,6 +145,10 @@ class SwapChainProcessor {
    * flickers. */
   bool SendRefresh(bool whole_screen);
 
+  /* Reads the chip's live frame buffer once, to get the alternation
+   * parity right. See the implementation. */
+  void EnsureFrameIndex();
+
   IDDCX_SWAPCHAIN swapchain_;
   LUID render_adapter_;
   HANDLE new_frame_event_;
@@ -165,14 +169,16 @@ class SwapChainProcessor {
   int last_width_ = 0;
   int last_height_ = 0;
 
-  /* Damage still owed to the chip. [0] accumulates what has changed since
-   * the last transfer, [1] is what the last transfer covered. Every transfer
-   * sends the union of the two, because the chip alternates between two
-   * frame buffers and a region carried by only one transfer lands in just
-   * one of them: it then shows new content on one refresh and old content on
-   * the next. Covering two consecutive frames of damage puts every change in
-   * both buffers without having to know which one the chip will use. */
+  /* Damage each of the chip's two frame buffers still owes. New damage goes
+   * into both; a transfer clears only the one it landed in. Mirrors
+   * usb_hal_combine_rects / usb_hal_clear_rect in the vendor's Linux HAL.
+   *
+   * frame_index_ must be seeded from the chip rather than assumed, which is
+   * what EnsureFrameIndex does and why frame_index_seeded_ exists: the chip
+   * does not reliably come up displaying buffer 0. */
   Rect pending_damage_[2];
+  int frame_index_ = 0;
+  bool frame_index_seeded_ = false;
   bool force_full_frame_ = true;
 
   /* The panel drops its signal if left idle, so refresh it periodically even

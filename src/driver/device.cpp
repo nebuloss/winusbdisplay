@@ -440,6 +440,37 @@ bool SwapChainProcessor::EnsureStaging(UINT width, UINT height) {
   return true;
 }
 
+/* Seeds frame_index_ from the chip, once per swapchain.
+ *
+ * The chip alternates frame buffers on every transfer and reports the live one
+ * in register kRegFrameSwitch. The vendor HAL reads it when it enables video
+ * and then just alternates, which is what this reproduces. Assuming buffer 0
+ * instead gets the parity wrong whenever the chip happens to come up on buffer
+ * 1, and from then on every partial update is written to the buffer that is
+ * not on screen: the new content appears only on alternate refreshes, which is
+ * seen as ghosting, stale window fragments and flicker between two images.
+ *
+ * Deliberately not fatal. If the read fails the old assumption is no worse
+ * than before, and a dark panel would be. */
+void SwapChainProcessor::EnsureFrameIndex() {
+  if (frame_index_seeded_) {
+    return;
+  }
+  frame_index_seeded_ = true;
+
+  int live = 0;
+  if (device_ && device_->ReadCurrentFrameIndex(&live)) {
+    /* The register names the buffer on screen, so the next transfer, which is
+     * the one about to be built, belongs to the other one. */
+    frame_index_ = 1 - live;
+    Log("frame parity: chip displaying buffer %d, sending to %d", live,
+        frame_index_);
+  } else {
+    Log("frame parity: read failed (%s), assuming buffer 0",
+        device_ ? device_->last_error().c_str() : "no device");
+  }
+}
+
 bool SwapChainProcessor::ProcessFrame(
     const IDARG_OUT_RELEASEANDACQUIREBUFFER& buffer) {
   const IDDCX_METADATA& meta = buffer.MetaData;
@@ -539,25 +570,26 @@ bool SwapChainProcessor::ProcessFrame(
     have_new_damage = !damage.empty();
   }
 
+  /* Accumulate into both buffers' pending damage: each chip buffer owes this
+   * region until a transfer that lands in it has carried it.
+   *
+   * This mirrors usb_hal_combine_rects / usb_hal_clear_rect in the vendor's
+   * Linux HAL exactly. Sending the union of this frame's and the previous
+   * frame's damage on every transfer was tried instead and is not equivalent:
+   * it doubles the bytes on the wire for no benefit once the parity below is
+   * correct. */
   if (have_new_damage) {
     pending_damage_[0] = MergeRects(pending_damage_[0], damage);
+    pending_damage_[1] = MergeRects(pending_damage_[1], damage);
   }
 
-  /* Send this frame's damage together with the previous frame's, which is
-   * what the Linux reference driver does and what the chip's double
-   * buffering requires. Each transfer lands in one of two frame buffers and
-   * they alternate on screen, so a region touched by only one transfer shows
-   * the new content on one refresh and the old on the next.
-   *
-   * Sending to one buffer at a time instead, alternating with the chip, was
-   * tried and looks equivalent on paper. It is not: nothing guarantees our
-   * idea of which buffer is next stays in step with the chip's, and once the
-   * two disagree every region is written to the wrong buffer and the picture
-   * flickers between two images. Covering two consecutive frames of damage
-   * on every transfer needs no such agreement. */
-  const Rect covered = pending_damage_[0];
-  Rect to_send = AlignDamageRect(MergeRects(covered, pending_damage_[1]),
-                                 fb_width, fb_height);
+  /* The parity has to be seeded from the chip, not assumed; see
+   * EnsureFrameIndex. Without that, this indexing is a coin flip and half the
+   * time every update goes to the buffer that is not being displayed. */
+  EnsureFrameIndex();
+
+  Rect to_send =
+      AlignDamageRect(pending_damage_[frame_index_], fb_width, fb_height);
   if (to_send.empty()) {
     return true;
   }
@@ -646,10 +678,11 @@ bool SwapChainProcessor::ProcessFrame(
    * cause and the extra transfer was pure cost. */
   sender_->Submit(transfer, length);
 
-  /* [1] remembers what this frame covered, so the next transfer repeats it
-   * for the chip's other buffer. [0] starts accumulating again from empty. */
-  pending_damage_[1] = covered;
-  pending_damage_[0] = EmptyRect();
+  /* Only the buffer this transfer landed in is up to date. The other still
+   * owes the same region and gets it on the next transfer, when the index has
+   * flipped. */
+  pending_damage_[frame_index_] = EmptyRect();
+  frame_index_ = 1 - frame_index_;
   last_send_ms_ = now_ms;
 
   /* Report how much of the screen each transfer actually covers: if damage
@@ -718,12 +751,10 @@ bool SwapChainProcessor::SendRefresh(bool whole_screen) {
 
   sender_->Submit(transfer, length);
 
-  /* A whole-screen transfer brings one of the chip's buffers fully up to
-   * date, so nothing is owed for it. The other buffer is covered because the
-   * refresh is recorded as the previous frame's damage, which the next
-   * transfer repeats. */
-  pending_damage_[0] = EmptyRect();
-  pending_damage_[1] = full;
+  /* A whole-screen transfer brings the buffer it landed in fully up to date.
+   * The other one is unchanged, so it keeps whatever it still owed. */
+  pending_damage_[frame_index_] = EmptyRect();
+  frame_index_ = 1 - frame_index_;
   last_send_ms_ = GetTickCount64();
   return true;
 }
