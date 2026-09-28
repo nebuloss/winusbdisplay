@@ -73,40 +73,61 @@ jobs:
 
       - uses: microsoft/setup-msbuild@v2
 
-      - name: Install the Windows Driver Kit
+      - name: Fetch the driver kit
         shell: pwsh
-        # The kit is two separate things and both are needed: the kit itself,
-        # which brings the headers and the indirect display stub library, and
-        # a Visual Studio extension that registers the driver build rules.
-        # Without the extension the project fails with an unknown platform
-        # toolset, which reads like a corrupt project file rather than a
-        # missing component.
+        # From NuGet rather than an installer.
+        #
+        # The usual route is a package manager entry that installs the kit
+        # and then a Visual Studio extension that registers the driver build
+        # rules. Both steps are slow, and the second regularly fails on a
+        # fresh machine in ways that are tedious to diagnose. None of it is
+        # necessary: the only things this driver needs from the kit are two
+        # small static stubs and some headers, all of which NuGet serves as
+        # an ordinary zip file. The cross compiled build discovered this and
+        # the same reasoning applies here.
         run: |
-          choco install windowsdriverkit11 --no-progress --yes
-          $vsix = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Vsix' `
-            -Recurse -Filter '*.vsix' -ErrorAction SilentlyContinue |
-            Sort-Object FullName -Descending | Select-Object -First 1
-          if (-not $vsix) { throw 'The driver kit installed but its Visual Studio extension is missing.' }
-          Write-Host "Installing $($vsix.FullName)"
-          $installer = Get-ChildItem 'C:\Program Files*\Microsoft Visual Studio\2022' `
-            -Recurse -Filter 'VSIXInstaller.exe' -ErrorAction SilentlyContinue |
-            Select-Object -First 1
-          if (-not $installer) { throw 'VSIXInstaller.exe not found.' }
-          & $installer.FullName /quiet /admin $vsix.FullName
-          # The installer returns before it has finished.
-          Start-Sleep -Seconds 45
+          $ErrorActionPreference = 'Stop'
+          $version = '10.0.26100.6584'
+          $work = "$env:RUNNER_TEMP\wdk"
+          New-Item -ItemType Directory -Path $work -Force | Out-Null
 
-      - name: Find the installed kit
+          $url = "https://api.nuget.org/v3-flatcontainer/microsoft.windows.wdk.x64/$version/microsoft.windows.wdk.x64.$version.nupkg"
+          Invoke-WebRequest -Uri $url -OutFile "$work\wdk.zip"
+          Expand-Archive -Path "$work\wdk.zip" -DestinationPath "$work\wdk" -Force
+
+          $iddcx = Get-ChildItem "$work\wdk" -Recurse -Filter 'iddcxstub.lib' | Select-Object -First 1
+          $wdf = Get-ChildItem "$work\wdk" -Recurse -Filter 'WdfDriverStubUm.lib' | Select-Object -First 1
+          if (-not $iddcx -or -not $wdf) { throw 'The driver kit package did not contain the expected stub libraries.' }
+          Write-Host "iddcx stub: $($iddcx.FullName)"
+          Write-Host "wdf stub:   $($wdf.FullName)"
+
+          # The project locates these relative to the kit root, so the
+          # downloaded tree is grafted onto the SDK the runner already has.
+          $sdkRoot = 'C:\Program Files (x86)\Windows Kits\10'
+          $source = Split-Path (Split-Path $iddcx.FullName -Parent) -Parent  # ...\um\x64
+          $source = Split-Path (Split-Path $source -Parent) -Parent          # package lib root
+          Write-Host "copying from $source"
+          Copy-Item "$source\*" "$sdkRoot\Lib" -Recurse -Force -ErrorAction SilentlyContinue
+
+          $includes = Get-ChildItem "$work\wdk" -Recurse -Directory -Filter 'iddcx' |
+            Where-Object { $_.FullName -match 'Include' } | Select-Object -First 1
+          if ($includes) {
+            $incRoot = Split-Path (Split-Path $includes.FullName -Parent) -Parent
+            Write-Host "copying headers from $incRoot"
+            Copy-Item "$incRoot\*" "$sdkRoot\Include" -Recurse -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Find the kit version to build against
         id: kit
         shell: pwsh
-        # The runner decides which kit version it has, so the version is read
-        # rather than assumed. Pinning it here is what makes a driver build
+        # Read rather than assumed: the runner decides which SDK it carries,
+        # and pinning a version here is exactly what makes a driver build
         # break for no visible reason when the image is updated.
         run: |
           $version = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Include' `
             -Directory | Where-Object { $_.Name -match '^10\.' } |
             Sort-Object Name -Descending | Select-Object -First 1
-          if (-not $version) { throw 'No Windows kit found.' }
+          if (-not $version) { throw 'No Windows SDK found on this machine.' }
           Write-Host "Building against $($version.Name)"
           "version=$($version.Name)" >> $env:GITHUB_OUTPUT
 

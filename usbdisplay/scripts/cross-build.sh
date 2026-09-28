@@ -75,36 +75,43 @@ fetch_package "Microsoft.Windows.SDK.CPP.x64"    "$KIT_VERSION" "$SDK/sdk-libs"
 fetch_package "Microsoft.Windows.WDK.x64"        "$KIT_VERSION" "$SDK/wdk"
 fetch_package "Microsoft.Windows.SDK.BuildTools" "$KIT_VERSION" "$SDK/buildtools"
 
-# The packages nest their contents differently, so each root is located
-# rather than assumed.
-find_dir() {
-  find "$1" -type d -name "$2" -print -quit 2>/dev/null
-}
+# Each package nests its contents differently, so every root is located by
+# finding a file known to be inside it rather than by assuming a shape. The
+# header package puts things under a versioned directory; the library
+# package does not.
+SDK_INC="$(dirname "$(dirname "$(find "$SDK/sdk-headers" -type f -iname 'windows.h' -path '*/um/*' -print -quit)")")"
+SDK_UM_LIB="$(dirname "$(find "$SDK/sdk-libs" -type f -iname 'kernel32.lib' -print -quit)")"
+SDK_UCRT_LIB="$(dirname "$(find "$SDK/sdk-libs" -type f -iname 'libucrt.lib' -print -quit)")"
 
-SDK_INC="$(find_dir "$SDK/sdk-headers" 'um')"
-SDK_INC="$(dirname "$SDK_INC")"
-SDK_LIB="$(find_dir "$SDK/sdk-libs" 'um')"
-SDK_LIB="$(dirname "$SDK_LIB")"
-# The kit's own headers and the two stub libraries, found by looking rather
-# than by assuming a layout: these packages have rearranged themselves
-# between versions before.
-WDK_IDDCX_INC="$(dirname "$(find "$SDK/wdk" -type f -name 'iddcx.h' -print -quit)")"
-WDK_WDF_INC="$(dirname "$(find "$SDK/wdk" -type f -name 'wdf.h' -print -quit)")"
-WDK_SHARED_INC="$(dirname "$(find "$SDK/wdk" -type f -name 'wudfwdm.h' -print -quit)" 2>/dev/null || true)"
-IDDCX_STUB="$(find "$SDK/wdk" -type f -iname 'iddcxstub.lib' -print -quit)"
-WDF_STUB="$(find "$SDK/wdk" -type f -iname 'WdfDriverStubUm.lib' -print -quit)"
+# The kit's own headers and the two stub libraries.
+#
+# Found by searching, because these packages have rearranged themselves
+# between versions, but pinned to the versions this driver targets: the
+# package carries nine of each, and taking whichever turns up first would
+# silently build against the wrong framework.
+WDK_IDDCX_INC="$(find "$SDK/wdk" -type d -path "*um/iddcx/$IDDCX_VERSION" -print -quit)"
+WDK_WDF_INC="$(find "$SDK/wdk" -type d -path "*wdf/umdf/$WDF_VERSION" -print -quit)"
+IDDCX_STUB="$(find "$SDK/wdk" -type f -ipath "*um/x64/iddcx/$IDDCX_VERSION/iddcxstub.lib" -print -quit)"
+WDF_STUB="$(find "$SDK/wdk" -type f -ipath "*wdf/umdf/x64/$WDF_VERSION/WdfDriverStubUm.lib" -print -quit)"
 
 fail_missing() {
   echo "error: $1 was not found in the driver kit package." >&2
-  echo "The package layout may have changed; look under $SDK/wdk" >&2
+  echo "Look under $SDK/wdk; the layout may have changed." >&2
   exit 1
 }
-[ -d "$SDK_INC/um" ]       || { echo "error: no SDK headers under $SDK_INC" >&2; exit 1; }
-[ -d "$SDK_LIB/um" ]       || { echo "error: no SDK libraries under $SDK_LIB" >&2; exit 1; }
-[ -n "$WDK_IDDCX_INC" ]    || fail_missing "iddcx.h"
-[ -n "$WDK_WDF_INC" ]      || fail_missing "wdf.h"
-[ -n "$IDDCX_STUB" ]       || fail_missing "iddcxstub.lib"
-[ -n "$WDF_STUB" ]         || fail_missing "WdfDriverStubUm.lib"
+[ -d "$SDK_INC/um" ]    || { echo "error: no SDK headers found under $SDK/sdk-headers" >&2; exit 1; }
+[ -d "$SDK_UM_LIB" ]    || { echo "error: no SDK import libraries found under $SDK/sdk-libs" >&2; exit 1; }
+[ -d "$SDK_UCRT_LIB" ]  || { echo "error: no C runtime libraries found under $SDK/sdk-libs" >&2; exit 1; }
+[ -n "$WDK_IDDCX_INC" ] || fail_missing "the display extension headers, version $IDDCX_VERSION"
+[ -n "$WDK_WDF_INC" ]   || fail_missing "the framework headers, version $WDF_VERSION"
+[ -n "$IDDCX_STUB" ]    || fail_missing "iddcxstub.lib, version $IDDCX_VERSION"
+[ -n "$WDF_STUB" ]      || fail_missing "WdfDriverStubUm.lib, version $WDF_VERSION"
+
+echo "  SDK headers:               $SDK_INC"
+echo "  SDK libraries:             $SDK_UM_LIB"
+echo "  display extension headers: $WDK_IDDCX_INC"
+echo "  framework headers:         $WDK_WDF_INC"
+echo "  stubs:                     $(basename "$IDDCX_STUB"), $(basename "$WDF_STUB")"
 
 # Windows headers include each other with inconsistent capitalisation, which
 # only matters on a case sensitive filesystem. Symlinking every name to its
@@ -117,7 +124,7 @@ if [ ! -f "$WORK/.case-fixed" ]; then
     lower="$(dirname "$f")/$(basename "$f" | tr '[:upper:]' '[:lower:]')"
     [ "$f" = "$lower" ] || [ -e "$lower" ] || ln -s "$(basename "$f")" "$lower"
   done
-  find "$SDK_LIB" -type f -name '*.Lib' -print0 2>/dev/null |
+  find "$SDK/sdk-libs" -type f -name '*.Lib' -print0 2>/dev/null |
   while IFS= read -r -d '' f; do
     lower="${f%.Lib}.lib"
     [ -e "$lower" ] || ln -s "$(basename "$f")" "$lower"
@@ -179,9 +186,7 @@ INCLUDES=(
   -imsvc "$WDK_WDF_INC"
   -I "$WORK"
 )
-if [ -n "${WDK_SHARED_INC:-}" ]; then
-  INCLUDES+=(-imsvc "$WDK_SHARED_INC")
-fi
+
 
 # IDDCX_VERSION_* are not derived from the include path and have to be told.
 # UMDF_USING_NTSTATUS keeps the status codes consistent between the framework
@@ -213,8 +218,8 @@ log "Linking"
 lld-link \
   /DLL /NOLOGO /MACHINE:X64 \
   /OUT:"$OUT/usbdisplaydd.dll" \
-  /LIBPATH:"$SDK_LIB/um/x64" \
-  /LIBPATH:"$SDK_LIB/ucrt/x64" \
+  /LIBPATH:"$SDK_UM_LIB" \
+  /LIBPATH:"$SDK_UCRT_LIB" \
   "$WORK"/obj/*.obj \
   "$IDDCX_STUB" \
   "$WDF_STUB" \

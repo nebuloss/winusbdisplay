@@ -21,7 +21,11 @@ if "%VSCMD_ARG_TGT_ARCH%"=="" (
   call "!VCVARS!" >nul
 )
 
+rem Both directories, because the compiler will not create the one it
+rem writes object files into and fails with a path error that names
+rem the source file rather than the missing directory.
 if not exist "%OUT%" mkdir "%OUT%"
+if not exist "%OUT%\tests" mkdir "%OUT%\tests"
 
 cl /nologo /std:c++17 /EHsc /W4 /WX /O2 /MT /DUNICODE /D_UNICODE ^
   /Fo"%OUT%\tests\\" /Fe"%OUT%\usbdisplay-tests.exe" ^
