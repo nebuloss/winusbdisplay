@@ -89,11 +89,12 @@ jobs:
         # upstream. Everything else the build needs, the compiler runtime,
         # the Windows SDK and the driver kit, is downloaded by the script.
         #
-        # osslsigncode is what signs the result. It is an ordinary Ubuntu
-        # package and has been able to sign driver catalogs since 2022.
+        # osslsigncode is what signs the result, and nsis builds the
+        # installer. Both are ordinary Ubuntu packages with native Linux
+        # binaries, so no part of this needs an emulator.
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends curl unzip lsb-release wget software-properties-common gnupg file zip osslsigncode
+          sudo apt-get install -y --no-install-recommends curl unzip lsb-release wget software-properties-common gnupg file osslsigncode nsis
           wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 19
           sudo apt-get install -y --no-install-recommends lld-19
 
@@ -156,16 +157,16 @@ jobs:
           fi
 
           echo
-          echo "== the installer =="
-          setup=build/usbdisplay-setup.exe
-          test -f "$setup" || { echo "no installer was produced"; exit 1; }
-          file "$setup"
-          # The manifest is what makes Windows ask for permission rather than
-          # the program failing without it, so its presence is worth checking
-          # rather than assuming.
-          grep -q 'requireAdministrator' "$setup" || {
-            echo "the installer will not ask for administrator rights"; exit 1; }
-          ls -la "$setup"
+          echo "== the driver installation step =="
+          step=build/driversetup.exe
+          test -f "$step" || { echo "it was not produced"; exit 1; }
+          file "$step"
+          # The manifest is what makes Windows ask for permission when this
+          # is run on its own, so its presence is worth checking rather
+          # than assuming.
+          grep -q 'requireAdministrator' "$step" || {
+            echo "it will not ask for administrator rights"; exit 1; }
+          ls -la "$step"
 
           echo
           echo "== the tools =="
@@ -180,21 +181,20 @@ jobs:
 
           ls -la "$dll"
 
-      - name: Catalog and sign the packages
-        # Run on every push, not only on a tag. Signing is the step a release
-        # cannot do without and the one nobody exercises until the day they
-        # need it, so it is proved continuously rather than discovered
-        # broken under a tag.
+      - name: Build, catalog and sign the installer
+        # Run on every push, not only on a tag. Packaging and signing are
+        # the steps a release cannot do without and the ones nobody
+        # exercises until the day they need them, so they are proved
+        # continuously rather than discovered broken under a tag.
         working-directory: usbdisplay
         run: |
           chmod +x scripts/make-catalog.sh scripts/package.sh
           ./scripts/package.sh "${GITHUB_REF_NAME/\//-}"
 
-      - name: Check the catalogs are what Windows will be given
-        # A catalog that parses is not a catalog that works, but a catalog
-        # that does not parse certainly does not, and the alternative is
-        # finding out from a machine that can only say "the package is
-        # unsigned".
+      - name: Check the catalogs and the installer
+        # A catalog that parses is not a catalog that works, but one that
+        # does not parse certainly does not, and the alternative is finding
+        # out from a machine that can only say "the package is unsigned".
         working-directory: usbdisplay
         run: |
           for cat in build/package/driver/*.cat build/package/winusb/*.cat; do
@@ -205,14 +205,26 @@ jobs:
             openssl asn1parse -inform der -in "$cat" 2>/dev/null |
               grep -q '1.3.6.1.4.1.311.10.1' || {
                 echo "not a certificate trust list"; exit 1; }
-            # And that something actually signed it.
-            osslsigncode verify -in "$cat" 2>&1 | grep -i 'signature' | head -5 || true
           done
+
+          echo
+          echo "== the installer =="
+          setup=build/usbdisplay-setup.exe
+          test -f "$setup" || { echo "none was produced"; exit 1; }
+          file "$setup" | grep -q 'PE32' || {
+            echo "that is not a Windows program"; exit 1; }
+          # It elevates and it is signed. Both are the difference between
+          # something a user can run and something that fails at the first
+          # step, and both are invisible until then.
+          grep -q 'requireAdministrator' "$setup" || {
+            echo "it will not ask for administrator rights"; exit 1; }
+          osslsigncode verify -in "$setup" 2>&1 | grep -i 'signature' | head -5 || true
+          ls -la "$setup"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: usbdisplay-package
-          path: usbdisplay/build/usbdisplay-*.zip
+          name: usbdisplay-setup
+          path: usbdisplay/build/usbdisplay-setup.exe
           if-no-files-found: error
 
   release:
@@ -226,27 +238,26 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: usbdisplay-package
+          name: usbdisplay-setup
 
       - uses: softprops/action-gh-release@v2
         with:
-          files: usbdisplay-*.zip
+          files: usbdisplay-setup.exe
           body: |
-            Unpack it and run `usbdisplay-setup.exe`. It asks for
-            administrator rights and does the rest.
+            Download `usbdisplay-setup.exe` and run it. That is the whole
+            thing: the driver, the tools and the brightness control are all
+            inside it, and it appears in the list of installed programs
+            afterwards so it can be removed the usual way.
 
             No reboot and no change to Windows' signing policy are needed.
             Nothing here loads into the kernel, so all Windows asks for is a
             package signed by a certificate it trusts. It works with Secure
-            Boot on.
+            Boot on. It does need administrator rights, and will ask.
 
-            **About the signature.** These files are signed with a
-            certificate generated when the release was built and then
-            discarded. It proves the files have not been altered since, and
-            nothing whatever about who made them. Installing means telling
-            your machine to trust that certificate, which is a real decision
-            and not a formality: if you would rather not, build from source
-            instead, which is a supported path and documented in the README.
-
-            After installing, run `tools\usbdisplaytray.exe` for brightness,
-            and right-click its icon for "Start with Windows".
+            **About the signature.** This is signed with a certificate
+            generated when the release was built and then discarded. It
+            proves the file has not been altered since, and nothing whatever
+            about who made it. Installing means telling your machine to trust
+            that certificate, which is a real decision and not a formality:
+            if you would rather not, build from source instead, which is a
+            supported path and documented in the README.

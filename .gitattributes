@@ -17,6 +17,8 @@
 Makefile text eol=lf
 *.yml   text eol=lf
 *.yaml  text eol=lf
+# The installer script is compiled by a Linux program.
+*.nsi   text eol=lf
 
 *.bat   text eol=crlf
 *.ps1   text eol=crlf

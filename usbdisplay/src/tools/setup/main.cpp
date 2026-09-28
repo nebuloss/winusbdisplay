@@ -1,20 +1,26 @@
 /* SPDX-License-Identifier: GPL-2.0-only
  *
- * The installer.
+ * The driver half of installing: everything that is specific to this
+ * hardware, and nothing that is not.
  *
- * This exists because a driver that arrives as a folder of files and a script
- * is not installed, it is merely present. What people expect, reasonably, is
- * something they can double-click, that asks for permission once, says what
- * it is doing, and afterwards appears in the list of installed programs where
- * it can be removed again. That is what this does.
+ * The part a user sees, the single downloadable installer, is built by NSIS
+ * from installer/usbdisplay.nsi. That handles what every installer handles:
+ * asking for permission, unpacking, copying the tools somewhere permanent,
+ * appearing in the list of installed programs, and undoing all of it later.
+ * There is no reason to write that again, and the several ways of getting it
+ * subtly wrong are all well trodden.
  *
- * Written as an ordinary program rather than a script for three reasons.
- * It can carry a manifest, so Windows raises the permission prompt itself
- * instead of the user having to know to ask. It calls the installation
- * interfaces directly, so it needs none of the developer tools the scripts
- * reach for. And its error messages can say what actually went wrong, which
- * matters more here than usual: almost every failure mode of this hardware
- * looks like silence.
+ * What NSIS cannot sensibly do is the part below. Installing a driver
+ * package, retiring device nodes in an order that does not crash the
+ * machine, and trusting a certificate are Windows API calls, and driving
+ * them from an installer script means either a plugin or shelling out to
+ * tools the user does not have. So the installer unpacks this and runs it,
+ * and this does the work and says what happened, which matters more here
+ * than usual: almost every failure mode of this hardware looks like silence.
+ *
+ * It can also be run on its own against a source build, which is how it is
+ * tested, and is why it still carries a manifest asking for administrator
+ * rights.
  *
  * ## The order of operations, and why
  *
@@ -36,9 +42,6 @@
  *
  *   5. Widen permissions on the one setting the brightness control writes,
  *      so it needs no privileges of its own.
- *
- *   6. Register with the installed programs list, so removing it later is
- *      the ordinary Windows gesture rather than hunting for a script.
  */
 
 #include <windows.h>
@@ -61,8 +64,6 @@ namespace {
 std::wstring g_here;
 
 const wchar_t kHardwareId[] = L"root\\usbdisplaydd";
-const wchar_t kUninstallKey[] =
-    L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\usbdisplay";
 const wchar_t kSettingsKey[] = L"SOFTWARE\\usbdisplay";
 
 /* Names this project has used. An upgrade has to recognise its own past. */
@@ -496,125 +497,6 @@ bool AllowUsersToSetBrightness() {
   return ok;
 }
 
-/* Where the tools are copied to, so they survive the downloaded archive
- * being deleted. */
-std::wstring ToolsDirectory() {
-  wchar_t programs[MAX_PATH] = {};
-  if (!GetEnvironmentVariableW(L"ProgramFiles", programs, MAX_PATH)) {
-    return std::wstring();
-  }
-  return std::wstring(programs) + L"\\usbdisplay";
-}
-
-/* Copies the console tool and the brightness control somewhere permanent,
- * and arranges for the latter to start with Windows.
- *
- * Leaving them in the unpacked archive is what most installers of this shape
- * do and it is a poor bargain: the archive goes in the wastebasket, the
- * brightness control vanishes with it, and the next reboot has no way to
- * start something that is no longer there. */
-bool InstallTools() {
-  const std::wstring directory = ToolsDirectory();
-  if (directory.empty()) {
-    return false;
-  }
-  CreateDirectoryW(directory.c_str(), nullptr);
-
-  const wchar_t* names[] = {L"usbdisplaytray.exe", L"usbdisplayctl.exe",
-                            L"brightnessprobe.exe"};
-  int copied = 0;
-  for (const wchar_t* name : names) {
-    std::wstring source = Combine(Combine(g_here, L"tools"), name);
-    if (!Exists(source)) {
-      source = Combine(g_here, name);
-    }
-    if (!Exists(source)) {
-      continue;
-    }
-    if (CopyFileW(source.c_str(), Combine(directory, name).c_str(), FALSE)) {
-      ++copied;
-    }
-  }
-  if (copied == 0) {
-    Say(L"    none were found beside this program\n");
-    return false;
-  }
-
-  /* Started with Windows, per user, because that is whose brightness it is
-   * and it needs no privileges to do the job. */
-  const std::wstring tray = Combine(directory, L"usbdisplaytray.exe");
-  if (Exists(tray)) {
-    HKEY key = nullptr;
-    if (RegCreateKeyExW(HKEY_CURRENT_USER,
-                        L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run",
-                        0, nullptr, 0, KEY_SET_VALUE, nullptr, &key,
-                        nullptr) == ERROR_SUCCESS) {
-      const std::wstring quoted = L"\"" + tray + L"\"";
-      RegSetValueExW(key, L"usbdisplay brightness", 0, REG_SZ,
-                     reinterpret_cast<const BYTE*>(quoted.c_str()),
-                     static_cast<DWORD>((quoted.size() + 1) * sizeof(wchar_t)));
-      RegCloseKey(key);
-    }
-
-    /* Started now as well, so brightness works without a reboot. */
-    STARTUPINFOW startup = {};
-    startup.cb = sizeof(startup);
-    PROCESS_INFORMATION process = {};
-    std::wstring command = L"\"" + tray + L"\"";
-    if (CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE,
-                       CREATE_NO_WINDOW, nullptr, directory.c_str(), &startup,
-                       &process)) {
-      CloseHandle(process.hThread);
-      CloseHandle(process.hProcess);
-    }
-  }
-
-  Say(L"    installed to %s and set to start with Windows\n",
-      directory.c_str());
-  return true;
-}
-
-/* Puts this in the list of installed programs, so removing it later is the
- * ordinary gesture rather than finding a script. */
-void RegisterForUninstall() {
-  HKEY key = nullptr;
-  if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, kUninstallKey, 0, nullptr, 0,
-                      KEY_SET_VALUE, nullptr, &key, nullptr) !=
-      ERROR_SUCCESS) {
-    return;
-  }
-
-  wchar_t self[MAX_PATH] = {};
-  GetModuleFileNameW(nullptr, self, MAX_PATH);
-  const std::wstring remove = std::wstring(L"\"") + self + L"\" /uninstall";
-
-  const struct {
-    const wchar_t* name;
-    const wchar_t* value;
-  } strings[] = {
-      {L"DisplayName", L"USB Display driver"},
-      {L"DisplayVersion", L"0.1.0"},
-      {L"Publisher", L"usbdisplay"},
-      {L"UninstallString", remove.c_str()},
-      {L"QuietUninstallString", remove.c_str()},
-      {L"InstallLocation", g_here.c_str()},
-      {L"URLInfoAbout", L"https://github.com/nebuloss/winusbdisplay"},
-  };
-  for (const auto& entry : strings) {
-    RegSetValueExW(key, entry.name, 0, REG_SZ,
-                   reinterpret_cast<const BYTE*>(entry.value),
-                   static_cast<DWORD>((wcslen(entry.value) + 1) *
-                                      sizeof(wchar_t)));
-  }
-
-  const DWORD no = 0;
-  RegSetValueExW(key, L"NoModify", 0, REG_DWORD,
-                 reinterpret_cast<const BYTE*>(&no), sizeof(no));
-  RegSetValueExW(key, L"NoRepair", 0, REG_DWORD,
-                 reinterpret_cast<const BYTE*>(&no), sizeof(no));
-  RegCloseKey(key);
-}
-
 /* Trusts the certificate the release was signed with.
  *
  * Windows will not accept either package until it does. Worth being plain
@@ -756,15 +638,20 @@ int Install() {
   }
 
   Say(L"\n  6. the brightness control\n");
-  InstallTools();
-
-  RegisterForUninstall();
+  /* Stopping a copy that is already running, because the installer around
+   * this is about to replace its file and Windows will not overwrite a
+   * program that is in memory. */
+  {
+    HWND existing = FindWindowW(L"UsbDisplayBrightnessTray", nullptr);
+    if (existing) {
+      PostMessageW(existing, WM_CLOSE, 0, 0);
+      Sleep(1500);
+      Say(L"    stopped the running copy so it can be replaced\n");
+    }
+  }
 
   Say(L"\nDone. The adapter should appear as a second monitor within a few\n"
       L"seconds; give it a little longer if it was only just plugged in.\n"
-      L"\n"
-      L"Run tools\\usbdisplaytray.exe for a brightness control, and\n"
-      L"right-click its icon to have it start with Windows.\n"
       L"\n"
       L"If no monitor appears, C:\\Windows\\Temp\\usbdisplaydd.log records\n"
       L"every step the driver took and why it stopped.\n");
@@ -789,39 +676,21 @@ int Uninstall() {
 
   Say(L"\n  3. the brightness control\n");
   {
-    /* Stopped before its files are removed, or the copy in memory keeps
-     * running until the next reboot and the files cannot be deleted. */
+    /* Stopped before the installer around this deletes its file, or the
+     * copy in memory keeps running until the next restart and the file
+     * cannot be removed. */
     HWND existing = FindWindowW(L"UsbDisplayBrightnessTray", nullptr);
     if (existing) {
       PostMessageW(existing, WM_CLOSE, 0, 0);
       Sleep(1500);
     }
-
-    HKEY key = nullptr;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER,
-                      L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run", 0,
-                      KEY_SET_VALUE, &key) == ERROR_SUCCESS) {
-      RegDeleteValueW(key, L"usbdisplay brightness");
-      RegCloseKey(key);
-    }
-
-    const std::wstring directory = ToolsDirectory();
-    if (!directory.empty()) {
-      for (const wchar_t* name : {L"usbdisplaytray.exe", L"usbdisplayctl.exe",
-                                  L"brightnessprobe.exe"}) {
-        DeleteFileW(Combine(directory, name).c_str());
-      }
-      RemoveDirectoryW(directory.c_str());
-    }
-    Say(L"    stopped and removed\n");
+    Say(L"    stopped\n");
   }
 
   Say(L"\n  4. settings and trust\n");
   RegDeleteTreeW(HKEY_LOCAL_MACHINE, kSettingsKey);
   ForgetReleaseCertificate();
   Say(L"    removed the picture settings and the release certificate\n");
-
-  RegDeleteKeyW(HKEY_LOCAL_MACHINE, kUninstallKey);
 
   Say(L"\nDone. The adapter's other interfaces, sound and the control\n"
       L"channel, keep the drivers Windows supplies for them, so it will\n"

@@ -63,8 +63,8 @@ scripts\elev.ps1 -Stop
 On Linux, where the whole release is built:
 
 ```
-usbdisplay/scripts/cross-build.sh         # driver, installer, both tools
-usbdisplay/scripts/package.sh <version>   # catalogs, signatures, archive
+usbdisplay/scripts/cross-build.sh         # driver, driver step, both tools
+usbdisplay/scripts/package.sh <version>   # catalogs, signatures, installer
 ```
 
 `build-tool.bat` and `test.bat` compile with `/W4 /WX` and must stay
@@ -235,9 +235,9 @@ The risk this creates is a committed artefact drifting from its source, so
 it against the processor path. Change the shader without regenerating and
 the tests say so, and say which script to run.
 
-The installer is built the same way and by the same script, so the complete
-set of binaries a user needs, driver, installer, console tool and brightness
-control, comes off a Linux machine.
+The driver installation step is built the same way and by the same script, so
+every binary a user ends up with, driver, console tool, brightness control and
+the program that installs them, comes off a Linux machine.
 
 ### Catalogs and signing also work on Linux
 
@@ -259,10 +259,8 @@ other:
   one.
 
 `scripts/make-catalog.sh` drives both and `scripts/package.sh` assembles the
-release around them, so the whole thing, driver, installer, both tools, both
-catalogs and every signature, comes off one Linux machine. The release job
-lives in the Linux workflow now; the Windows one builds and tests and
-publishes nothing.
+release around them. The release job lives in the Linux workflow now; the
+Windows one builds and tests and publishes nothing.
 
 Two details that are easy to get wrong:
 
@@ -273,6 +271,32 @@ Two details that are easy to get wrong:
 - **Member hashes are SHA1 and that is correct.** It is what the format has
   always used and what Windows 10 and 11 still accept. The *signature* is
   SHA256, and the signature is what carries the trust decision.
+
+### The release is one file, and NSIS builds it
+
+A release is `usbdisplay-setup.exe` and nothing else. It used to be an
+archive of directories with an installer among them, which is one more thing
+for a user to get right than it should be, and every way of getting it wrong
+ends in a program that cannot find what it installs.
+
+**NSIS builds Windows installers natively on Linux**: it is the `nsis`
+package, an ordinary Linux binary, no emulation. That decided it. WiX needs
+Wine to produce an MSI and Inno Setup needs Wine full stop, and the point of
+this build is that nothing runs under a translation layer.
+
+The division of labour matters more than the tool:
+
+- `installer/usbdisplay.nsi` does what every installer does: elevation,
+  compression, unpacking, the installed programs list, an uninstaller.
+- `src/tools/setup` does only what this hardware needs: driver packages,
+  device nodes, trusting the certificate, the brightness permission.
+
+Writing the first half by hand was started and abandoned, correctly. None of
+it is specific to this project and all of it has well known ways of being
+subtly wrong. The second half cannot be done in an installer script without
+either a plugin or tools the user does not have, and it is where all the
+knowledge in this project lives, so it stays a program that can be run and
+debugged on its own against a source build.
 
 Neither workflow can test against hardware, so a green build means it
 compiles and the logic holds, never that the panel lights up.

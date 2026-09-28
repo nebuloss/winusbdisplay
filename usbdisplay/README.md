@@ -74,6 +74,17 @@ least significant bit that region would flicker between two values.
 
 ## Quick start
 
+Download `usbdisplay-setup.exe` from the releases page and run it. That is
+the whole thing: the driver, the console tool and the brightness control are
+all inside it, and it appears in the list of installed programs afterwards so
+it can be removed the usual way.
+
+No reboot, no relaxed signing policy, and it works with Secure Boot on:
+nothing here loads into the kernel, so all Windows wants is a package signed
+by a certificate it trusts. It does need administrator rights, and asks.
+
+## Building it yourself
+
 Nothing needs installing for the read-only commands, because the control side
 of the adapter is a plain HID device Windows already knows how to talk to:
 
@@ -95,9 +106,9 @@ powershell -ExecutionPolicy Bypass -File ..\scripts\elev.ps1 ^
 
 No reboot, no relaxed signing policy, and it works with Secure Boot on:
 nothing here loads into the kernel, so all Windows wants is a package signed
-by a certificate it trusts, which the installer creates. It does need
-administrator rights, which is what `elev.ps1` is for: one prompt for the
-whole session instead of one per step.
+by a certificate it trusts, which `install.ps1` creates for a source build.
+It does need administrator rights, which is what `elev.ps1` is for: one
+prompt for the whole session instead of one per step.
 
 Remove everything with `scripts\purge.ps1`.
 
@@ -147,8 +158,8 @@ what the Windows build produces from the same sources.
 The release is built the same way:
 
 ```
-scripts/cross-build.sh          # driver, installer, console tool, tray
-scripts/package.sh v1.2.3       # catalogs, signatures, archive
+scripts/cross-build.sh          # driver, driver step, console tool, tray
+scripts/package.sh v1.2.3       # catalogs, signatures, installer
 ```
 
 That second step is the one usually said to need Windows. It does not. A
@@ -158,7 +169,12 @@ signs it. Both are free software and neither needs anything from Microsoft.
 `scripts/make-catalog.sh` explains the details worth knowing, chiefly that
 signing has to happen after cataloguing rather than before.
 
-Signing needs `osslsigncode` and `openssl`; packaging also needs `zip`.
+The installer around it is built by NSIS, which also runs natively on Linux.
+The result is one file: `usbdisplay-setup.exe` carries the driver, both
+catalogs, the certificate and the tools, and is the whole release.
+
+Packaging needs `makensis` (the `nsis` package), `osslsigncode` and
+`openssl`.
 
 ## Diagnosing
 

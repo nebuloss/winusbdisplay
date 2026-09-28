@@ -26,9 +26,9 @@
 # Direct3D 11 accepts no other form of it, so the compiled bytecode is
 # committed to the tree instead; see src/render/generated/convert_cs.h.
 #
-# What this does not do is produce the catalog that makes the package
-# installable, or sign it. Both of those also work on Linux and both live in
-# scripts/make-catalog.sh, which explains how.
+# What this does not do is build the installer a user downloads, or the
+# catalog that makes the package installable, or sign either. All three also
+# work on Linux; see scripts/package.sh and scripts/make-catalog.sh.
 #
 #   ./cross-build.sh            build
 #   ./cross-build.sh --clean    discard the downloaded toolchain first
@@ -342,10 +342,13 @@ sed "s|^DriverVer *=.*|DriverVer = $(date +%m/%d/%Y),$(date +%H.%M.%S).0|" \
 log "Built $OUT/usbdisplaydd.dll"
 ls -la "$OUT/usbdisplaydd.dll"
 
-# The installer, built with the same toolchain because there is no reason to
-# need a Windows machine for it. Its manifest is what makes Windows raise the
-# permission prompt rather than the program failing for want of rights, and
-# lld embeds one as readily as the Microsoft linker does.
+# The driver step of the installation, built with the same toolchain because
+# there is no reason to need a Windows machine for it. The installer a user
+# downloads is built around this by scripts/package.sh; this program is what
+# it runs, and what can be run on its own against a source build.
+#
+# Its manifest is what makes Windows raise the permission prompt when it is
+# used that way, and lld embeds one as readily as the Microsoft linker does.
 #
 # MANIFESTUAC:NO for the same reason the Windows build needs it. Left to
 # itself the linker writes a manifest of its own asking to run as the
@@ -353,13 +356,13 @@ ls -la "$OUT/usbdisplaydd.dll"
 # fails outright rather than choosing between them. The error names
 # conflicting attributes without saying that one side of the conflict is the
 # linker's own, so it reads like a fault in the file we supplied.
-log "Building the installer"
+log "Building the driver installation step"
 "${CLANG_CL[@]}" "${FLAGS[@]}" "${DEFINES[@]}" "${INCLUDES[@]}" \
   /c "$ROOT/src/tools/setup/main.cpp" /Fo"$WORK/obj/setup.obj"
 
 "${LLD_LINK[@]}" \
   /NOLOGO /MACHINE:X64 \
-  /OUT:"$ROOT/build/usbdisplay-setup.exe" \
+  /OUT:"$ROOT/build/driversetup.exe" \
   /LIBPATH:"$XWIN/crt/lib/x86_64" \
   /LIBPATH:"$XWIN/sdk/lib/um/x86_64" \
   /LIBPATH:"$XWIN/sdk/lib/ucrt/x86_64" \
@@ -370,14 +373,14 @@ log "Building the installer"
   ole32.lib shell32.lib kernel32.lib user32.lib \
   libcmt.lib libcpmt.lib libucrt.lib libvcruntime.lib
 
-log "Built $ROOT/build/usbdisplay-setup.exe"
-# The embedded manifest is the whole reason this program can start, and it
-# is easy to lose without the link failing. Checked here so a mistake shows
-# up as a build error rather than as a permission failure on the machine of
-# somebody trying to install a driver.
-grep -q 'requireAdministrator' "$ROOT/build/usbdisplay-setup.exe" ||
-  die "the installer was linked without its manifest"
-ls -la "$ROOT/build/usbdisplay-setup.exe"
+log "Built $ROOT/build/driversetup.exe"
+# The embedded manifest is the whole reason this program can start when it is
+# run on its own, and it is easy to lose without the link failing. Checked
+# here so a mistake shows up as a build error rather than as a permission
+# failure on the machine of somebody trying to install a driver.
+grep -q 'requireAdministrator' "$ROOT/build/driversetup.exe" ||
+  die "the driver step was linked without its manifest"
+ls -la "$ROOT/build/driversetup.exe"
 
 # The two programs a user actually runs after installing: the console tool,
 # which is also the hardware harness, and the brightness control.

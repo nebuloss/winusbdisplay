@@ -1,6 +1,11 @@
 @echo off
 rem SPDX-License-Identifier: GPL-2.0-only
-rem Builds the installer.
+rem Builds the driver installation step.
+rem
+rem This is what the downloadable installer runs; the installer itself is
+rem built by NSIS on Linux, from installer\usbdisplay.nsi. Run this program
+rem on its own against a source build and it installs from the build
+rem directory, which is how the driver logic is tested.
 
 setlocal enabledelayedexpansion
 set ROOT=%~dp0..
@@ -29,7 +34,7 @@ rem itself rather than the program failing for want of rights.
 rem MANIFESTUAC:NO stops the linker adding a second, conflicting one of its
 rem own, which it does by default and which makes embedding fail outright.
 cl /nologo /std:c++17 /EHsc /W4 /WX /O2 /MT /DUNICODE /D_UNICODE ^
-  /Fo"%OUT%\setup\\" /Fe"%OUT%\usbdisplay-setup.exe" ^
+  /Fo"%OUT%\setup\\" /Fe"%OUT%\driversetup.exe" ^
   "%ROOT%\src\tools\setup\main.cpp" ^
   /link setupapi.lib newdev.lib advapi32.lib crypt32.lib ^
   cfgmgr32.lib ole32.lib shell32.lib user32.lib ^
@@ -40,5 +45,5 @@ if errorlevel 1 (
   echo build failed
   exit /b 1
 )
-echo built %OUT%\usbdisplay-setup.exe
+echo built %OUT%\driversetup.exe
 endlocal

@@ -190,17 +190,17 @@ jobs:
             ntdll.lib
           if ($LASTEXITCODE -ne 0) { throw 'The driver failed to link.' }
 
-          Write-Host '==> Building the installer'
+          Write-Host '==> Building the driver installation step'
           & cl @common /c usbdisplay\src\tools\setup\main.cpp "/Fo$obj\setup.obj"
-          if ($LASTEXITCODE -ne 0) { throw 'the installer failed to compile' }
+          if ($LASTEXITCODE -ne 0) { throw 'the driver step failed to compile' }
           # MANIFESTUAC:NO stops the linker adding a second, conflicting
           # manifest of its own, which makes embedding ours fail outright.
-          & link /nologo /MACHINE:X64 "/OUT:$out\usbdisplay-setup.exe" `
+          & link /nologo /MACHINE:X64 "/OUT:$out\driversetup.exe" `
             "$obj\setup.obj" setupapi.lib newdev.lib advapi32.lib crypt32.lib `
             cfgmgr32.lib ole32.lib shell32.lib user32.lib `
             /MANIFESTUAC:NO /MANIFEST:EMBED `
             "/MANIFESTINPUT:usbdisplay\src\tools\setup\setup.manifest"
-          if ($LASTEXITCODE -ne 0) { throw 'the installer failed to link' }
+          if ($LASTEXITCODE -ne 0) { throw 'the driver step failed to link' }
 
           # The version in the INF must move for Windows to replace an
           # installed copy, so it is stamped the way a local build does.
@@ -222,6 +222,6 @@ jobs:
           path: |
             usbdisplay/build/driver/x64/Release/usbdisplaydd.dll
             usbdisplay/build/driver/x64/Release/usbdisplaydd.inf
-            usbdisplay/build/driver/x64/Release/usbdisplay-setup.exe
+            usbdisplay/build/driver/x64/Release/driversetup.exe
           if-no-files-found: error
 
