@@ -756,3 +756,36 @@ default even in the versions that have it.
 
 So the driver side is done and any tool that sets a gamma ramp now works.
 Getting a slider in one specific application depends on that application.
+
+### The limit of what brightness can do here
+
+At full brightness the driver does nothing to the picture: the adjustment is
+a multiply by one and is skipped entirely. So if a screen on this adapter
+looks dimmer than one beside it with both controls at 100, the difference is
+not in software and no amount of it will help.
+
+It is the panel's own backlight, and this adapter cannot reach it. The chip
+exposes exactly twenty-four operations, listed in the vendor's own header:
+register, flash, EEPROM, SDRAM, USB3 and HDMI PHY access, plus the video
+command. **None of them carries I2C to the attached screen.** The chip reads
+the screen's capabilities into its own registers itself and offers no way to
+send anything back out, so the monitor's brightness controls are reachable
+only from its own buttons.
+
+What the driver can do is dim the picture below that, which is the whole
+range a normal monitor's control covers minus the top end. Matching two
+screens therefore means turning the brighter one down, not the dimmer one
+up.
+
+### Dimming has to follow light, not stored values
+
+Worth stating because the obvious implementation is wrong and looks almost
+right. A monitor's own control dims its backlight, and emitted light falls
+in proportion to the setting. Pixels are not stored in proportion to light:
+they are stored on roughly a square-and-a-bit curve. Scaling the stored
+value by the setting therefore produces far less light than the setting
+suggests, and at half it lands near a fifth.
+
+The correction is to raise the fraction to the reciprocal of that exponent
+before scaling, so half asks for a stored value of 0.73. Both conversion
+paths take the resulting integer from one place, so they cannot drift apart.
