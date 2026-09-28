@@ -46,9 +46,9 @@ function Get-SigningCert {
             -CertStoreLocation Cert:\LocalMachine\My -NotAfter (Get-Date).AddYears(5)
         # Trusted Publisher is what makes Windows accept the package without
         # prompting; Root is what makes the chain validate at all.
-        foreach ($store in 'Root', 'TrustedPublisher') {
-            $s = New-Object System.Security.Cryptography.X509Certificates.X509Store($store, 'LocalMachine')
-            $s.Open('ReadWrite'); $s.Add($cert); $s.Close()
+        foreach ($storeName in 'Root', 'TrustedPublisher') {
+            $store = New-Object System.Security.Cryptography.X509Certificates.X509Store($storeName, 'LocalMachine')
+            $store.Open('ReadWrite'); $store.Add($cert); $store.Close()
         }
     }
     return $cert
@@ -141,8 +141,17 @@ if ($released) {
     $certificate = Join-Path $root 'usbdisplay.cer'
     if (Test-Path $certificate) {
         Write-Host '    trusting the release certificate'
-        Import-Certificate -FilePath $certificate -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
-        Import-Certificate -FilePath $certificate -CertStoreLocation Cert:\LocalMachine\TrustedPublisher | Out-Null
+        # Through the .NET store API rather than Import-Certificate, which
+        # needs a provider that is missing on some machines and then fails
+        # complaining about a drive rather than about certificates.
+        $blob = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($certificate)
+        foreach ($storeName in 'Root', 'TrustedPublisher') {
+            $store = [System.Security.Cryptography.X509Certificates.X509Store]::new(
+                $storeName, 'LocalMachine')
+            $store.Open('ReadWrite')
+            $store.Add($blob)
+            $store.Close()
+        }
     }
 
     foreach ($package in @(
