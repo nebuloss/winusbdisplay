@@ -289,3 +289,47 @@ Get-PnpDevice -InstanceId 'ROOT\DISPLAY\*' | ForEach-Object {
 Several entries with a hardware id of `root\usbdisplaydd` means duplicates,
 which earlier versions of the installer could create; one identifying itself
 as `root\usbhdmidd` is from before this project was renamed.
+
+## Ruled out: sending each region once, alternating between the two images
+
+Tempting, because sending everything twice costs exactly half the link, and
+at 1080p60 that is the difference between needing 249 MB/s and needing 498
+on a part that carries 237. The advertised refresh rate is unreachable while
+every region goes out twice, so this looks like the one optimisation worth
+having.
+
+The vendor's own driver appears to do it: it keeps two accumulated damage
+rectangles, merges every change into both, and each send drains one and
+flips. The appeal is that nothing has to agree with the adapter about which
+image is which, because both accumulators receive the same changes and are
+merely drained at different times.
+
+Implemented, including the part that is easy to miss: the record used to
+decide whether a region's pixels actually changed has to be **per image**.
+With one shared record the second image's turn looks like a no-op, the
+region is skipped, and that image keeps its old content forever. That is
+the two-pointers artifact, and it appeared immediately when the record was
+shared.
+
+With per-image records the artifact changed rather than went away: the
+pointer became invisible and the top of the screen flickered. Which is the
+real objection, and it is not an implementation detail. The adapter
+alternates which image it displays every frame. If the two images are ever
+different, and with one-at-a-time updates they differ for a frame every
+time anything changes, the panel shows frame N and frame N-1 alternately at
+60 Hz. That is flicker by construction, not a bug to be fixed.
+
+So the double send is not redundancy that can be optimised away. It is what
+keeps the two images identical, which is what stops the alternation being
+visible. The bandwidth cost is the price of that, and 1080p60 with
+full-screen damage is therefore out of reach on this hardware.
+
+None of this is wasted: ordinary desktop damage is nowhere near full screen,
+and the measured idle and typical-use figures are good. It is specifically
+full-screen animation that cannot reach 60.
+
+What was not tried, and is the only remaining idea: `trigger_frame`, the
+vendor command that asks the chip to show a chosen image after a delay. It
+is present in the vendor's source and commented out there. If it controls
+which image is scanned out, it would allow updating one while the other is
+displayed, which is the thing that would make single-send correct.

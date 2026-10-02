@@ -880,3 +880,50 @@ again and none of them can be tried here.
 endian, value, then padding to eight bytes. The vendor has wider writes and
 separate opcodes for SFR, SDRAM, EEPROM and flash; only this one is needed
 here.
+
+## Saturating the link makes the adapter stop showing a picture
+
+The worst failure mode found so far, because every signal says the driver
+is working.
+
+Sending transfers as fast as the bus will carry them, sustained, gets the
+adapter into a state where it still accepts every transfer, still reports
+its HDMI output unmuted at `0xFB07`, still reports a panel attached at
+`0x0032`, and shows nothing. There is no error anywhere. Only unplugging it
+clears the state.
+
+Measured at 250 MB/s against the 237 MB/s the part sustains, so this is
+genuine saturation rather than a particular pattern of traffic.
+
+**This contaminates everything measured afterwards.** Once an adapter is in
+this state it stays there for the rest of the session, so the next change
+tested looks like the cause and the one before it looks like the cure. Two
+correct changes were reverted that way before the pattern was recognised.
+If a panel goes dark during testing, unplug the adapter before concluding
+anything about the change that was being tried.
+
+The practical rule: leave headroom. The idle repaint is rationed to twice a
+second, which is 15 MB/s, and the vendor's own driver waits 2500 ms between
+idle frames.
+
+## Transfers complete on the output vsync, not on a fixed 60 Hz
+
+The notes above describe the quantisation as 16.67 ms slots. That is the
+period of a 60 Hz mode, not a property of the chip. Measured by sending
+full frames back to back:
+
+| mode | frames a second |
+|---|---|
+| 1024x768 @ 75 | 74.9 |
+| 1280x1024 @ 75 | 75.3 |
+| 1920x1080 @ 50 | 50.3 |
+| 1920x1080 @ 60 | 59.9 |
+
+So a slot is one frame period at whatever rate the mode runs, and a 75 Hz
+mode gives a quarter more slots a second than a 60 Hz one. Worth knowing
+before treating 60 as a ceiling.
+
+It also means the right default mode depends on the chip. A full frame
+costs eight slots on the USB 2 parts, so 1080p60 cannot be sustained there
+and 30 is the honest default. On the USB 3 parts it costs one, and
+defaulting to 30 halves the frame rate for no reason.
