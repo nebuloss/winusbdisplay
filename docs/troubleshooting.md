@@ -458,3 +458,45 @@ does not license sending one every frame.
 
 Worth knowing before anyone reads the cost model and reaches the same
 conclusion a third time.
+
+## Solved: the dark panel, and why the console tool never suffered from it
+
+The adapter stops displaying while still accepting everything sent to it.
+Every transfer succeeds, the output reports itself enabled, the driver's
+counters are perfect, and the screen is black. For most of a day the only
+known cure was to unplug it.
+
+**The console tool has been curing it by accident the whole time.**
+`SendImage` calls `PowerOn` and `SetMode` before every single frame. The
+driver programmed the mode once at startup and never again. That is the
+entire difference: a dark adapter is revived by reprogramming it, so every
+tool invocation silently fixed whatever the previous experiment had broken.
+
+This is also why so many measurements in that session were wrong. Running
+the tool to check whether the panel was dark *repaired* it, so the tool
+always appeared to work and the driver always appeared broken, whatever
+either of them was actually doing.
+
+The driver now asks `DisplayingPicture` every three seconds and calls
+`Revive` when the answer is no. Verified by darkening the adapter
+deliberately and starting the driver against it: noticed in three seconds,
+picture back within twelve, no replug.
+
+Two things worth keeping from this:
+
+- **A register read is the only way to ask.** Nothing on the frame path can
+  tell the difference, because from its point of view nothing is wrong.
+- **An experiment that uses the tool to observe has already changed what it
+  is observing.** Use `usbdisplayctl health`, which only reads.
+
+## Correction: 0xF900 is not a display indicator
+
+Recorded earlier as the one clean difference between a working adapter and
+a dark one, 0x9A against 0x9E, and suggested as a possible cure. It is
+neither.
+
+Watched across a recovery: the panel went from dark to showing a picture
+while 0xF900 stayed at 0x9E throughout. Whatever that bit tracks, it is not
+whether anything is on the glass, and writing it back does nothing. The
+register that does answer the question is the one `usbdisplayctl health`
+reads.
