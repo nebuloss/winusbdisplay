@@ -132,6 +132,18 @@ bool Pipeline::Start() {
   Log("pipeline: converters: %s, %u thread(s), %d transmission(s) per region",
       converters_.Describe().c_str(), ConversionThreads(), transmissions_);
 
+  /* What a whole-screen update costs this adapter, asked through the
+   * interface rather than assumed.
+   *
+   * It is the number that separates the two families: eight periods on the
+   * USB 2 parts, one on the USB 3 parts. It also decides whether the
+   * planner merges freely or keeps regions apart, so having it in the log
+   * turns "why is this slow" into something answerable from a log file
+   * rather than from a bench. */
+  const Rect whole = {0, 0, mode_.width, mode_.height};
+  Log("pipeline: a full repaint costs %d period(s) on this adapter",
+      device_->TransferCost(whole));
+
   thread_ = std::thread(&Pipeline::Run, this);
   return true;
 }

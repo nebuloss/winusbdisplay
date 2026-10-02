@@ -100,13 +100,20 @@ class QuantisedCostModel : public TransferCostModel {
       return 0;
     }
     const size_t bytes = TransferLength(region);
-    const size_t periods = (bytes + kBytesPerPeriod - 1) / kBytesPerPeriod;
+    const size_t periods =
+        (bytes + kBytesPerPeriod912x - 1) / kBytesPerPeriod912x;
     return periods < 1 ? 1 : static_cast<int>(periods);
   }
 };
 
 }  // namespace
 
+/* The fallback for code with no device to ask, chiefly the tests.
+ *
+ * Deliberately the USB 2 quantisation rather than something neutral: it is
+ * the model with structure in it, so a planner change that only works
+ * because every transfer costs the same would pass unnoticed against a flat
+ * one. A real device supplies its own; see DisplayDevice. */
 const TransferCostModel& DefaultCostModel() {
   static const QuantisedCostModel model;
   return model;

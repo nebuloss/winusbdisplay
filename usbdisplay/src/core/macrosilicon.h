@@ -102,6 +102,7 @@ class MacroSiliconDevice : public DisplayDevice {
    * 128. */
   bool Read(uint16_t address, uint8_t* data, size_t len);
   bool ReadByte(uint16_t address, uint8_t* value);
+  bool WriteByte(uint16_t address, uint8_t value);
   bool Command(uint8_t sub_op, const void* six_bytes);
   bool ReadFlash(uint32_t address, void* data, size_t len);
 
@@ -116,7 +117,22 @@ class MacroSiliconDevice : public DisplayDevice {
 
   bool ReadDisplayStatus(uint8_t* status);
   bool ReadChipId(ChipId* id);
+
+  /* How much memory the dongle has, as the chip reports it.
+   *
+   * A board property rather than a chip one, so it is read rather than
+   * inferred from the model: the same silicon ships with different amounts,
+   * and it decides which modes will fit. */
+  bool ReadSdramType(uint8_t* type);
+
   bool ReadCustomTimings(std::vector<CustomTiming>* timings);
+
+  /* What the chip was last identified as, without going near the wire.
+   *
+   * ReadChipId records it, so anything that has probed the adapter once has
+   * set this. Unknown until then, which the cost model treats as the slower
+   * family; see bytes_per_period_. */
+  ChipModel model() const { return model_.load(std::memory_order_relaxed); }
 
   /* Which of the chip's two internal images the vendor's register says is on
    * screen. A probe: the pipeline does not use it, because two attempts to
@@ -138,7 +154,15 @@ class MacroSiliconDevice : public DisplayDevice {
    * need to reprogram from inside a transfer do not deadlock on it. */
   bool SetModeLocked(const Mode& mode);
   bool EnableOutputLocked(bool enable);
+  bool SetMuteLocked(bool muted);
   bool ResetLocked();
+
+  /* Reads the chip id and the connector once, so later decisions do not
+   * depend on some caller having asked first. */
+  void EnsureIdentified();
+  bool identified_ = false;
+
+  void RememberModel(ChipModel model);
 
   std::unique_ptr<Link> link_;
 
@@ -167,6 +191,26 @@ class MacroSiliconDevice : public DisplayDevice {
   bool have_last_mode_ = false;
   unsigned consecutive_failures_ = 0;
   std::atomic<uint64_t> generation_{0};
+
+  /* What the chip is, and the one number its cost behaviour turns on.
+   *
+   * Atomic because the frame thread reads them through TransferCost while
+   * the control plane may still be probing, and relaxed because there is
+   * nothing to order against: each is a single value that only ever goes
+   * from the conservative default to the measured truth, once.
+   *
+   * The default is the USB 2 figure deliberately. An adapter that has not
+   * been identified yet, or that answers with a signature nobody has seen,
+   * is then planned for as the slower part, which splits updates that could
+   * have been merged. That is a little slower and always correct. The
+   * opposite mistake, assuming a whole frame is free on a chip where it
+   * costs eight periods, turns ordinary typing into full-screen repaints. */
+  std::atomic<ChipModel> model_{ChipModel::kUnknown};
+  std::atomic<size_t> bytes_per_period_{kBytesPerPeriod912x};
+
+  /* The connector, cached by ReadConnector so anything on the frame path
+   * can consult it without a control exchange. */
+  std::atomic<VideoPort> port_{VideoPort::kUnknown};
 };
 
 bool EdidBlockChecksumOk(const uint8_t* block);

@@ -59,12 +59,18 @@ void PrintUsage() {
       "  benchsizes [--mode WxH@Hz]\n");
 }
 
-std::unique_ptr<MacroSiliconDevice> OpenChip(bool require_panel) {
+/* quiet is for callers that work perfectly well with no adapter and are only
+ * asking in case there is one. Without it they print an error for a
+ * condition that is not one. */
+std::unique_ptr<MacroSiliconDevice> OpenChip(bool require_panel,
+                                             bool quiet = false) {
   if (!g_dump_directory.empty()) {
     std::string error;
     std::unique_ptr<FileLink> link = FileLink::Open(g_dump_directory, &error);
     if (!link) {
-      fprintf(stderr, "error: %s\n", error.c_str());
+      if (!quiet) {
+        fprintf(stderr, "error: %s\n", error.c_str());
+      }
       return nullptr;
     }
     printf("link: %s\n", link->Describe().c_str());
@@ -75,7 +81,9 @@ std::unique_ptr<MacroSiliconDevice> OpenChip(bool require_panel) {
   std::string error;
   std::unique_ptr<UsbLink> link = UsbLink::Open(require_panel, &error);
   if (!link) {
-    fprintf(stderr, "error: %s\n", error.c_str());
+    if (!quiet) {
+      fprintf(stderr, "error: %s\n", error.c_str());
+    }
     return nullptr;
   }
   printf("link: %s\n", link->Describe().c_str());
@@ -185,6 +193,21 @@ int CmdInfo() {
     printf("connector: %s\n", VideoPortName(port));
   }
 
+  /* The board's memory, and what it rules out. Worth printing even when
+   * nothing is wrong: it is the first thing to look at when a resolution a
+   * panel clearly supports is missing from the list. */
+  uint8_t sdram = 0;
+  if (chip->ReadSdramType(&sdram)) {
+    const size_t memory = SdramBytes(sdram);
+    if (sdram == kSdramNone) {
+      printf("memory:    none reported, so no mode is ruled out here\n");
+    } else {
+      printf("memory:    %zu MB, enough for two frames up to %s\n",
+             memory / (1024u * 1024u),
+             SdramBytesNeeded(1920, 1080) <= memory ? "1080p" : "720p");
+    }
+  }
+
   uint8_t status = 0;
   if (chip->ReadDisplayStatus(&status)) {
     printf("display:   %s (0x%02X)\n",
@@ -232,6 +255,25 @@ int CmdEdid(int argc, char** argv) {
 }
 
 int CmdModes() {
+  /* The mode table is static, so this works with nothing plugged in. The
+   * cost column is not: what a full frame costs depends on which family the
+   * chip belongs to, by a factor of eight. So the adapter is consulted when
+   * there is one, and the answer says which it is rather than printing a
+   * number whose meaning the reader has to guess. */
+  size_t per_period = kBytesPerPeriod912x;
+  const char* measured_for = "USB 2 parts, no adapter attached to ask";
+
+  std::unique_ptr<MacroSiliconDevice> chip = OpenChip(false, true);
+  if (chip) {
+    ChipId id;
+    if (chip->ReadChipId(&id) && id.model != ChipModel::kUnknown) {
+      per_period = (id.model == ChipModel::kMs9132) ? kBytesPerPeriod913x
+                                                    : kBytesPerPeriod912x;
+      measured_for = ChipModelName(id.model);
+    }
+  }
+
+  printf("cost periods are for: %s\n\n", measured_for);
   printf("index  mode\n");
   for (size_t i = 0; i < kModeCount; ++i) {
     const Mode& mode = kModes[i];
@@ -240,7 +282,7 @@ int CmdModes() {
     printf(" 0x%02X  %4dx%-4d @%3d   full frame %6.2f MB, %d periods\n",
            mode.index, mode.width, mode.height, mode.hz,
            bytes / (1024.0 * 1024.0),
-           static_cast<int>((bytes + kBytesPerPeriod - 1) / kBytesPerPeriod));
+           static_cast<int>((bytes + per_period - 1) / per_period));
   }
   return 0;
 }

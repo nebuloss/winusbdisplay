@@ -18,6 +18,7 @@
  */
 
 #include <map>
+#include <set>
 #include <cstring>
 #include <vector>
 
@@ -75,6 +76,9 @@ class FakeLink : public Link {
     if (pending_read_is_flash_) {
       return true; /* unprogrammed flash reads back as zeroes */
     }
+    if (unreadable_.count(static_cast<uint16_t>(pending_read_address_))) {
+      return false;
+    }
     /* The response carries four consecutive register bytes at offset 3. */
     for (size_t i = 0; i < kMaxReadBytes; ++i) {
       const uint16_t address =
@@ -106,6 +110,10 @@ class FakeLink : public Link {
     return -1;
   }
 
+  /* Makes one register refuse to be read, for the paths that have to cope
+   * with a chip that will not answer a particular question. */
+  void FailReadsAt(uint16_t address) { unreadable_.insert(address); }
+
   std::vector<Control> controls;
   std::vector<Bulk> bulks;
   std::map<uint16_t, uint8_t> registers;
@@ -118,6 +126,7 @@ class FakeLink : public Link {
  private:
   uint32_t pending_read_address_ = 0;
   bool pending_read_is_flash_ = false;
+  std::set<uint16_t> unreadable_;
 };
 
 /* Keeps a borrowed pointer to the fake while Chip owns it. */
@@ -236,6 +245,201 @@ TEST(protocol, an_unknown_chip_id_is_not_an_error) {
                 "an unrecognised signature still leaves the raw bytes for "
                 "the caller to report, which is more useful than a failure");
   CHECK(id.model == ChipModel::kUnknown);
+}
+
+/* ---- what each family costs -------------------------------------------- */
+
+namespace {
+
+/* A full 1080p frame, the update whose cost separates the two families. */
+Rect FullFrame() { return Rect{0, 0, 1920, 1080}; }
+
+void IdentifyAs912C(Harness& harness) {
+  harness.link->registers[kRegChipId912x] = kSignaturePart912C;
+  harness.link->registers[kRegChipId912x + 1] = kSignatureFamily912x;
+  harness.link->registers[kRegChipId912x + 2] = kSignatureTail;
+  ChipId id;
+  CHECK(harness.chip->ReadChipId(&id));
+  CHECK(id.model == ChipModel::kMs912C);
+}
+
+void IdentifyAs9132(Harness& harness) {
+  harness.link->registers[kRegChipId913x] = kSignaturePart912A;
+  harness.link->registers[kRegChipId913x + 1] = kSignatureFamily913x;
+  harness.link->registers[kRegChipId913x + 2] = kSignatureTail;
+  ChipId id;
+  CHECK(harness.chip->ReadChipId(&id));
+  CHECK(id.model == ChipModel::kMs9132);
+}
+
+}  // namespace
+
+TEST(cost, a_usb2_chip_charges_eight_periods_for_a_full_frame) {
+  Harness harness;
+  IdentifyAs912C(harness);
+  /* Measured: 491 KB took 16.7 ms and 553 KB took 33.2 ms, so roughly
+   * 520 KB fits in a period and a 4.1 MB frame spans eight of them. This is
+   * what makes merging distant regions ruinous on these parts. */
+  CHECK_EQ(harness.chip->TransferCost(FullFrame()), 8);
+}
+
+TEST(cost, a_usb3_chip_charges_one_period_for_a_full_frame) {
+  Harness harness;
+  IdentifyAs9132(harness);
+  /* Measured on the MS9132: a 30 KB update took 14.5 ms and a 4.1 MB full
+   * frame took 17.1 ms. Both are one 60 Hz period, so size is free and only
+   * the number of transfers costs anything. */
+  CHECK_EQ(harness.chip->TransferCost(FullFrame()), 1);
+}
+
+TEST(cost, size_is_free_on_a_usb3_chip) {
+  Harness harness;
+  IdentifyAs9132(harness);
+  CHECK_BECAUSE(
+      harness.chip->TransferCost(Rect{0, 0, 64, 8}) ==
+          harness.chip->TransferCost(FullFrame()),
+      "when every transfer costs one period the planner should merge "
+      "freely, which only holds if a tiny update and a whole frame price "
+      "the same");
+}
+
+TEST(cost, an_unidentified_chip_is_charged_as_the_slower_family) {
+  Harness harness;
+  /* Deliberately without identifying it. Guessing the faster model on a
+   * slower chip turns ordinary damage into full-screen repaints; guessing
+   * the slower one on a faster chip merely splits updates that could have
+   * been merged. Only one of those is a bug a user would notice. */
+  CHECK_EQ(harness.chip->TransferCost(FullFrame()), 8);
+}
+
+/* ---- unmuting the output ----------------------------------------------- */
+
+namespace {
+
+/* The value written to a register, or -1 if it was never written. */
+int WroteTo(const FakeLink& link, uint16_t address) {
+  for (const FakeLink::Control& control : link.controls) {
+    if (control.op() == kOpWriteXdataByte && control.address() == address) {
+      return control.bytes[3];
+    }
+  }
+  return -1;
+}
+
+void BringUpHdmi(Harness& harness, uint16_t chip_register, uint8_t part,
+                 uint8_t family, uint16_t mute_register, uint8_t mute_value) {
+  harness.link->registers[chip_register] = part;
+  harness.link->registers[chip_register + 1] = family;
+  harness.link->registers[chip_register + 2] = kSignatureTail;
+  harness.link->registers[kRegVideoPort] = 0x05; /* HDMI */
+  harness.link->registers[mute_register] = mute_value;
+
+  CHECK(harness.chip->SetMode(Mode1080p60()));
+  CHECK(harness.chip->EnableOutput(true));
+}
+
+}  // namespace
+
+TEST(mute, a_usb3_chip_is_unmuted_at_its_own_register) {
+  Harness harness;
+  BringUpHdmi(harness, kRegChipId913x, kSignaturePart912A, kSignatureFamily913x,
+              kRegHdmiMute913x, 0xFF);
+  CHECK_BECAUSE(
+      WroteTo(*harness.link, kRegHdmiMute913x) == (0xFF & ~kHdmiMuteBit),
+      "the mute bit has to be cleared for a picture to leave the chip, and "
+      "the USB 3 parts keep it at a different address from the USB 2 ones");
+  CHECK_BECAUSE(WroteTo(*harness.link, kRegHdmiMute912x) == -1,
+                "writing the other family's address would touch a register "
+                "that means something else entirely");
+}
+
+TEST(mute, a_usb2_chip_is_unmuted_at_its_own_register) {
+  Harness harness;
+  BringUpHdmi(harness, kRegChipId912x, kSignaturePart912C, kSignatureFamily912x,
+              kRegHdmiMute912x, 0xFF);
+  CHECK_EQ(WroteTo(*harness.link, kRegHdmiMute912x), 0xFF & ~kHdmiMuteBit);
+  CHECK(WroteTo(*harness.link, kRegHdmiMute913x) == -1);
+}
+
+TEST(mute, an_already_unmuted_chip_is_left_alone) {
+  Harness harness;
+  BringUpHdmi(harness, kRegChipId913x, kSignaturePart912A, kSignatureFamily913x,
+              kRegHdmiMute913x, 0x00);
+  CHECK_BECAUSE(WroteTo(*harness.link, kRegHdmiMute913x) == -1,
+                "an adapter that comes up showing a picture should not be "
+                "written to at all, so this costs a read and nothing more");
+}
+
+TEST(mute, turning_the_output_off_mutes_it) {
+  Harness harness;
+  BringUpHdmi(harness, kRegChipId913x, kSignaturePart912A, kSignatureFamily913x,
+              kRegHdmiMute913x, 0x00);
+  harness.link->controls.clear();
+  CHECK(harness.chip->EnableOutput(false));
+  CHECK_EQ(WroteTo(*harness.link, kRegHdmiMute913x), kHdmiMuteBit);
+}
+
+TEST(mute, a_connector_we_have_no_register_for_is_not_guessed_at) {
+  Harness harness;
+  harness.link->registers[kRegChipId913x] = kSignaturePart912A;
+  harness.link->registers[kRegChipId913x + 1] = kSignatureFamily913x;
+  harness.link->registers[kRegChipId913x + 2] = kSignatureTail;
+  harness.link->registers[kRegVideoPort] = 0x02; /* VGA */
+
+  CHECK(harness.chip->SetMode(Mode1080p60()));
+  CHECK(harness.chip->EnableOutput(true));
+  for (const FakeLink::Control& control : harness.link->controls) {
+    CHECK_BECAUSE(control.op() != kOpWriteXdataByte,
+                  "the other connectors each have their own register and "
+                  "none of them has been tried on hardware, so writing a "
+                  "guessed address is not worth the risk to the dongle");
+  }
+}
+
+namespace {
+
+bool Offers(const std::vector<Mode>& modes, int w, int h) {
+  for (const Mode& mode : modes) {
+    if (mode.width == w && mode.height == h) {
+      return true;
+    }
+  }
+  return false;
+}
+
+std::vector<Mode> ModesWithMemory(Harness& harness, uint8_t sdram) {
+  harness.link->registers[kRegSdramType] = sdram;
+  return harness.chip->SupportedModes(VideoPort::kHdmi);
+}
+
+}  // namespace
+
+TEST(memory, an_eight_megabyte_board_can_do_1080p) {
+  Harness harness;
+  /* Two frames at two bytes a pixel is 7.9 MB, which fits in 8 and is what
+   * the adapter this was written against reports. */
+  CHECK(Offers(ModesWithMemory(harness, kSdram8M), 1920, 1080));
+}
+
+TEST(memory, a_four_megabyte_board_is_not_offered_1080p) {
+  Harness harness;
+  const std::vector<Mode> modes = ModesWithMemory(harness, kSdram4M);
+  CHECK_BECAUSE(!Offers(modes, 1920, 1080),
+                "1080p needs 7.9 MB for its two frames and will not fit, "
+                "and the hardware answers a mode it cannot hold with a "
+                "corrupt picture rather than an error");
+  CHECK_BECAUSE(Offers(modes, 1280, 720),
+                "720p needs 3.5 MB, so a smaller board is still useful and "
+                "must not be left with an empty mode list");
+}
+
+TEST(memory, a_board_that_will_not_say_keeps_every_mode) {
+  Harness harness;
+  harness.link->FailReadsAt(kRegSdramType);
+  CHECK_BECAUSE(
+      Offers(harness.chip->SupportedModes(VideoPort::kHdmi), 1920, 1080),
+      "a failed read is not evidence the memory is small, so the benefit of "
+      "the doubt keeps the behaviour that shipped");
 }
 
 TEST(modeset, programs_the_captured_sequence_in_order) {

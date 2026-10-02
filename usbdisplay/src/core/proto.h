@@ -35,6 +35,7 @@ constexpr uint16_t kHidControlInterface = 0;   /* MI_00, not the display one */
 /* First byte of a control payload: what kind of operation this is. */
 constexpr uint8_t kOpVideo = 0xA6;     /* followed by a sub-operation */
 constexpr uint8_t kOpReadXdata = 0xB5; /* returns up to four bytes */
+constexpr uint8_t kOpWriteXdataByte = 0xB6;
 constexpr uint8_t kOpReadFlash = 0xF5;
 
 /* Sub-operations of kOpVideo, named by the vendor source. */
@@ -69,6 +70,60 @@ constexpr uint16_t kRegEdidBase = 0xC000;
 constexpr uint16_t kRegLiveImageIndex = 0xD003;
 constexpr uint16_t kRegChipId912x = 0xF000;
 constexpr uint16_t kRegChipId913x = 0xFF00;
+
+/* Muting the picture, which is a different register on each family.
+ *
+ * The video enable command is not the whole story. The transmitter has a
+ * mute of its own, and the vendor driver clears it as a separate step
+ * after enabling video, for both families:
+ *
+ *   MS912x HDMI   0xF507 bit 1
+ *   MS9132 HDMI   0xFB07 bit 1
+ *
+ * Clear to show a picture, set to mute, on both.
+ *
+ * The adapter here happens to come up with the bit already clear, so it
+ * was briefly tempting to leave this out as unnecessary. That is an
+ * argument about one unit in one state rather than about the hardware: the
+ * bit is writable, so something can set it, and nothing would ever clear
+ * it again. A panel stuck dark while every transfer reports success is the
+ * worst failure this hardware has, and the sequence the vendor documents
+ * is the one worth following. */
+constexpr uint16_t kRegHdmiMute912x = 0xF507;
+constexpr uint16_t kRegHdmiMute913x = 0xFB07;
+constexpr uint8_t kHdmiMuteBit = 0x02;
+
+/* How much memory the dongle was built with, as kRegSdramType reports it.
+ *
+ * This is a property of the board rather than the chip, so two adapters
+ * with the same silicon can differ, and it decides which modes are possible
+ * at all. The chip divides its memory into two frames, so a mode needs
+ * width * height * 2 bytes twice over. At 1080p that is 7.9 MB, which fits
+ * in 8 MB and does not fit in 4 MB.
+ *
+ * Offering a mode the memory cannot hold is not harmless: the vendor driver
+ * rejects it up front, and what the hardware does if asked anyway is a
+ * corrupt picture rather than an error. */
+constexpr uint8_t kSdram2M = 0;
+constexpr uint8_t kSdram4M = 1;
+constexpr uint8_t kSdram8M = 2;
+constexpr uint8_t kSdram16M = 3;
+constexpr uint8_t kSdramNone = 4;
+
+/* The vendor's own arithmetic, kept exactly: 2 MB shifted left by the
+ * reported type. The "none" code falls out of it as a very large number,
+ * which makes the check pass for everything, and that is deliberately not
+ * corrected here. A board reporting it is one whose memory this cannot
+ * reason about, and refusing every mode on a guess would be worse than
+ * leaving the behaviour as it was. */
+constexpr size_t SdramBytes(uint8_t type) {
+  return static_cast<size_t>(2u * 1024u * 1024u) << type;
+}
+
+/* Two frames, each two bytes a pixel. */
+constexpr size_t SdramBytesNeeded(int width, int height) {
+  return static_cast<size_t>(width) * static_cast<size_t>(height) * 4u;
+}
 
 /* One read request returns four consecutive bytes, which is what makes a
  * 128 byte EDID cost 32 round trips instead of 128. The reverse engineered
@@ -114,16 +169,43 @@ constexpr int kMaxFrameHeight = 1200;
 constexpr size_t kMaxTransferBytes =
     static_cast<size_t>(kMaxFrameWidth) * kMaxFrameHeight * 2 + kFrameOverhead;
 
-/* The chip finishes a bulk transfer on its own 60 Hz boundary rather than
- * streaming at a byte rate, so the cost of an update is quantised into these
- * periods. Everything in render/ is built around that; see render/rect.h. */
-constexpr size_t kBytesPerPeriod = 520u * 1024u;
+/* Both families finish a bulk transfer on their own 60 Hz boundary rather
+ * than streaming at a byte rate, so the cost of an update is quantised into
+ * these periods. Everything in render/ is built around that; see
+ * render/rect.h.
+ *
+ * How much fits in one period is the single biggest difference between the
+ * two families, and it changes what the damage planner should do rather than
+ * merely how fast it goes.
+ *
+ * On the USB 2 parts about 520 KB fits, so a full 1080p frame costs eight
+ * periods and merging two distant regions into their bounding box can cost
+ * eight times what sending them apart does.
+ *
+ * On the USB 3 parts a whole frame fits in one. Measured on an MS9132: a
+ * 30 KB update took 14.5 ms and a 4.1 MB full frame took 17.1 ms, both one
+ * period. Every transfer costs the same, so the number of transfers is all
+ * that matters and merging is always worth it. The value is the largest
+ * transfer there can be, which makes the cost arithmetic come out at one
+ * without needing a second code path.
+ *
+ * Getting this wrong in the safe direction, assuming the smaller period on a
+ * chip that has the larger one, splits regions that could have been merged:
+ * slower, never incorrect. The other way round turns ordinary damage into
+ * full-screen repaints, so the 912x value is what anything unidentified
+ * gets. */
+constexpr size_t kBytesPerPeriod912x = 520u * 1024u;
+constexpr size_t kBytesPerPeriod913x = kMaxTransferBytes;
 constexpr unsigned kPeriodMicroseconds = 16667;
 
-/* Sustained bulk throughput measured on an MS912C at 1080p. The bus could
- * carry more; the chip cannot. Pipelining eight overlapped transfers moves
- * this by under one percent, so it is a device limit, not a host one. */
-constexpr size_t kSustainedBytesPerSecond = 29u * 1024u * 1024u;
+/* Sustained bulk throughput at 1080p. The bus could carry more than the USB 2
+ * parts do; the chip cannot, and pipelining eight overlapped transfers moves
+ * it by under one percent, so it is a device limit rather than a host one.
+ *
+ * The USB 3 figure follows from a full frame landing inside one 60 Hz period:
+ * 4.1 MB in 17.1 ms is about 240 MB/s. */
+constexpr size_t kSustainedBytesPerSecond912x = 29u * 1024u * 1024u;
+constexpr size_t kSustainedBytesPerSecond913x = 240u * 1024u * 1024u;
 
 /* Modes and connector types live in mode.h: they are part of the device
  * independent interface rather than of this chip's wire format. */
@@ -139,6 +221,16 @@ struct ReadRequest {
   uint8_t reserved;
 };
 static_assert(sizeof(ReadRequest) == kControlSize, "");
+
+/* kOpWriteXdataByte. One register, one byte, same address layout as a
+ * read. */
+struct WriteByteRequest {
+  uint8_t op;
+  uint8_t address_be[2];
+  uint8_t value;
+  uint8_t reserved[4];
+};
+static_assert(sizeof(WriteByteRequest) == kControlSize, "");
 
 /* kOpVideo. The six payload bytes are one of the structures below. */
 struct VideoRequest {

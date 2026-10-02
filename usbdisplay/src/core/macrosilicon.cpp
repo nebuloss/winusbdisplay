@@ -78,6 +78,21 @@ bool MacroSiliconDevice::ReadByte(uint16_t address, uint8_t* value) {
   return Read(address, value, 1);
 }
 
+bool MacroSiliconDevice::WriteByte(uint16_t address, uint8_t value) {
+  std::lock_guard<std::mutex> lock(control_lock_);
+
+  WriteByteRequest request;
+  memset(&request, 0, sizeof(request));
+  request.op = kOpWriteXdataByte;
+  PutBe16(request.address_be, address);
+  request.value = value;
+
+  if (!link_->ControlWrite(reinterpret_cast<uint8_t*>(&request))) {
+    return FailLink("register write");
+  }
+  return true;
+}
+
 bool MacroSiliconDevice::Command(uint8_t sub_op, const void* six_bytes) {
   std::lock_guard<std::mutex> lock(control_lock_);
 
@@ -140,6 +155,11 @@ bool MacroSiliconDevice::SetMode(const Mode& mode) {
 bool MacroSiliconDevice::SetModeLocked(const Mode& mode) {
   uint8_t payload[6];
   uint8_t discard = 0;
+
+  /* Nothing can show a picture without first setting a mode, so this is the
+   * one place every path is guaranteed to pass through before the output
+   * matters. */
+  EnsureIdentified();
 
   output_enabled_ = false;
 
@@ -207,6 +227,93 @@ bool MacroSiliconDevice::EnableOutput(bool enable) {
   return EnableOutputLocked(enable);
 }
 
+/* Clears the transmitter's own mute, which is separate from video enable.
+ *
+ * The enable command starts the pipeline; this is what actually lets the
+ * picture out. The vendor driver does both, in this order, and the register
+ * is not the same one on the two families:
+ *
+ *   MS912x HDMI   0xF507 bit 1
+ *   MS9132 HDMI   0xFB07 bit 1
+ *
+ * Clear to show, set to mute, on both. Writing the 912x address on a 9132
+ * lands somewhere harmless and the panel stays dark while every transfer
+ * reports success, which is the worst way this hardware fails.
+ *
+ * Only HDMI is handled. The other connectors each have their own register
+ * again, none of them is present on hardware here, and writing a guessed
+ * address to an unknown chip is how you brick a dongle. They keep the
+ * behaviour that shipped, which is to rely on the enable command alone.
+ *
+ * Failure is reported but not fatal: on a part where this register means
+ * something else, or nothing, refusing to bring the output up at all would
+ * be worse than the mute never having been touched. */
+/* Makes sure the chip has been identified and the connector read, once.
+ *
+ * Both answers steer later decisions, and both used to depend on some
+ * caller happening to have asked first: the cost model on SupportedModes,
+ * the unmute on ReadConnector. The console tool calls neither before
+ * putting a picture up, so on that path the unmute quietly did nothing and
+ * the panel stayed dark. That is the second time this shape of bug has
+ * appeared here, so the ordering is no longer left to callers.
+ *
+ * Two control exchanges, once per device. Failures are left alone
+ * deliberately: the defaults are the conservative ones, and a chip that
+ * will not answer is not a reason to refuse to drive it. */
+void MacroSiliconDevice::EnsureIdentified() {
+  if (identified_) {
+    return;
+  }
+  identified_ = true;
+
+  ChipId id;
+  ReadChipId(&id);
+
+  VideoPort port = VideoPort::kUnknown;
+  ReadConnector(&port);
+}
+
+/* Clears the transmitter's own mute, which is separate from video enable.
+ *
+ * The enable command starts the pipeline; this is what lets the picture
+ * out. The vendor driver does both, in this order, and the register is not
+ * the same one on the two families, so writing the 912x address to a 9132
+ * would land somewhere else entirely.
+ *
+ * Only HDMI is handled here. Each of the other connectors has its own
+ * register again, none of them exists on hardware to try it against, and
+ * writing a guessed address to a chip is how a dongle stops working for
+ * good. They keep the behaviour that shipped, which is the enable command
+ * alone.
+ *
+ * Nothing is written when the bit already says what it should, so on an
+ * adapter that comes up unmuted this costs one register read and no write
+ * at all. Failure is not fatal: refusing to bring the output up because
+ * the mute could not be read would turn a working picture into none. */
+bool MacroSiliconDevice::SetMuteLocked(bool muted) {
+  if (port_.load(std::memory_order_relaxed) != VideoPort::kHdmi) {
+    return true;
+  }
+
+  const uint16_t address =
+      model_.load(std::memory_order_relaxed) == ChipModel::kMs9132
+          ? kRegHdmiMute913x
+          : kRegHdmiMute912x;
+
+  /* Read and rewrite rather than assigning: the rest of this register
+   * belongs to the transmitter and is none of our business. */
+  uint8_t value = 0;
+  if (!ReadByte(address, &value)) {
+    return false;
+  }
+  const uint8_t updated = muted ? static_cast<uint8_t>(value | kHdmiMuteBit)
+                                : static_cast<uint8_t>(value & ~kHdmiMuteBit);
+  if (updated == value) {
+    return true;
+  }
+  return WriteByte(address, updated);
+}
+
 bool MacroSiliconDevice::EnableOutputLocked(bool enable) {
   uint8_t payload[6];
   memset(payload, 0, sizeof(payload));
@@ -214,6 +321,8 @@ bool MacroSiliconDevice::EnableOutputLocked(bool enable) {
   if (!Command(kVideoEnable, payload)) {
     return false;
   }
+  /* After the enable, which is the order the vendor uses. */
+  SetMuteLocked(!enable);
   output_enabled_ = enable;
   return true;
 }
@@ -242,6 +351,10 @@ bool MacroSiliconDevice::ReadConnector(VideoPort* port) {
   *port = value > static_cast<uint8_t>(VideoPort::kDigital)
               ? VideoPort::kUnknown
               : static_cast<VideoPort>(value);
+  /* Kept because unmuting the output needs it, and that happens on the
+   * frame path where asking the chip again would mean a control exchange
+   * in the middle of sending pixels. */
+  port_.store(*port, std::memory_order_relaxed);
   return true;
 }
 
@@ -312,30 +425,66 @@ bool MacroSiliconDevice::ReadChipId(ChipId* id) {
   if (signature[1] == kSignatureFamily913x && signature[2] == kSignatureTail) {
     id->model = ChipModel::kMs9132;
     id->flash_timing_base = kFlashTimingBase913x;
-    return true;
-  }
-
-  if (!Read(kRegChipId912x, signature, 3)) {
-    return false;
-  }
-  memcpy(id->signature, signature, sizeof(signature));
-  if (signature[1] == kSignatureFamily912x && signature[2] == kSignatureTail) {
-    switch (signature[0]) {
-      case kSignaturePart912C:
-        id->model = ChipModel::kMs912C;
-        break;
-      case kSignaturePart912A:
-        id->model = ChipModel::kMs912A;
-        break;
-      default:
-        id->model = ChipModel::kMs9120;
-        break;
+    /* Deliberately not an early return. Everything that identifies the chip
+     * has to go past RememberModel below, or the cost model keeps the
+     * conservative default and the faster part is driven as though it were
+     * the slower one. That happened. */
+  } else {
+    if (!Read(kRegChipId912x, signature, 3)) {
+      return false;
     }
-    id->flash_timing_base = kFlashTimingBase912x;
+    memcpy(id->signature, signature, sizeof(signature));
+    if (signature[1] == kSignatureFamily912x &&
+        signature[2] == kSignatureTail) {
+      switch (signature[0]) {
+        case kSignaturePart912C:
+          id->model = ChipModel::kMs912C;
+          break;
+        case kSignaturePart912A:
+          id->model = ChipModel::kMs912A;
+          break;
+        default:
+          id->model = ChipModel::kMs9120;
+          break;
+      }
+      id->flash_timing_base = kFlashTimingBase912x;
+    }
   }
 
   /* An unrecognised signature is not an I/O error, and id->signature holds
    * whatever the chip said so the caller can print it. */
+  RememberModel(id->model);
+  return true;
+}
+
+/* Records what the chip turned out to be, and with it the one number the
+/* Records what the chip turned out to be, and with it the one number the
+ * frame loop needs: how much fits in a 60 Hz period.
+ *
+ * Kept here rather than at the call sites because this is the only place the
+ * chip is ever identified, so there is nowhere else for the two to drift
+ * apart. An unrecognised chip leaves the conservative default alone. */
+void MacroSiliconDevice::RememberModel(ChipModel model) {
+  model_.store(model, std::memory_order_relaxed);
+  if (model == ChipModel::kMs9132) {
+    bytes_per_period_.store(kBytesPerPeriod913x, std::memory_order_relaxed);
+  } else if (model != ChipModel::kUnknown) {
+    bytes_per_period_.store(kBytesPerPeriod912x, std::memory_order_relaxed);
+  }
+}
+
+bool MacroSiliconDevice::ReadSdramType(uint8_t* type) {
+  uint8_t value = 0;
+  if (!ReadByte(kRegSdramType, &value)) {
+    return false;
+  }
+  /* The vendor rejects anything past the last known code rather than
+   * guessing, and so does this: a value nobody has seen is not a size to
+   * reason about. */
+  if (value > kSdramNone) {
+    return Fail("the adapter reported an unknown memory size");
+  }
+  *type = value;
   return true;
 }
 
@@ -452,12 +601,19 @@ std::string MacroSiliconDevice::Describe() const { return link_->Describe(); }
 
 /* Cost is quantised, not proportional.
  *
- * This chip completes a bulk transfer on its own 60 Hz boundary, so what an
- * update costs is the number of those periods it spans. Measured on an
- * MS912C: 491 KB took 16.7 ms, 553 KB took 33.2 ms. Below the threshold size
- * is free, which is why the damage planner can merge nearby regions at no
- * cost, and above it the next byte costs an entire extra period, which is
- * why merging distant ones is ruinous. */
+ * Both families complete a bulk transfer on their own 60 Hz boundary, so
+ * what an update costs is the number of those periods it spans rather than
+ * anything to do with its size directly.
+ *
+ * How much fits in a period is what separates them, and it is read here
+ * rather than compiled in because the two answers imply opposite planning.
+ * Measured on an MS912C, 491 KB took 16.7 ms and 553 KB took 33.2 ms, so a
+ * full 1080p frame costs eight periods and merging distant regions is
+ * ruinous. Measured on an MS9132, 30 KB took 14.5 ms and a 4.1 MB full frame
+ * took 17.1 ms, both one period, so every transfer costs the same and
+ * merging is always worth it.
+ *
+ * The planner needs to know nothing about either; it compares costs. */
 int MacroSiliconDevice::TransferCost(const Rect& region) const {
   if (region.empty()) {
     return 0;
@@ -465,7 +621,8 @@ int MacroSiliconDevice::TransferCost(const Rect& region) const {
   const size_t bytes = BytesPerRow(region.width()) *
                            static_cast<size_t>(region.height()) +
                        kFrameOverhead;
-  const size_t periods = (bytes + kBytesPerPeriod - 1) / kBytesPerPeriod;
+  const size_t per_period = bytes_per_period_.load(std::memory_order_relaxed);
+  const size_t periods = (bytes + per_period - 1) / per_period;
   return periods < 1 ? 1 : static_cast<int>(periods);
 }
 
@@ -501,7 +658,38 @@ size_t MacroSiliconDevice::Frame(uint8_t* destination, size_t capacity,
 
 std::vector<Mode> MacroSiliconDevice::SupportedModes(VideoPort port) {
   std::vector<Mode> modes;
-  const auto push = [&modes](int w, int h, int hz) {
+
+  /* Identify the chip first, explicitly.
+   *
+   * ReadCustomTimings below happens to do this on its way to finding the
+   * flash layout, and relying on that worked right up until it did not:
+   * the cost model is set here too, and a chip left unidentified is driven
+   * as the slower family. One accidental early return was enough. This is
+   * one round trip at attach and it makes the dependency visible. */
+  ChipId id;
+  ReadChipId(&id);
+
+  /* What the board's memory can hold, which is not the same question as
+   * what the chip can scan out.
+   *
+   * The chip keeps two frames, so a mode needs width * height * 2 twice
+   * over. 1080p wants 7.9 MB and a 4 MB board cannot do it however willing
+   * the silicon is. Offering it anyway gets a corrupt picture rather than a
+   * refusal, which is a much worse way to find out.
+   *
+   * A board that will not say is given the benefit of the doubt, because
+   * this read failing is not evidence the memory is small, and the previous
+   * behaviour was to offer everything. */
+  size_t memory = 0;
+  uint8_t sdram = 0;
+  if (ReadSdramType(&sdram)) {
+    memory = SdramBytes(sdram);
+  }
+
+  const auto push = [&modes, memory](int w, int h, int hz) {
+    if (memory != 0 && SdramBytesNeeded(w, h) > memory) {
+      return;
+    }
     const Mode* mode = FindMode(w, h, hz);
     if (mode) {
       modes.push_back(*mode);
