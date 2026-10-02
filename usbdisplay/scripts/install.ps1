@@ -56,12 +56,25 @@ function Get-SigningCert {
     if (-not $cert) {
         $cert = New-SelfSignedCertificate -Subject $subject -Type CodeSigningCert `
             -CertStoreLocation Cert:\LocalMachine\My -NotAfter (Get-Date).AddYears(5)
-        # Trusted Publisher is what makes Windows accept the package without
-        # prompting; Root is what makes the chain validate at all.
-        foreach ($storeName in 'Root', 'TrustedPublisher') {
-            $store = New-Object System.Security.Cryptography.X509Certificates.X509Store($storeName, 'LocalMachine')
-            $store.Open('ReadWrite'); $store.Add($cert); $store.Close()
-        }
+    }
+
+    # Every time, not only when the certificate is new.
+    #
+    # Holding the key and being trusted are separate things, and they can
+    # come apart: anything that empties the trust stores leaves the key
+    # sitting in My, so this used to decide the certificate was fine and
+    # install a package Windows then refused with a complaint about an
+    # untrusted root. Which is exactly what one of this project's own
+    # uninstallers did. Adding an entry that is already there costs
+    # nothing.
+    #
+    # Trusted Publisher is what makes Windows accept the package without
+    # prompting; Root is what makes the chain validate at all.
+    foreach ($storeName in 'Root', 'TrustedPublisher') {
+        $store = New-Object System.Security.Cryptography.X509Certificates.X509Store($storeName, 'LocalMachine')
+        $store.Open('ReadWrite')
+        $store.Add($cert)
+        $store.Close()
     }
     return $cert
 }
