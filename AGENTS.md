@@ -332,14 +332,31 @@ The damage planner merges by comparing costs and never learns what the unit
 is, which is what keeps it device independent. `tests/test_damage.cpp` proves
 that with two deliberately different models.
 
+The seam has since earned its keep without a second vendor being involved.
+Supporting the USB 3 MacroSilicon parts meant changing what `TransferCost`
+returns and nothing above it, even though the right planning strategy for
+those parts is the reverse of the USB 2 ones. Nothing in `render/` or
+`driver/` needed touching.
+
+**Identify the adapter in one place, and early.** `MacroSiliconDevice` reads
+its chip id and connector once, from `SetModeLocked`, because that is the
+one point every path reaches before a picture can appear. Leaving it to
+callers produced the same bug twice: a path that had not asked got the
+conservative defaults and quietly behaved like the wrong chip. The console
+tool, which puts up a test pattern without ever asking what it is talking
+to, is the one that found it.
+
 ## Settled questions, do not re-litigate
 
 Each cost real investigation; the evidence is in `docs/protocol-notes.md`.
 
-- **The adapter is vsync locked at 60 Hz.** Cost is quantised into 16.67 ms
-  slots: up to ~520 KB is one slot, the next byte costs a whole extra one. So
-  a 2 KB update and a 490 KB update cost the same, and ordinary desktop
-  damage runs at full rate. Only full repaints are slow. Re-measure with
+- **The adapter is vsync locked at 60 Hz, on both families.** Cost is
+  quantised into 16.67 ms slots. **How much fits in a slot differs by chip
+  and is read from it, never assumed**: about 520 KB on the USB 2 parts, a
+  whole 1080p frame on the USB 3 ones. That is not just a speed difference,
+  it inverts what the planner should do, because merging is ruinous on one
+  and always right on the other. An unidentified chip is charged the slower
+  rate: the opposite guess turns typing into full repaints. Re-measure with
   `usbdisplayctl benchsizes`.
 - **Every region must reach both of the adapter's internal copies.** It
   alternates between them on every transfer, so a region sent once lands in
@@ -348,10 +365,13 @@ Each cost real investigation; the evidence is in `docs/protocol-notes.md`.
   **twice back to back, taking both buffers before sending either**. Sending
   the pair a frame apart, and tracking which copy is next, were both tried
   and both failed; nothing keeps the driver's idea of the next copy in step
-  with the adapter's.
-- **~30 MB/s is a hardware ceiling.** USB 2 silicon; pipelined overlapped
-  transfers at depth 2, 4 and 8 all measure within 1% of synchronous. There
-  are no host-side throughput wins to find.
+  with the adapter's. The vendor source confirms this from the other
+  direction: the board's memory is divided into exactly two frames, on both
+  families, so this is not an optimisation waiting to be removed.
+- **~30 MB/s is a hardware ceiling on the USB 2 parts**; pipelined
+  overlapped transfers at depth 2, 4 and 8 all measure within 1% of
+  synchronous, so there are no host-side wins to find. The USB 3 parts reach
+  about 240 MB/s, which is why a whole frame fits in one slot there.
 - **There is no cheaper pixel format.** RGB565, RGB888, YUV422 and YUV444 are
   the options, and 4:2:2 at 16 bpp is already the cheapest.
 - **`vSyncFreqDivider` above 1 breaks the topology**, even with correct
@@ -396,7 +416,15 @@ Each cost real investigation; the evidence is in `docs/protocol-notes.md`.
 - **Do not enable the output during mode programming.** It is enabled once a
   frame has landed, so the panel never shows leftover memory.
 - **Probe the chip id, never infer it from the USB product id.** The test
-  unit reports a USB 3 product id and contains USB 2 silicon.
+  unit reports a USB 3 product id and contains USB 2 silicon. A second
+  adapter reports **the same product id** and does contain USB 3 silicon, so
+  the id distinguishes nothing at all: both are `345F:9133`, and only the
+  signature tells them apart. The bulk packet size, 512 against 1024, is a
+  second independent hint in the log.
+- **Memory is a board property, not a chip one.** Read it; two adapters with
+  the same silicon ship with different amounts, and it decides which modes
+  fit. A mode the memory cannot hold produces a corrupt picture rather than
+  an error.
 - **Object attributes must carry a context type.** Creating a monitor with
   null attributes succeeds and then arrival fails with a status that means
   nothing at all.

@@ -799,3 +799,84 @@ suggests, and at half it lands near a fifth.
 The correction is to raise the fraction to the reciprocal of that exponent
 before scaling, so half asks for a stored value of 0.73. Both conversion
 paths take the resulting integer from one place, so they cannot drift apart.
+
+## The USB 3 parts are a different cost model, not a faster one
+
+Measured on an MS9132 (signature `A7 13 0A`, 8 MB board, 1024 byte bulk
+packets) against the MS912C these notes were first written for.
+
+Both families finish a bulk transfer on their own 60 Hz boundary, so an
+update costs whole 16.67 ms slots. What differs is how much fits in a slot,
+and that changes what the damage planner should do rather than only how
+fast it goes.
+
+| update | MS912C | MS9132 |
+|---|---|---|
+| 30 KB | 16.7 ms, 1 slot | 14.5 ms, 1 slot |
+| 491 KB | 16.7 ms, 1 slot | 16.7 ms, 1 slot |
+| 553 KB | 33.2 ms, 2 slots | 16.6 ms, 1 slot |
+| 4.1 MB, full 1080p | 133 ms, 8 slots | **17.1 ms, 1 slot** |
+
+So on the USB 3 part a whole frame fits in one slot. Every transfer costs
+the same, the number of transfers is the only thing that matters, and
+merging regions is always worth doing. That is the opposite conclusion from
+the USB 2 part, where merging two distant changes into their bounding box
+costs eight slots instead of two.
+
+Throughput follows from that rather than being measured separately: 4.1 MB
+in 17.1 ms is about 240 MB/s, against 29 MB/s. `usbdisplayctl bench`, which
+sends frames back to back for several seconds, fails on this part with a
+semaphore timeout; `benchsizes` is the one to use and is what produced the
+table.
+
+**An unidentified chip is charged the USB 2 rate.** The two mistakes are not
+symmetric. Assuming the slower model on a fast chip splits updates that
+could have been merged, which is a little slower. Assuming the faster model
+on a slow chip turns ordinary typing into full-screen repaints.
+
+## Memory is a property of the board, and limits the mode list
+
+`0x0030` reports it, as a code rather than a size: 0 is 2 MB and each step
+doubles, with 4 meaning none. The vendor's own arithmetic is `2 MB << code`.
+
+The chip divides its memory into two frames, so a mode needs
+`width * height * 2` bytes twice over. 1080p therefore wants 7.9 MB, which
+fits in an 8 MB board and does not fit in a 4 MB one. The adapter here
+reports 8 MB, which is exactly enough and explains why nothing larger than
+1080p is offered.
+
+This matters because the hardware answers a mode it cannot hold with a
+corrupt picture rather than an error, so the mode list is filtered by what
+the board says it has. A board that will not answer keeps every mode: a
+failed read is not evidence of a small memory.
+
+This also confirms the double buffering from the other direction. The two
+frames are not an optimisation to be removed; they are what the memory is
+divided into, and it is the same on both families.
+
+## The transmitter has a mute of its own
+
+Separate from the video enable command, at a different address on each
+family, and clear to show a picture:
+
+| family | register | bit |
+|---|---|---|
+| MS912x HDMI | `0xF507` | `0x02` |
+| MS9132 HDMI | `0xFB07` | `0x02` |
+
+The vendor clears it as a step after enabling video. Neither adapter here
+needs it, because both come up with the bit already clear, which made it
+tempting to leave out. It is done anyway: the bit is writable, nothing else
+would ever clear it, and the failure it produces is a dark panel while every
+transfer reports success, which is the most misleading symptom this hardware
+has.
+
+Only HDMI is handled. Each of the other connectors has its own register
+again and none of them can be tried here.
+
+## Register writes
+
+`0xB6` writes one byte, laid out like the `0xB5` read: opcode, address big
+endian, value, then padding to eight bytes. The vendor has wider writes and
+separate opcodes for SFR, SDRAM, EEPROM and flash; only this one is needed
+here.
