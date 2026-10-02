@@ -74,6 +74,21 @@ if ($info -match 'display:\s+(\S+)') {
 Write-Output ''
 Write-Output '== the driver'
 
+# Checked before anything else, because a disabled device explains every
+# failure below it and is the likeliest cause of a dark panel during
+# development: taking the pixel pipe for a diagnostic means disabling
+# this, and forgetting to put it back looks exactly like a driver fault.
+# That is not hypothetical, it cost a round of confused debugging.
+$node = Get-PnpDevice -InstanceId 'ROOT\DISPLAY\0000' -ErrorAction SilentlyContinue
+if (-not $node) {
+    Fail 'display device' 'not present, the driver is not installed'
+} elseif ($node.Status -ne 'OK') {
+    Fail 'display device' ('{0}, {1}' -f $node.Status, $node.ProblemDescription)
+    Write-Output '        Enable-PnpDevice -InstanceId ROOT\DISPLAY\0000 -Confirm:$false'
+} else {
+    Pass 'display device' 'enabled'
+}
+
 if (-not (Test-Path $log)) {
     Fail 'driver log' 'none, the driver has not run'
 } else {
