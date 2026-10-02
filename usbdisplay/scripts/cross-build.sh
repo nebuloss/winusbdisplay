@@ -264,9 +264,12 @@ SOURCES=(
   src/render/damage.cpp
   src/render/convert.cpp
   src/render/converter.cpp
+  src/render/overlay.cpp
   src/driver/log.cpp
   src/driver/settings.cpp
   src/driver/sender.cpp
+  src/driver/graphics.cpp
+  src/driver/cursor.cpp
   src/driver/pipeline.cpp
   src/driver/device.cpp
   src/driver/driver.cpp

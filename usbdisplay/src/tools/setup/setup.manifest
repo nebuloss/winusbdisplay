@@ -6,8 +6,12 @@
      diagnose. Installing a driver cannot be done without them, so there is
      no point starting and finding out later. -->
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <!-- Windows only uses this to tell two side by side assemblies apart,
+       which does not arise here, so it is not worth wiring to the release
+       tag. The version a user sees comes from the installer, which takes
+       it from the tag. -->
   <assemblyIdentity type="win32" name="usbdisplay.setup"
-                    version="0.1.0.0" processorArchitecture="amd64"/>
+                    version="1.0.0.0" processorArchitecture="amd64"/>
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>
       <requestedPrivileges>

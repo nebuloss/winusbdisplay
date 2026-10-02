@@ -527,7 +527,6 @@ bool MacroSiliconDevice::ReadChipId(ChipId* id) {
 }
 
 /* Records what the chip turned out to be, and with it the one number the
-/* Records what the chip turned out to be, and with it the one number the
  * frame loop needs: how much fits in a 60 Hz period.
  *
  * Kept here rather than at the call sites because this is the only place the
