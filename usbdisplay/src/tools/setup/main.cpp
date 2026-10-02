@@ -555,7 +555,46 @@ bool TrustReleaseCertificate() {
   return ok;
 }
 
+/* Removes exactly the certificate this release installed, and nothing else.
+ *
+ * It reads the certificate back from the file beside it and deletes the one
+ * whose bytes match, rather than searching for a name.
+ *
+ * Searching by name is what this did first, for the substring "usbdisplay",
+ * and that also matched "usbdisplay local signing" and "winusbdisplay test
+ * signing": a certificate a developer uses for source builds, and one
+ * belonging to a different package. Uninstalling removed both. An
+ * uninstaller deleting trust anchors it did not create is a good deal worse
+ * than leaving one behind, and the bytes are unambiguous where a name is
+ * not. */
 void ForgetReleaseCertificate() {
+  const std::wstring path = Combine(g_here, L"usbdisplay.cer");
+  if (!Exists(path)) {
+    /* Nothing to match against, so nothing is touched. Guessing here is
+     * precisely the mistake this is avoiding. */
+    return;
+  }
+
+  HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                            nullptr, OPEN_EXISTING, 0, nullptr);
+  if (file == INVALID_HANDLE_VALUE) {
+    return;
+  }
+  const DWORD size = GetFileSize(file, nullptr);
+  std::vector<BYTE> blob(size);
+  DWORD read = 0;
+  const bool got = ReadFile(file, blob.data(), size, &read, nullptr) != FALSE;
+  CloseHandle(file);
+  if (!got) {
+    return;
+  }
+
+  PCCERT_CONTEXT ours = CertCreateCertificateContext(
+      X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, blob.data(), read);
+  if (!ours) {
+    return;
+  }
+
   for (const wchar_t* store_name : {L"Root", L"TrustedPublisher"}) {
     HCERTSTORE store = CertOpenStore(CERT_STORE_PROV_SYSTEM, 0, 0,
                                      CERT_SYSTEM_STORE_LOCAL_MACHINE,
@@ -563,16 +602,16 @@ void ForgetReleaseCertificate() {
     if (!store) {
       continue;
     }
-    PCCERT_CONTEXT found = nullptr;
-    while ((found = CertFindCertificateInStore(
-                store, X509_ASN_ENCODING, 0, CERT_FIND_SUBJECT_STR,
-                L"usbdisplay", found)) != nullptr) {
-      PCCERT_CONTEXT duplicate = CertDuplicateCertificateContext(found);
-      CertDeleteCertificateFromStore(duplicate);
-      found = nullptr; /* the enumeration is invalidated by the delete */
+    /* Matched on the encoded certificate itself, so only an identical one
+     * is removed. */
+    PCCERT_CONTEXT found = CertFindCertificateInStore(
+        store, X509_ASN_ENCODING, 0, CERT_FIND_EXISTING, ours, nullptr);
+    if (found) {
+      CertDeleteCertificateFromStore(found);
     }
     CertCloseStore(store, 0);
   }
+  CertFreeCertificateContext(ours);
 }
 
 /* ---- the two things this program does ----------------------------------- */
