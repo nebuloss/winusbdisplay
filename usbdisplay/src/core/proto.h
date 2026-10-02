@@ -71,6 +71,33 @@ constexpr uint16_t kRegLiveImageIndex = 0xD003;
 constexpr uint16_t kRegChipId912x = 0xF000;
 constexpr uint16_t kRegChipId913x = 0xFF00;
 
+/* Whether a picture is actually reaching the panel.
+ *
+ * The hardest question this hardware asks, because every transfer can
+ * succeed, the output can report itself enabled, and the screen can still
+ * be dark. Found by dumping every register of a freshly plugged adapter
+ * and of one that had stopped displaying, and comparing: the byte at
+ * kRegDisplayLive + 2 reads 0x44 in the first case and 0x01 in the second,
+ * reliably.
+ *
+ * What it means is unknown and does not matter. It is a detector, and
+ * having one turns "ask somebody to look at the screen" into something a
+ * script can decide, which is the difference between measuring this
+ * hardware and guessing about it. */
+constexpr uint16_t kRegDisplayLive = 0xFB1A;
+constexpr uint8_t kDisplayLiveShowing = 0x44;
+
+/* One register, mirrored across 0xF900 to 0xFAFF because it does not
+ * decode its low address bits, and the only clean difference between a
+ * working adapter and a dark one: 0x9A against 0x9E.
+ *
+ * A single bit, and it is set exactly when the adapter has stopped
+ * putting out a picture. Whether clearing it revives the adapter without
+ * a replug is the obvious question and is answered by trying it. */
+constexpr uint16_t kRegPipeGuard = 0xF900;
+constexpr uint8_t kPipeGuardStuck = 0x04;
+constexpr uint8_t kPipeGuardHealthy = 0x9A;
+
 /* Muting the picture, which is a different register on each family.
  *
  * The video enable command is not the whole story. The transmitter has a

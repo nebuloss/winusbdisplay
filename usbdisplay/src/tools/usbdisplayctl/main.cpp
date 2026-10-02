@@ -462,6 +462,91 @@ int CmdPeek(int argc, char** argv) {
   return 0;
 }
 
+/* Writes one register.
+ *
+ * The companion to peek, and the reason it exists is recovery: comparing a
+ * freshly plugged adapter against one that had stopped displaying found a
+ * single bit that differs, and the only way to find out whether clearing
+ * it revives the adapter is to clear it.
+ *
+ *   usbdisplayctl poke 0xF900 0x9A
+ */
+int CmdPoke(int argc, char** argv) {
+  if (argc < 2) {
+    fprintf(stderr, "usage: poke <address> <value>\n");
+    return 1;
+  }
+  const unsigned long address = strtoul(argv[0], nullptr, 0);
+  const unsigned long value = strtoul(argv[1], nullptr, 0);
+  if (address > 0xFFFF || value > 0xFF) {
+    fprintf(stderr, "error: a 16 bit address and a single byte\n");
+    return 1;
+  }
+
+  std::unique_ptr<MacroSiliconDevice> chip = OpenChip(false);
+  if (!chip) {
+    return 1;
+  }
+
+  uint8_t before = 0;
+  chip->ReadByte(static_cast<uint16_t>(address), &before);
+
+  if (!chip->WriteByte(static_cast<uint16_t>(address),
+                       static_cast<uint8_t>(value))) {
+    fprintf(stderr, "error: %s\n", chip->error().c_str());
+    return 1;
+  }
+
+  /* Read back, because plenty of these registers ignore what is written
+   * and saying so is more useful than reporting success. */
+  uint8_t after = 0;
+  chip->ReadByte(static_cast<uint16_t>(address), &after);
+  printf("%04lX  was %02X, wrote %02X, now %02X%s\n", address, before,
+         static_cast<unsigned>(value), after,
+         after == value ? "" : "  (did not take)");
+  return 0;
+}
+
+/* Is a picture actually reaching the panel?
+ *
+ * The question this hardware makes hardest to answer. Every transfer can
+ * succeed, the output can report itself enabled, and the screen can still
+ * be dark, so "it works" has meant asking somebody to look at it.
+ *
+ * The third byte at kRegDisplayLive is 0x44 whenever a picture is on the
+ * glass and 0x01 when it is not. Found by dumping every register in both
+ * states and comparing, verified repeatedly against frames known to
+ * display. It is a detector rather than an explanation: what the register
+ * means is unknown, only that it answers the question.
+ *
+ * The control plane is a separate USB interface from the pixel pipe, so
+ * this works while the driver is running and holding that pipe. */
+int CmdHealth() {
+  std::unique_ptr<MacroSiliconDevice> chip = OpenChip(false);
+  if (!chip) {
+    return 1;
+  }
+
+  uint8_t live[4] = {0, 0, 0, 0};
+  if (!chip->Read(kRegDisplayLive, live, sizeof(live))) {
+    fprintf(stderr, "error: %s\n", chip->error().c_str());
+    return 1;
+  }
+  const bool showing = live[2] == kDisplayLiveShowing;
+
+  uint8_t guard = 0;
+  chip->ReadByte(kRegPipeGuard, &guard);
+
+  printf("display:  %s (%02X %02X %02X %02X)\n",
+         showing ? "showing a picture" : "DARK", live[0], live[1], live[2],
+         live[3]);
+  printf("pipe:     %02X%s\n", guard,
+         (guard & kPipeGuardStuck) ? "  (the bit that is set only when "
+                                     "the adapter has stopped displaying)"
+                                   : "");
+  return showing ? 0 : 1;
+}
+
 /* A short sanity check for use in the field, on a machine that has the tool
  * but not the source. The thorough version is the test suite, built and run
  * by scripts\test.bat; this deliberately does not duplicate it, it only
@@ -774,6 +859,12 @@ int main(int argc, char** argv) {
   }
   if (strcmp(command, "plan") == 0) {
     return CmdPlan();
+  }
+  if (strcmp(command, "health") == 0) {
+    return CmdHealth();
+  }
+  if (strcmp(command, "poke") == 0) {
+    return CmdPoke(rest_count, rest);
   }
   if (strcmp(command, "peek") == 0) {
     return CmdPeek(rest_count, rest);
