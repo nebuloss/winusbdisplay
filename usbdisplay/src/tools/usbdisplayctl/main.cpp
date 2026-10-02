@@ -425,9 +425,9 @@ int CmdPeek(int argc, char** argv) {
   }
   const unsigned long address = strtoul(argv[0], nullptr, 0);
   const unsigned long count = argc > 1 ? strtoul(argv[1], nullptr, 0) : 1;
-  if (address > 0xFFFF || count == 0 || count > 256 ||
+  if (address > 0xFFFF || count == 0 || count > 4096 ||
       address + count > 0x10000) {
-    fprintf(stderr, "error: address must be 16 bit and the range must fit\n");
+    fprintf(stderr, "error: address must be 16 bit and the range must fit in it\n");
     return 1;
   }
 

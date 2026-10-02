@@ -333,3 +333,68 @@ vendor command that asks the chip to show a chosen image after a delay. It
 is present in the vendor's source and commented out there. If it controls
 which image is scanned out, it would allow updating one while the other is
 displayed, which is the thing that would make single-send correct.
+
+## Telling a dark panel from a working one without looking at it
+
+The single most expensive thing about this hardware is that "the transfers
+succeeded" and "there is a picture" are unrelated statements, so the only
+way to tell them apart was to ask somebody what the screen looked like.
+That is slow, and worse, it is unreliable: once the adapter is in the dark
+state it stays there, so every later experiment in the same session reports
+the fault of the one before it. Several correct changes were reverted that
+way.
+
+**`usbdisplayctl peek 0xFB1A 4`.** The third byte reads `44` whenever a
+picture is on the glass and `01` when it is dark. Verified three times in a
+row against a frame known to display, and across many dark states. The
+control plane is HID, so this works while the driver holds the pixel pipe.
+
+That is a detector, not an explanation. It is enough to iterate without a
+person in the loop, which is what matters.
+
+## What differs between a freshly plugged adapter and a dark one
+
+Dumped `0x0000`, `0xD000` and `0xF000`-`0xFFFF` in both states and compared.
+Fifty seven lines differ, most of them noise, but two stand out.
+
+**`0xF900` through `0xFAFF` reads `9A` everywhere when healthy and `9E`
+everywhere when dark.** Five hundred identical bytes is not memory, it is
+one register that does not decode its low address bits, mirrored across the
+range. So a single register differs by exactly one bit, `0x04`, and that bit
+is set when the adapter has stopped displaying.
+
+That makes it the best candidate for both a cause and a cure. If the bit can
+be cleared by writing `9A` back, the adapter may recover without being
+unplugged, which would remove the worst obstacle to working on this thing.
+**Untested**: the adapter was healthy again by the time this was written
+down, and testing it needs a dark one.
+
+Also differing, and worth trying in the same experiment:
+
+| register | healthy | dark |
+|---|---|---|
+| `0xF050+4` | `00` | `01` |
+| `0xF3D0` | `00` | `28` |
+| `0xF530+8` | `03 00 03` | `00 00 04` |
+| `0xF750+14` | `00` | `01` |
+| `0xFB1B..D` | `14 44 12` | `6D 01 00` |
+
+## Many small transfers in quick succession are what breaks it
+
+Measured with the tool, so no driver is involved:
+
+| what | result |
+|---|---|
+| one full frame | works, 265 MB/s |
+| the same picture as 34 bands | works |
+| as 68 bands | pipe times out |
+| as 135 bands | pipe times out |
+
+Per transfer time climbs towards one vsync as the count rises: 10.4 ms at
+four transfers, 15.8 ms at thirty four. The limit is somewhere between
+thirty four and sixty eight back to back, and a pipe timeout leaves the
+adapter in the dark state described above.
+
+This is the practical constraint the driver has to respect, and it is the
+reverse of the intuition that smaller updates are cheaper. On this part they
+are not cheaper and they are considerably more dangerous.
