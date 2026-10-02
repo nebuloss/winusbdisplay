@@ -434,3 +434,27 @@ The honest lesson from the session that found all of the above.
    is idle as well as when it is drawing, but it did not always, and a log
    that stopped at "running" was read as a crash when it was a still
    desktop.
+
+## Ruled out: sending the whole screen on the USB 3 parts
+
+The cost model says a full frame and a small region both cost one slot on
+these parts, so sending the whole screen every frame should be free and
+would avoid damage tracking entirely. It is not free: the panel goes dark
+within seconds.
+
+This was tried twice. The first attempt was abandoned without a verdict,
+because the adapter was already dark when it ran and every observation was
+therefore worthless. The second was run properly, with `usbdisplayctl
+health` before and after, and the answer was unambiguous: `DARK (10 40 01
+00)` on all five samples, where the same driver with damage tracking left
+in reports `showing a picture (10 14 44 12)` throughout. Reverting restored
+it immediately.
+
+So "a transfer costs one slot regardless of size" is true about timing and
+false about everything else. Something about a stream of full frames is not
+acceptable to this adapter even when each one individually is. The
+measurement that says a full frame takes 16 ms is still correct; it simply
+does not license sending one every frame.
+
+Worth knowing before anyone reads the cost model and reaches the same
+conclusion a third time.
