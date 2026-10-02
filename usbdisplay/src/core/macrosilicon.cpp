@@ -378,6 +378,24 @@ bool MacroSiliconDevice::DisplayingPicture() {
  * single frame from the console tool. The tool does nothing clever; it
  * powers the chip on and sets the mode before every frame, which the
  * driver does only once at startup. That difference is the whole of it. */
+/* How long this adapter will hold a picture with nothing arriving.
+ *
+ * Both families need the repaint. That is settled by a failed
+ * experiment worth recording, because the evidence for removing it
+ * looked strong and was not.
+ *
+ * With the driver stopped and nothing sent at all, the USB 3 part
+ * appeared to hold a test pattern for two minutes, and the register
+ * that reports whether a picture is live agreed throughout. Removing
+ * the repaint on the strength of that turned the panel black within
+ * seconds, while the register still said a picture was live.
+ *
+ * So that register describes what the chip is transmitting, not what
+ * the panel is showing, and the two come apart exactly here. It is
+ * still the right thing to use for spotting the dark state, because
+ * it was validated against that; it is not evidence that silence is
+ * safe. */
+unsigned MacroSiliconDevice::KeepaliveMs() const { return 500; }
 bool MacroSiliconDevice::Revive() {
   std::lock_guard<std::mutex> lock(device_lock_);
   return ResetLocked();

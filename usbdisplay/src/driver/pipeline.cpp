@@ -27,21 +27,7 @@ namespace {
  * held. */
 constexpr unsigned kBufferWaitMs = 36;
 
-/* How often to repaint when there is nothing new to draw.
- *
- * "Whenever the link is idle" was the original rule, written for an adapter
- * where a keepalive band was a fraction of the screen. On the USB 3 parts a
- * band is the whole screen, and that rule turns into a full frame sent
- * twice as fast as the bus will carry it: measured at 250 MB/s against a
- * ceiling of 237, which is to say permanently saturated. The adapter
- * tolerates that for a while and then stops putting a picture out, with
- * every transfer still reporting success and its own registers still
- * reporting the output live. Unplugging it is the only way back.
- *
- * So there is an interval now. The vendor's driver uses 2500 ms for the
- * same job; this is well inside that and still leaves the link essentially
- * free for real updates. */
-constexpr unsigned long long kKeepaliveMs = 500;
+
 
 /* How often to ask the adapter whether it is still displaying. A control
  * exchange, so not every frame; the fault is rare and a few seconds of
@@ -734,8 +720,8 @@ void Pipeline::Run() {
        *
        * Repainting is still how the panel is kept alive and how a region
        * that went stale is repaired, but it is rationed rather than run
-       * flat out: see kKeepaliveMs, where saturating the bus is what
-       * stopped the adapter putting out a picture at all.
+       * flat out: see the keepalive interval above, where saturating the
+       * bus is what stopped the adapter putting out a picture at all.
        *
        * While the record of what is on the panel cannot be trusted the
        * ration is lifted, because the picture is wrong until a full pass
@@ -746,8 +732,25 @@ void Pipeline::Run() {
        * buffer is free". Queueing speculative work would keep the adapter
        * busy at the cost of making the next real update wait behind it,
        * which is the opposite of what spare capacity is for. */
-      if (last_send_ms_ != 0 && settings_.idle_refresh && sender_->Idle() &&
-          (!onscreen_valid_ || now - last_send_ms_ >= kKeepaliveMs)) {
+      /* Two separate reasons to repaint when nothing is happening, and
+       * only one of them applies to every adapter.
+       *
+       * Finishing a repair always does: until a full pass has gone out
+       * the picture is wrong, and the spare capacity should be spent
+       * on fixing it.
+       *
+       * Keeping the signal alive does not. The USB 2 parts need it and
+       * the USB 3 parts hold a picture indefinitely with nothing
+       * arriving at all, measured at two minutes of silence. On those
+       * the adapter asks for no keepalive and this sends nothing, so
+       * a still desktop costs no traffic rather than a whole screen
+       * twice over, four times a second. */
+      const unsigned keepalive = device_->KeepaliveMs();
+      const bool repairing = !onscreen_valid_;
+      const bool due =
+          keepalive != 0 && now - last_send_ms_ >= keepalive;
+      if (last_send_ms_ != 0 && settings_.idle_refresh &&
+          sender_->Idle() && (repairing || due)) {
         RefreshIdle();
       }
 

@@ -190,6 +190,18 @@ class DisplayDevice : public TransferCostModel {
    * why it is on the interface rather than being a private detail. */
   virtual bool Revive() = 0;
 
+  /* How long the adapter may be left with nothing to do before it
+   * needs traffic to keep its output alive, in milliseconds. Zero
+   * means it needs none at all.
+   *
+   * Worth asking rather than assuming, because the answer differs by
+   * more than an order of magnitude between parts and the cost of
+   * guessing low is continuous traffic to display a picture that is
+   * not changing. Measured on an MS9132: two minutes of complete
+   * silence with the driver stopped, and the picture was still
+   * there. */
+  virtual unsigned KeepaliveMs() const = 0;
+
   virtual const std::string& error() const = 0;
 };
 

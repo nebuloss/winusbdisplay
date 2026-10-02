@@ -500,3 +500,31 @@ while 0xF900 stayed at 0x9E throughout. Whatever that bit tracks, it is not
 whether anything is on the glass, and writing it back does nothing. The
 register that does answer the question is the one `usbdisplayctl health`
 reads.
+
+## The live register is about transmission, not about the glass
+
+An important limit on the detector, found by trusting it too far.
+
+With the driver stopped and nothing sent to the adapter at all, an MS9132
+appeared to hold a test pattern for two minutes, and `usbdisplayctl health`
+agreed throughout. On the strength of that the keepalive repaint was
+removed for the USB 3 parts, since it exists only to stop the panel
+blanking during silence and the panel evidently was not blanking.
+
+The screen went black within seconds, while the register still reported a
+picture.
+
+So `kRegDisplayLive` describes what the chip is **transmitting**, not what
+is **on the panel**, and the two come apart precisely in the case that
+matters here. The detector is still the right tool for spotting the dark
+state, because that is what it was validated against, and it is not
+evidence that silence is safe.
+
+**Both families need the keepalive.** The cost, roughly 15 MB/s on the
+USB 3 parts to show a picture that is not changing, is the price of a panel
+that stays lit.
+
+The wider lesson, and the second time this session has taught it: a
+register that correlates with a symptom is not a model of the hardware.
+Check a change against the thing you actually care about, which here means
+a person looking at the screen.

@@ -305,6 +305,16 @@ TEST(health, a_chip_without_the_register_is_never_called_dark) {
                 "answering no, or the cure becomes the fault");
 }
 
+TEST(health, every_part_asks_for_a_keepalive) {
+  Harness harness;
+  /* Removing it on the USB 3 parts was tried, on the strength of a
+   * measurement that said they hold a picture through two minutes of
+   * silence. The panel went black within seconds. Whatever that
+   * measurement was reading, it was not what reaches the glass. */
+  CHECK_BECAUSE(harness.chip->KeepaliveMs() > 0,
+                "both families blank without traffic, however much the "
+                "registers suggest otherwise");
+}
 TEST(health, reviving_reprograms_the_mode) {
   Harness harness;
   CHECK(harness.chip->SetMode(Mode1080p60()));

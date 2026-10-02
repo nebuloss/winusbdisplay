@@ -90,6 +90,7 @@ class MacroSiliconDevice : public DisplayDevice {
   void Cancel() override { link_->Cancel(); }
   bool StillPresent() const override { return link_->StillPresent(); }
   bool DisplayingPicture() override;
+  unsigned KeepaliveMs() const override;
   bool Revive() override;
   uint64_t generation() const override { return generation_; }
   const std::string& error() const override { return error_; }
