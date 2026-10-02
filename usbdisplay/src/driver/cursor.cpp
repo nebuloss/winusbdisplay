@@ -132,12 +132,29 @@ bool CursorOverlay::Fetch() {
   const IDDCX_CURSOR_SHAPE_INFO& info = out.CursorShapeInfo;
   last_shape_id_ = info.ShapeId;
 
+  /* Every shape, the first few times. Which format a pointer arrives in
+   * decides how its alpha byte must be read, and reading it the wrong way
+   * paints a solid block where the transparent border should be. That is
+   * not visible from the code, only from the hardware, so it is worth
+   * saying out loud rather than reasoning about. */
+  if (shapes_logged_ < 12) {
+    ++shapes_logged_;
+    Log("cursor: shape %u type %u %ux%u pitch %u", info.ShapeId,
+        info.CursorType, info.Width, info.Height, info.Pitch);
+  }
+
   switch (info.CursorType) {
     case IDDCX_CURSOR_SHAPE_TYPE_ALPHA:
-      /* Ordinary coverage, which is what an arrow is. Not premultiplied:
-       * the compositor hands over the colour unscaled. */
+      /* Premultiplied, which is the detail that matters here.
+       *
+       * The colour arrives already scaled by its own coverage, so a white
+       * edge at half coverage is stored as mid grey. Blending that as
+       * though it were unscaled scales it a second time and the edge
+       * comes out far darker than it should. Against a white page that
+       * is a dark halo around the pointer, which is how it was noticed,
+       * and against a dark one it is invisible. */
       image_.SetBgra(shape_.data(), info.Pitch, static_cast<int>(info.Width),
-                     static_cast<int>(info.Height), false);
+                     static_cast<int>(info.Height), true);
       break;
     case IDDCX_CURSOR_SHAPE_TYPE_MASKED_COLOR:
       /* Every monochrome pointer becomes one of these, so this is the
@@ -182,13 +199,21 @@ bool CursorOverlay::Poll(Rect* erase, Rect* draw) {
   }
 
   const Rect before = Bounds();
+  const DWORD shape_before = last_shape_id_;
   if (!Fetch()) {
     return false;
   }
   const Rect after = Bounds();
 
-  if (before.x1 == after.x1 && before.y1 == after.y1 &&
-      before.x2 == after.x2 && before.y2 == after.y2) {
+  /* A changed shape counts even when nothing moved.
+   *
+   * Hovering a text field swaps the arrow for a caret without the
+   * pointer going anywhere, and comparing positions alone decides there
+   * is nothing to do. The panel then keeps showing the old shape until
+   * something else happens to repaint that spot. */
+  const bool moved = before.x1 != after.x1 || before.y1 != after.y1 ||
+                     before.x2 != after.x2 || before.y2 != after.y2;
+  if (!moved && shape_before == last_shape_id_) {
     return false;
   }
 

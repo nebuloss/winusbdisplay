@@ -83,6 +83,9 @@ class CursorOverlay {
    * when it differs. A pointer moving without changing therefore costs
    * nothing but its position. */
   DWORD last_shape_id_ = 0;
+  /* How many shapes have been described in the log. The first few are
+   * worth seeing; every one would be noise. */
+  unsigned shapes_logged_ = 0;
 
   /* Top left of the pointer image in screen coordinates. Not the hotspot:
    * the compositor reports the corner, which is what drawing needs. */

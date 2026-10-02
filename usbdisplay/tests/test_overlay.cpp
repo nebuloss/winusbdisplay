@@ -199,4 +199,42 @@ TEST(cursor, a_masked_pointer_leaves_the_rest_alone) {
                 "page shows up as a dark rectangle around the caret");
 }
 
+/* ---- premultiplied coverage, which is what the compositor sends ------- */
+
+namespace {
+
+/* A white square at half coverage, premultiplied: the colour is already
+ * scaled by the coverage, so white at half becomes mid grey. */
+CursorImage PremultipliedHalfWhite(int side) {
+  std::vector<uint8_t> bgra(static_cast<size_t>(side) * side * 4);
+  for (size_t i = 0; i < bgra.size(); i += 4) {
+    bgra[i] = bgra[i + 1] = bgra[i + 2] = 128;
+    bgra[i + 3] = 128;
+  }
+  CursorImage image;
+  image.SetBgra(bgra.data(), static_cast<size_t>(side) * 4, side, side, true);
+  return image;
+}
+
+}  // namespace
+
+TEST(cursor, premultiplied_colour_is_unscaled_before_blending) {
+  /* White at half coverage over white must stay white. Treating the
+   * premultiplied grey as though it were an unscaled colour darkens it a
+   * second time, which is a dark halo around every antialiased pointer
+   * edge and is invisible until the desktop behind it is pale. */
+  const Rect region = {0, 0, 64, 64};
+  std::vector<uint8_t> screen = Background(region, 255, 255, 255);
+  const uint8_t before = LumaAt(screen, region, 10, 10);
+
+  PremultipliedHalfWhite(8).Blend(screen.data(), region, 8, 8);
+  const uint8_t after = LumaAt(screen, region, 10, 10);
+
+  const int drop = static_cast<int>(before) - static_cast<int>(after);
+  CHECK_BECAUSE(drop <= 2,
+                "a white pointer edge over a white page has to stay white; "
+                "scaling the colour by its coverage twice is what made it "
+                "look like a dark rectangle");
+}
+
 }  // namespace usbdisplay

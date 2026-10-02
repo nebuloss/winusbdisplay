@@ -704,6 +704,21 @@ void Pipeline::Run() {
         RefreshIdle();
       }
 
+      /* Reported here as well as on the frame path.
+       *
+       * It used to be printed only after a real frame, so a still desktop
+       * produced no log at all and a healthy driver was indistinguishable
+       * from a stopped one. That cost real time: a log ending at
+       * "running" was read as the pipeline having died when it was in
+       * fact idling correctly. */
+      if (now - last_report_ms >= 10000) {
+        last_report_ms = now;
+        Log("pipeline: idle, sent=%llu skipped=%llu dropped=%llu "
+            "failed=%llu, %llu MB total",
+            regions_sent_, regions_skipped_, sender_->dropped(),
+            sender_->failed(), bytes_sent_ / (1024ull * 1024ull));
+      }
+
       const DWORD wait = WaitForMultipleObjects(wait_count, waits, FALSE, 17);
       if (wait == WAIT_OBJECT_0 + 1) {
         break;
