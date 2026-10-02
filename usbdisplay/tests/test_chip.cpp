@@ -442,6 +442,43 @@ TEST(memory, a_board_that_will_not_say_keeps_every_mode) {
       "the doubt keeps the behaviour that shipped");
 }
 
+/* ---- which mode a user gets by default --------------------------------- */
+
+namespace {
+
+/* The refresh rate of the first 1080p mode offered, which is the one
+ * Windows settles on unless the user goes looking. */
+int FirstFullHdRate(const std::vector<Mode>& modes) {
+  for (const Mode& mode : modes) {
+    if (mode.width == 1920 && mode.height == 1080) {
+      return mode.hz;
+    }
+  }
+  return 0;
+}
+
+}  // namespace
+
+TEST(defaultmode, a_usb3_chip_is_offered_the_full_rate_first) {
+  Harness harness;
+  IdentifyAs9132(harness);
+  harness.link->registers[kRegSdramType] = kSdram8M;
+  CHECK_BECAUSE(
+      FirstFullHdRate(harness.chip->SupportedModes(VideoPort::kHdmi)) == 60,
+      "a whole frame costs one slot on these parts, so 60 is comfortable "
+      "and defaulting to 30 would halve the frame rate for no reason");
+}
+
+TEST(defaultmode, a_usb2_chip_is_offered_the_sustainable_rate_first) {
+  Harness harness;
+  IdentifyAs912C(harness);
+  harness.link->registers[kRegSdramType] = kSdram8M;
+  CHECK_BECAUSE(
+      FirstFullHdRate(harness.chip->SupportedModes(VideoPort::kHdmi)) == 30,
+      "a whole frame costs eight slots on these parts, so 60 cannot be "
+      "sustained and 30 is the honest default");
+}
+
 TEST(modeset, programs_the_captured_sequence_in_order) {
   Harness harness;
   CHECK(harness.chip->SetMode(Mode1080p60()));

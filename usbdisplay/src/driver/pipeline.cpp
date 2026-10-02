@@ -27,10 +27,21 @@ namespace {
  * held. */
 constexpr unsigned kBufferWaitMs = 36;
 
-/* The panel drops its signal after a second or two of silence, which is why
- * the repaint below exists at all. There is deliberately no interval: it runs
- * whenever the link is idle, so the spare capacity is used rather than
- * waited out. */
+/* How often to repaint when there is nothing new to draw.
+ *
+ * "Whenever the link is idle" was the original rule, written for an adapter
+ * where a keepalive band was a fraction of the screen. On the USB 3 parts a
+ * band is the whole screen, and that rule turns into a full frame sent
+ * twice as fast as the bus will carry it: measured at 250 MB/s against a
+ * ceiling of 237, which is to say permanently saturated. The adapter
+ * tolerates that for a while and then stops putting a picture out, with
+ * every transfer still reporting success and its own registers still
+ * reporting the output live. Unplugging it is the only way back.
+ *
+ * So there is an interval now. The vendor's driver uses 2500 ms for the
+ * same job; this is well inside that and still leaves the link essentially
+ * free for real updates. */
+constexpr unsigned long long kKeepaliveMs = 500;
 
 /* Smallest keepalive band worth sending, in rows. Only a floor: the real
  * height is worked out from the device, see ChooseIdleBandRows. */
@@ -496,17 +507,29 @@ void Pipeline::RefreshIdle() {
     return;
   }
 
+  /* The band is as tall as a single slot allows, whichever job this is.
+   *
+   * Sending a short band when the picture is already correct was tried,
+   * on the reasoning that a transfer costs a slot whatever it carries so
+   * the bytes are free to save. It is not enough: the panel blanks and
+   * flickers on a still desktop. Whatever the adapter is counting to
+   * decide its output is still live, a few rows does not satisfy it.
+   *
+   * So the saving comes from how often this runs, not from how much it
+   * sends. See the keepalive interval in Run. */
+  const int rows = idle_band_rows_;
+
   Rect band;
   band.x1 = 0;
   band.x2 = mode_.width;
   band.y1 = idle_band_row_;
-  band.y2 = idle_band_row_ + idle_band_rows_;
+  band.y2 = idle_band_row_ + rows;
   if (band.y2 > mode_.height) {
     band.y2 = mode_.height;
   }
   band = device_->AlignRegion(band, mode_.width, mode_.height);
 
-  idle_band_row_ += idle_band_rows_;
+  idle_band_row_ += rows;
   if (idle_band_row_ >= mode_.height) {
     idle_band_row_ = 0;
     /* One full pass done, so everything on the panel has now been drawn
@@ -616,17 +639,24 @@ void Pipeline::Run() {
         CheckAdapterReprogrammed();
       }
 
-      /* Nothing new to draw. Rather than waiting for a timer, repaint a
-       * band whenever the link has gone completely quiet: the capacity is
-       * there and unused, and spending it walks a repaint down the screen
-       * continuously, which keeps the panel's signal alive and repairs any
-       * region that somehow went stale.
+      /* Nothing new to draw.
+       *
+       * Repainting is still how the panel is kept alive and how a region
+       * that went stale is repaired, but it is rationed rather than run
+       * flat out: see kKeepaliveMs, where saturating the bus is what
+       * stopped the adapter putting out a picture at all.
+       *
+       * While the record of what is on the panel cannot be trusted the
+       * ration is lifted, because the picture is wrong until a full pass
+       * has completed and finishing that quickly matters more than the
+       * traffic it costs. On the USB 3 parts a pass is a single transfer.
        *
        * The condition is "nothing queued and nothing on the wire", not "a
        * buffer is free". Queueing speculative work would keep the adapter
        * busy at the cost of making the next real update wait behind it,
        * which is the opposite of what spare capacity is for. */
-      if (last_send_ms_ != 0 && settings_.idle_refresh && sender_->Idle()) {
+      if (last_send_ms_ != 0 && settings_.idle_refresh && sender_->Idle() &&
+          (!onscreen_valid_ || now - last_send_ms_ >= kKeepaliveMs)) {
         RefreshIdle();
       }
 

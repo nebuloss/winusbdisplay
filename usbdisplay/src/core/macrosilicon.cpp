@@ -696,6 +696,19 @@ std::vector<Mode> MacroSiliconDevice::SupportedModes(VideoPort port) {
     }
   };
 
+  /* Whether a whole frame of this size is one transfer's worth.
+   *
+   * The chip finishes a transfer on an output vsync boundary, so one slot
+   * is one frame period at whatever rate the mode runs. A full frame that
+   * fits in a slot can therefore be redrawn every frame; one that spans
+   * eight cannot. */
+  const auto FullFrameCostsOneSlot = [this](int w, int h) {
+    Rect frame;
+    frame.x2 = w;
+    frame.y2 = h;
+    return TransferCost(frame) <= 1;
+  };
+
   switch (port) {
     case VideoPort::kCvbs:
     case VideoPort::kSVideo:
@@ -709,11 +722,25 @@ std::vector<Mode> MacroSiliconDevice::SupportedModes(VideoPort port) {
       push(720, 480, 60);
       break;
     default:
-      /* 1080p30 first: a real mode of this chip and a far better match for
-       * the bandwidth available than 1080p60, so it is what a user accepting
-       * the default gets. */
-      push(1920, 1080, 30);
-      push(1920, 1080, 60);
+      /* Which of the two 1080p rates to offer first, which is to say what
+       * a user who never opens the display settings ends up running.
+       *
+       * This used to be 30 unconditionally, on the grounds that 60 asks
+       * for more than the link can carry. True of the USB 2 parts, where a
+       * full frame costs eight slots, and wrong on the USB 3 parts, where
+       * it costs one and 60 is comfortable. Leaving it at 30 there halves
+       * the frame rate of an adapter that can manage the full rate.
+       *
+       * Asked of the device rather than decided here, so this stays a
+       * question about measured cost rather than about which chip is
+       * fitted. */
+      if (FullFrameCostsOneSlot(1920, 1080)) {
+        push(1920, 1080, 60);
+        push(1920, 1080, 30);
+      } else {
+        push(1920, 1080, 30);
+        push(1920, 1080, 60);
+      }
       push(1600, 1200, 60);
       push(1680, 1050, 60);
       push(1440, 900, 60);
