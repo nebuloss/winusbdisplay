@@ -251,12 +251,24 @@ TEST(protocol, an_unknown_chip_id_is_not_an_error) {
 
 TEST(health, a_chip_that_reports_showing_is_left_alone) {
   Harness harness;
+  /* The detector is a USB 3 fact, so the chip has to say it is one. */
+  harness.link->registers[kRegChipId913x] = kSignaturePart912A;
+  harness.link->registers[kRegChipId913x + 1] = kSignatureFamily913x;
+  harness.link->registers[kRegChipId913x + 2] = kSignatureTail;
+  ChipId id;
+  CHECK(harness.chip->ReadChipId(&id));
   harness.link->registers[kRegDisplayLive + 2] = kDisplayLiveShowing;
   CHECK(harness.chip->DisplayingPicture());
 }
 
 TEST(health, a_chip_that_reports_dark_is_detected) {
   Harness harness;
+  /* The detector is a USB 3 fact, so the chip has to say it is one. */
+  harness.link->registers[kRegChipId913x] = kSignaturePart912A;
+  harness.link->registers[kRegChipId913x + 1] = kSignatureFamily913x;
+  harness.link->registers[kRegChipId913x + 2] = kSignatureTail;
+  ChipId id;
+  CHECK(harness.chip->ReadChipId(&id));
   harness.link->registers[kRegDisplayLive + 2] = 0x01;
   CHECK_BECAUSE(!harness.chip->DisplayingPicture(),
                 "every transfer succeeds whether or not a picture is on "
@@ -270,6 +282,27 @@ TEST(health, a_chip_that_will_not_answer_is_given_the_benefit_of_the_doubt) {
                 "a failed read is not evidence of a dark panel, and "
                 "reprogramming the adapter over one would turn a glitch "
                 "into a visible interruption");
+}
+
+TEST(health, a_chip_without_the_register_is_never_called_dark) {
+  Harness harness;
+  /* A USB 2 part, identified the way the chip identifies itself. */
+  harness.link->registers[kRegChipId912x] = kSignaturePart912C;
+  harness.link->registers[kRegChipId912x + 1] = kSignatureFamily912x;
+  harness.link->registers[kRegChipId912x + 2] = kSignatureTail;
+  ChipId id;
+  CHECK(harness.chip->ReadChipId(&id));
+  CHECK(id.model == ChipModel::kMs912C);
+
+  /* The register the detector reads exists only on the USB 3 parts.
+   * On an MS912C the same address reads zero whether or not a picture
+   * is on the glass, measured against a frame that visibly lit the
+   * panel. Reading that as dark would have the driver reprogram the
+   * adapter every few seconds for ever. */
+  harness.link->registers[kRegDisplayLive + 2] = 0x00;
+  CHECK_BECAUSE(harness.chip->DisplayingPicture(),
+                "a part that cannot answer must not be treated as "
+                "answering no, or the cure becomes the fault");
 }
 
 TEST(health, reviving_reprograms_the_mode) {

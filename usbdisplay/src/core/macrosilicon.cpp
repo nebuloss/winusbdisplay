@@ -334,10 +334,11 @@ bool MacroSiliconDevice::Reset() {
 
 /* Whether a picture is reaching the panel.
  *
- * Reads a register found by dumping every one of them on an adapter that
+ * Reads a register found by dumping every one of them on an MS9132 that
  * was displaying and on one that was not, and comparing. The byte two
  * past kRegDisplayLive is 0x44 in the first case and something else in
- * the second, reliably, and it agrees with what a person sees.
+ * the second, reliably, and it agrees with what a person sees. It means
+ * nothing on the USB 2 parts; see below.
  *
  * What the register is for is unknown. That does not matter: the question
  * it answers cannot be answered any other way, because every transfer
@@ -349,12 +350,26 @@ bool MacroSiliconDevice::Reset() {
  * the adapter, and reprogramming it because a register could not be read
  * would turn a momentary glitch into a visible one. */
 bool MacroSiliconDevice::DisplayingPicture() {
+  /* Only the USB 3 parts. The register was found on an MS9132 by
+   * comparing a displaying adapter against a dark one, and on the
+   * MS912C the same address reads zero whether or not a picture is on
+   * the glass. Measured, not assumed: a frame that visibly lit the
+   * panel left it reading 00 00 00 00.
+   *
+   * Saying u{201C}yesu{201D} for a part that cannot answer is the only safe
+   * reading. The alternative, treating an unanswerable question as a
+   * fault, would have the driver reprogram that adapter every few
+   * seconds forever, which is a self inflicted flicker in place of a
+   * problem it does not have. */
+  if (model_.load(std::memory_order_relaxed) != ChipModel::kMs9132) {
+    return true;
+  }
+
   uint8_t live[4] = {0, 0, 0, 0};
   if (!Read(kRegDisplayLive, live, sizeof(live))) {
     return true;
   }
-  return live[2] == kDisplayLiveShowing;
-}
+  return live[2] == kDisplayLiveShowing;}
 
 /* Reprograms the adapter, which is how a dark one comes back.
  *
