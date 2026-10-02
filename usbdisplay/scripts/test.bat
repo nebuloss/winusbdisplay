@@ -36,11 +36,13 @@ cl /nologo /std:c++17 /EHsc /W4 /WX /O2 /MT /DUNICODE /D_UNICODE ^
   "%ROOT%\src\render\rect.cpp" ^
   "%ROOT%\src\render\damage.cpp" ^
   "%ROOT%\src\render\convert.cpp" ^
+  "%ROOT%\src\render\overlay.cpp" ^
   "%ROOT%\tests\testing.cpp" ^
   "%ROOT%\tests\test_rect.cpp" ^
   "%ROOT%\tests\test_damage.cpp" ^
   "%ROOT%\tests\test_convert.cpp" ^
   "%ROOT%\tests\test_chip.cpp" ^
+  "%ROOT%\tests\test_overlay.cpp" ^
   "%ROOT%\tests\test_portable.cpp" ^
   /link setupapi.lib hid.lib winusb.lib
 

@@ -429,6 +429,7 @@ void IndirectDevice::RemoveMonitor() {
   if (!monitor_) {
     return;
   }
+  cursor_.Detach();
   const NTSTATUS status = IddCxMonitorDeparture(monitor_);
   Log("RemoveMonitor: departure -> 0x%08X", status);
   monitor_ = nullptr;
@@ -495,10 +496,35 @@ NTSTATUS IndirectDevice::AssignSwapChain(const IDARG_IN_SETSWAPCHAIN* args) {
     return STATUS_DEVICE_NOT_READY;
   }
 
+  /* The graphics device is built here if it is not already right for the
+   * adapter the compositor renders on. Doing it before the pipeline exists
+   * is the whole point: it is slow the first time in a process, and doing
+   * it while holding a freshly issued swapchain is what used to invalidate
+   * that swapchain. */
+  if (!graphics_.Matches(args->RenderAdapterLuid) &&
+      !graphics_.Open(args->RenderAdapterLuid)) {
+    Log("AssignSwapChain: no graphics device (%s)", graphics_.error());
+    WdfObjectDelete(args->hSwapChain);
+    return STATUS_SUCCESS;
+  }
+
   std::unique_ptr<Pipeline> pipeline(
-      new Pipeline(args->hSwapChain, args->RenderAdapterLuid,
+      new Pipeline(args->hSwapChain, &graphics_, &cursor_,
                    args->hNextSurfaceAvailable, device_.get(), sender_.get(),
                    active_mode_));
+
+  /* The pointer is set up here, with a swapchain in hand.
+   *
+   * Three moments were tried. Before announcing the monitor and after
+   * announcing it are both refused with an invalid parameter, for every
+   * combination of format and size, which is what says the moment is the
+   * problem rather than the argument. A monitor with no swapchain has
+   * nothing to draw a pointer onto, so this is the first point at which
+   * the request means anything.
+   *
+   * Asking again when it is already set up is harmless: the overlay
+   * detaches first. */
+  cursor_.Attach(monitor_);
 
   /* Carry across any gamma table the operating system set before this
    * swapchain existed, so brightness survives a mode change. */

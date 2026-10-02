@@ -121,11 +121,13 @@ int ChooseIdleBandRows(const DisplayDevice* device, int width, int height) {
 
 }  // namespace
 
-Pipeline::Pipeline(IDDCX_SWAPCHAIN swapchain, LUID render_adapter,
-                   HANDLE new_frame_event, DisplayDevice* device, FrameSender* sender,
+Pipeline::Pipeline(IDDCX_SWAPCHAIN swapchain, GraphicsContext* graphics,
+                   CursorOverlay* cursor, HANDLE new_frame_event,
+                   DisplayDevice* device, FrameSender* sender,
                    const Mode& mode)
     : swapchain_(swapchain),
-      render_adapter_(render_adapter),
+      graphics_(graphics),
+      cursor_(cursor),
       new_frame_event_(new_frame_event),
       device_(device),
       sender_(sender),
@@ -163,21 +165,20 @@ Pipeline::~Pipeline() {
 }
 
 bool Pipeline::Start() {
-  if (!CreateDevice()) {
-    Log("pipeline: Direct3D setup failed, cannot drive this swapchain");
+  if (!BindDevice()) {
     return false;
   }
 
   /* Graphics card first, so it gets the chance to claim large regions. */
   std::unique_ptr<GpuRegionConverter> gpu(new GpuRegionConverter());
-  if (!gpu->Initialise(d3d_device_.Get(), d3d_context_.Get())) {
+  if (!gpu->Initialise(graphics_->device(), graphics_->context())) {
     Log("pipeline: no graphics conversion (%s), using the processor only",
         gpu->error());
   } else {
     converters_.Add(std::move(gpu));
   }
   converters_.Add(std::unique_ptr<RegionConverter>(
-      new CpuRegionConverter(d3d_device_.Get(), d3d_context_.Get())));
+      new CpuRegionConverter(graphics_->device(), graphics_->context())));
 
   transmissions_ = device_->TransmissionsPerRegion();
   Log("pipeline: converters: %s, %u thread(s), %d transmission(s) per region",
@@ -210,37 +211,31 @@ void Pipeline::Stop() {
   }
 }
 
-bool Pipeline::CreateDevice() {
-  ComPtr<IDXGIFactory5> factory;
-  if (FAILED(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory)))) {
+/* Binds this swapchain to the graphics device the adapter already has.
+ *
+ * All the expensive work happened when the adapter was initialised. That
+ * matters: creating a Direct3D device for the first time in a process
+ * loads the graphics driveru{2019}s own libraries and took 412 ms here,
+ * during which the swapchain handed to this callback went stale and the
+ * bind failed with DXGI_ERROR_ACCESS_LOST. The OS then built another
+ * swapchain and the second attempt, with the libraries already loaded,
+ * took 60 ms and worked. Doing the slow part up front removes the race
+ * rather than winning it. */
+bool Pipeline::BindDevice() {
+  if (!graphics_ || !graphics_->device()) {
+    Log("pipeline: no graphics device to bind to");
     return false;
   }
-  ComPtr<IDXGIAdapter1> adapter;
-  if (FAILED(
-          factory->EnumAdapterByLuid(render_adapter_, IID_PPV_ARGS(&adapter)))) {
-    return false;
-  }
-
-  D3D_FEATURE_LEVEL level;
-  if (FAILED(D3D11CreateDevice(adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr,
-                               0, nullptr, 0, D3D11_SDK_VERSION, &d3d_device_,
-                               &level, &d3d_context_))) {
-    return false;
-  }
-
-  ComPtr<IDXGIDevice> dxgi_device;
-  if (FAILED(d3d_device_.As(&dxgi_device))) {
-    return false;
-  }
-  /* The acquire loop is latency sensitive and loses frames if it is
-   * scheduled behind ordinary graphics work. */
-  dxgi_device->SetGPUThreadPriority(7);
 
   IDARG_IN_SWAPCHAINSETDEVICE set_device = {};
-  set_device.pDevice = dxgi_device.Get();
-  return NT_SUCCESS(IddCxSwapChainSetDevice(swapchain_, &set_device));
+  set_device.pDevice = graphics_->dxgi();
+  const NTSTATUS status = IddCxSwapChainSetDevice(swapchain_, &set_device);
+  if (!NT_SUCCESS(status)) {
+    Log("pipeline: IddCxSwapChainSetDevice -> 0x%08X", status);
+    return false;
+  }
+  return true;
 }
-
 
 bool Pipeline::ConvertForSending(ID3D11Texture2D* source,
                                  const Rect& rect) {
@@ -263,6 +258,21 @@ bool Pipeline::SendRegion(ID3D11Texture2D* source, const Rect& rect,
 
   if (!ConvertForSending(source, rect)) {
     return false;
+  }
+
+  /* The pointer, drawn on top of the converted desktop.
+   *
+   * Here rather than before conversion because the transform to the
+   * adapter's colour space is a matrix and therefore linear, so blending
+   * afterwards gives the same answer and costs one pass over a pointer
+   * sized area instead of a copy of the whole region. It also means both
+   * conversion paths get the pointer without the shader knowing anything
+   * about it.
+   *
+   * Before the comparison below, not after, so that moving the pointer
+   * registers as a change and standing still does not. */
+  if (cursor_) {
+    cursor_->Blend(scratch_.data(), rect);
   }
 
   /* Send only what actually differs from what the panel is showing. The
@@ -386,21 +396,21 @@ bool Pipeline::SubmitConverted(const Rect& region, const Rect& sub) {
     bytes_sent_ += length;
   }
 
-  /* The first few regions, with their geometry.
+  /* The first few partial updates, with their geometry.
    *
-   * What the driver puts on the wire is otherwise invisible: the counters
-   * say transfers succeeded, not what was in them, and a chip will accept a
-   * transfer describing the wrong rectangle without complaint. Four lines
-   * once per session is a small price for being able to tell a full repaint
-   * from a stream of empty updates.
-   *
-   * Not a running log: at sixty updates a second that would be useless and
-   * would itself slow the frame thread. */
-  if (regions_logged_ < 4) {
+   * Full-screen transfers are skipped: they are the keepalive, there is one
+   * every half second, and they would bury the interesting ones. What is
+   * wanted here is what a moving pointer or a blinking caret actually
+   * produces, which is otherwise invisible. The counters say transfers
+   * succeeded, not what was in them, and the chip will accept a transfer
+   * describing the wrong rectangle without complaint. */
+  const bool whole_screen = sub.x1 == 0 && sub.y1 == 0 &&
+                            sub.x2 >= mode_.width && sub.y2 >= mode_.height;
+  if (!whole_screen && regions_logged_ < 40) {
     ++regions_logged_;
-    Log("pipeline: transfer %u: %d,%d %dx%d of region %dx%d, %zu bytes",
+    Log("pipeline: partial %u: %d,%d %dx%d of region %d,%d %dx%d, %zu bytes",
         regions_logged_, sub.x1, sub.y1, sub.width(), sub.height(),
-        region.width(), region.height(), length);
+        region.x1, region.y1, region.width(), region.height(), length);
   }
 
   last_send_ms_ = GetTickCount64();
@@ -617,7 +627,9 @@ void Pipeline::Run() {
   /* Nothing on the panel can be trusted until the first full update lands. */
   onscreen_valid_ = false;
 
-  HANDLE waits[] = {new_frame_event_, terminate_event_};
+  HANDLE waits[] = {new_frame_event_, terminate_event_,
+                    cursor_ ? cursor_->change_event() : nullptr};
+  const DWORD wait_count = waits[2] ? 3 : 2;
   unsigned long long last_report_ms = GetTickCount64();
 
   for (;;) {
@@ -637,6 +649,38 @@ void Pipeline::Run() {
         last_settings_poll_ms_ = now;
         RefreshSettings();
         CheckAdapterReprogrammed();
+      }
+
+      /* The pointer, before deciding there is nothing to do.
+       *
+       * It moves without the desktop changing, so the compositor reports
+       * no damage at all for it and this is the only thing that notices.
+       * Both the area it left and the area it now covers are owed a
+       * repaint: without the first the old pointer stays on the panel and
+       * the screen fills with copies of it. */
+      if (cursor_) {
+        Rect erase, draw;
+        if (cursor_->Poll(&erase, &draw)) {
+          if (!erase.empty()) {
+            damage_.Add(erase);
+          }
+          if (!draw.empty()) {
+            damage_.Add(draw);
+          }
+          if (last_surface_ && !damage_.Empty()) {
+            Rect planned[kMaxTransfersPerFrame];
+            const size_t count =
+                damage_.Plan(planned, kMaxTransfersPerFrame);
+            for (size_t i = 0; i < count; ++i) {
+              if (!SendRegion(last_surface_.Get(), planned[i], false)) {
+                for (size_t j = i; j < count; ++j) {
+                  damage_.Add(planned[j]);
+                }
+                break;
+              }
+            }
+          }
+        }
       }
 
       /* Nothing new to draw.
@@ -660,11 +704,12 @@ void Pipeline::Run() {
         RefreshIdle();
       }
 
-      const DWORD wait = WaitForMultipleObjects(2, waits, FALSE, 17);
+      const DWORD wait = WaitForMultipleObjects(wait_count, waits, FALSE, 17);
       if (wait == WAIT_OBJECT_0 + 1) {
         break;
       }
-      if (wait == WAIT_OBJECT_0 || wait == WAIT_TIMEOUT) {
+      if (wait == WAIT_OBJECT_0 || wait == WAIT_OBJECT_0 + 2 ||
+          wait == WAIT_TIMEOUT) {
         continue;
       }
       Log("pipeline: wait returned %lu, stopping", wait);

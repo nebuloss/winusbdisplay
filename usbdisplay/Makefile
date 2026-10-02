@@ -44,11 +44,13 @@ SOURCES := \
 	$(ROOT)src/render/rect.cpp \
 	$(ROOT)src/render/damage.cpp \
 	$(ROOT)src/render/convert.cpp \
+	$(ROOT)src/render/overlay.cpp \
 	$(ROOT)tests/testing.cpp \
 	$(ROOT)tests/test_rect.cpp \
 	$(ROOT)tests/test_damage.cpp \
 	$(ROOT)tests/test_convert.cpp \
 	$(ROOT)tests/test_chip.cpp \
+	$(ROOT)tests/test_overlay.cpp \
 	$(ROOT)tests/test_portable.cpp
 
 OBJECTS := $(patsubst $(ROOT)%.cpp,$(BUILD)/%.o,$(SOURCES))

@@ -46,6 +46,8 @@
 #include "../render/convert.h"
 #include "../render/damage.h"
 #include "../render/converter.h"
+#include "cursor.h"
+#include "graphics.h"
 #include "sender.h"
 #include "settings.h"
 
@@ -53,9 +55,11 @@ namespace usbdisplay {
 
 class Pipeline {
  public:
-  Pipeline(IDDCX_SWAPCHAIN swapchain, LUID render_adapter,
-           HANDLE new_frame_event, DisplayDevice* device, FrameSender* sender,
-           const Mode& mode);
+  /* The graphics context and the pointer belong to the adapter rather
+   * than to any one swapchain, so they are borrowed, not owned. */
+  Pipeline(IDDCX_SWAPCHAIN swapchain, GraphicsContext* graphics,
+           CursorOverlay* cursor, HANDLE new_frame_event,
+           DisplayDevice* device, FrameSender* sender, const Mode& mode);
   ~Pipeline();
 
   /* Direct3D is set up on the calling thread so a failure can be reported
@@ -71,7 +75,7 @@ class Pipeline {
 
  private:
   void Run();
-  bool CreateDevice();
+  bool BindDevice();
 
   /* Converts `rect` of `source` into scratch_, choosing the path by size.
    * Returns false if neither path could do it. */
@@ -111,14 +115,13 @@ class Pipeline {
   void CheckGammaRamp();
 
   IDDCX_SWAPCHAIN swapchain_;
-  LUID render_adapter_;
+  GraphicsContext* graphics_;
+  CursorOverlay* cursor_;
   HANDLE new_frame_event_;
   DisplayDevice* device_;
   FrameSender* sender_;
   Mode mode_;
 
-  Microsoft::WRL::ComPtr<ID3D11Device> d3d_device_;
-  Microsoft::WRL::ComPtr<ID3D11DeviceContext> d3d_context_;
   /* The last image the compositor handed over.
    *
    * Held so the idle repaint has something real to convert from. It stays

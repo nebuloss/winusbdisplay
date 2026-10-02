@@ -104,11 +104,14 @@
     <ClCompile Include="..\render\damage.cpp" />
     <ClCompile Include="..\render\convert.cpp" />
     <ClCompile Include="..\render\converter.cpp" />
+    <ClCompile Include="..\render\overlay.cpp" />
     <ClCompile Include="log.cpp" />
     <ClCompile Include="settings.cpp" />
     <ClCompile Include="sender.cpp" />
     <ClCompile Include="pipeline.cpp" />
+    <ClCompile Include="cursor.cpp" />
     <ClCompile Include="device.cpp" />
+    <ClCompile Include="graphics.cpp" />
     <ClCompile Include="driver.cpp" />
   </ItemGroup>
 

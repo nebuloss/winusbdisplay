@@ -41,6 +41,8 @@
 #include <vector>
 
 #include "../core/display_device.h"
+#include "cursor.h"
+#include "graphics.h"
 #include "pipeline.h"
 #include "sender.h"
 
@@ -89,6 +91,12 @@ class IndirectDevice {
   WDFDEVICE wdf_device_;
   IDDCX_ADAPTER adapter_ = nullptr;
   IDDCX_MONITOR monitor_ = nullptr;
+
+  /* Owned by the adapter rather than by a swapchain: the graphics device
+   * is slow to create and the pointer belongs to the monitor, so neither
+   * should be rebuilt every time a swapchain is handed over. */
+  GraphicsContext graphics_;
+  CursorOverlay cursor_;
 
   std::unique_ptr<DisplayDevice> device_;
   std::unique_ptr<FrameSender> sender_;
