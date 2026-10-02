@@ -398,3 +398,39 @@ adapter in the dark state described above.
 This is the practical constraint the driver has to respect, and it is the
 reverse of the intuition that smaller updates are cheaper. On this part they
 are not cheaper and they are considerably more dangerous.
+
+## Correction: a pipe timeout does not cause the dark state
+
+Worth writing down because the opposite was believed for most of a day and
+several correct changes were reverted on the strength of it.
+
+Overrunning the pipe deliberately, by sending a picture as 135 small bands
+back to back, produces the timeout reliably. It does **not** produce the
+dark state. Checked with `usbdisplayctl health` immediately afterwards: the
+chip still reports a picture, and the next full frame is accepted at
+237 MB/s.
+
+So the timeout and the dark panel are two separate faults that happened to
+appear together, and "the pipe timed out" is not evidence about the
+display. Use the detector rather than inferring.
+
+## How to work on this without wasting a day
+
+The honest lesson from the session that found all of the above.
+
+1. **Check `usbdisplayctl health` before and after every experiment.** It
+   reads a register that is 0x44 when a picture is on the glass and 0x01
+   when it is not, and it agrees with what a person sees. The control
+   plane is a separate USB interface, so it works while the driver holds
+   the pixel pipe.
+2. **If it says dark, replug before measuring anything else.** The state
+   persists, so every later experiment in the same session reports the
+   fault of the one before it. This is how two correct changes came to be
+   reverted and one wrong one kept.
+3. **The driver's own counters do not answer this question.** `sent`,
+   `dropped` and `failed` all look perfect while the panel is dark, because
+   the transfers genuinely do succeed.
+4. **A silent log is not a stopped driver.** The pipeline reports when it
+   is idle as well as when it is drawing, but it did not always, and a log
+   that stopped at "running" was read as a crash when it was a still
+   desktop.
