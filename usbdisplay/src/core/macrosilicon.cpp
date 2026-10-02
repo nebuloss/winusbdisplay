@@ -332,6 +332,42 @@ bool MacroSiliconDevice::Reset() {
   return ResetLocked();
 }
 
+/* Whether a picture is reaching the panel.
+ *
+ * Reads a register found by dumping every one of them on an adapter that
+ * was displaying and on one that was not, and comparing. The byte two
+ * past kRegDisplayLive is 0x44 in the first case and something else in
+ * the second, reliably, and it agrees with what a person sees.
+ *
+ * What the register is for is unknown. That does not matter: the question
+ * it answers cannot be answered any other way, because every transfer
+ * succeeds whether or not anything is displayed, so the frame path has no
+ * idea. Being unable to ask is what made a dark panel take a day to
+ * understand.
+ *
+ * A failed read returns true. This is used to decide whether to reprogram
+ * the adapter, and reprogramming it because a register could not be read
+ * would turn a momentary glitch into a visible one. */
+bool MacroSiliconDevice::DisplayingPicture() {
+  uint8_t live[4] = {0, 0, 0, 0};
+  if (!Read(kRegDisplayLive, live, sizeof(live))) {
+    return true;
+  }
+  return live[2] == kDisplayLiveShowing;
+}
+
+/* Reprograms the adapter, which is how a dark one comes back.
+ *
+ * Measured rather than hoped for: an adapter that had stopped displaying,
+ * with the driver running and every transfer succeeding, was revived by a
+ * single frame from the console tool. The tool does nothing clever; it
+ * powers the chip on and sets the mode before every frame, which the
+ * driver does only once at startup. That difference is the whole of it. */
+bool MacroSiliconDevice::Revive() {
+  std::lock_guard<std::mutex> lock(device_lock_);
+  return ResetLocked();
+}
+
 bool MacroSiliconDevice::ResetLocked() {
   if (!have_last_mode_) {
     return Fail("no mode has been programmed yet, nothing to reset to");

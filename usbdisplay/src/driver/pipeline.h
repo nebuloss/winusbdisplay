@@ -114,6 +114,10 @@ class Pipeline {
   void CheckAdapterReprogrammed();
   void CheckGammaRamp();
 
+  /* Notices that the panel has gone dark despite everything succeeding,
+   * and reprograms the adapter, which is what brings it back. */
+  void CheckStillDisplaying(unsigned long long now);
+
   IDDCX_SWAPCHAIN swapchain_;
   GraphicsContext* graphics_;
   CursorOverlay* cursor_;
@@ -166,6 +170,7 @@ class Pipeline {
    * transfer costs the same whatever its size. */
   int idle_band_rows_ = 128;
   unsigned long long last_send_ms_ = 0;
+  unsigned long long last_display_check_ms_ = 0;
 
   std::thread thread_;
   HANDLE terminate_event_ = nullptr;

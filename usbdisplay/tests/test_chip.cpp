@@ -247,6 +247,43 @@ TEST(protocol, an_unknown_chip_id_is_not_an_error) {
   CHECK(id.model == ChipModel::kUnknown);
 }
 
+/* ---- noticing that the panel has gone dark ---------------------------- */
+
+TEST(health, a_chip_that_reports_showing_is_left_alone) {
+  Harness harness;
+  harness.link->registers[kRegDisplayLive + 2] = kDisplayLiveShowing;
+  CHECK(harness.chip->DisplayingPicture());
+}
+
+TEST(health, a_chip_that_reports_dark_is_detected) {
+  Harness harness;
+  harness.link->registers[kRegDisplayLive + 2] = 0x01;
+  CHECK_BECAUSE(!harness.chip->DisplayingPicture(),
+                "every transfer succeeds whether or not a picture is on "
+                "the glass, so asking the adapter is the only way to know");
+}
+
+TEST(health, a_chip_that_will_not_answer_is_given_the_benefit_of_the_doubt) {
+  Harness harness;
+  harness.link->FailReadsAt(kRegDisplayLive);
+  CHECK_BECAUSE(harness.chip->DisplayingPicture(),
+                "a failed read is not evidence of a dark panel, and "
+                "reprogramming the adapter over one would turn a glitch "
+                "into a visible interruption");
+}
+
+TEST(health, reviving_reprograms_the_mode) {
+  Harness harness;
+  CHECK(harness.chip->SetMode(Mode1080p60()));
+  harness.link->controls.clear();
+
+  CHECK(harness.chip->Revive());
+  CHECK_BECAUSE(harness.link->IndexOfCommand(kVideoOutputInfo) >= 0,
+                "a dark adapter comes back when the mode is programmed "
+                "again, which is the only thing the console tool does "
+                "that the driver did not");
+}
+
 /* ---- what each family costs -------------------------------------------- */
 
 namespace {

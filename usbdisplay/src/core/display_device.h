@@ -165,6 +165,31 @@ class DisplayDevice : public TransferCostModel {
    * needs to stay responsive at exactly that moment. */
   virtual bool StillPresent() const = 0;
 
+  /* Whether a picture is actually reaching the panel.
+   *
+   * Separate from StillPresent, and from whether transfers succeed,
+   * because on this hardware those are three different questions. An
+   * adapter can be plugged in, accept every transfer, report its output
+   * enabled, and display nothing.
+   *
+   * There is no way to infer this from the frame path, which is why it is
+   * asked rather than deduced: the counters all look perfect while the
+   * screen is dark. A device that cannot answer should return true, so
+   * that nothing is done about a condition it cannot detect.
+   *
+   * Called occasionally rather than per frame, so an implementation may
+   * talk to the hardware. */
+  virtual bool DisplayingPicture() = 0;
+
+  /* Reprograms the adapter from scratch, as though it had just been
+   * opened: power, mode, and whatever else it takes to get a picture out.
+   *
+   * The way back from a device that has stopped displaying while still
+   * accepting everything sent to it. Measured on the MacroSilicon parts:
+   * a dark adapter is revived by exactly this, with no replug, which is
+   * why it is on the interface rather than being a private detail. */
+  virtual bool Revive() = 0;
+
   virtual const std::string& error() const = 0;
 };
 

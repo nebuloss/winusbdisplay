@@ -43,6 +43,11 @@ constexpr unsigned kBufferWaitMs = 36;
  * free for real updates. */
 constexpr unsigned long long kKeepaliveMs = 500;
 
+/* How often to ask the adapter whether it is still displaying. A control
+ * exchange, so not every frame; the fault is rare and a few seconds of
+ * black beats black until somebody unplugs it. */
+constexpr unsigned long long kDisplayCheckMs = 3000;
+
 /* Smallest keepalive band worth sending, in rows. Only a floor: the real
  * height is worked out from the device, see ChooseIdleBandRows. */
 constexpr int kMinIdleBandRows = 8;
@@ -496,6 +501,46 @@ void Pipeline::ProcessFrame(const IDARG_OUT_RELEASEANDACQUIREBUFFER& buffer) {
   }
 }
 
+/* Notices that the panel has gone dark, and brings it back.
+ *
+ * Nothing on the frame path can detect this. The adapter keeps
+ * accepting transfers, keeps reporting its output enabled, and stops
+ * displaying, so sent, dropped and failed all look perfect while the
+ * screen is black. The only way to know is to ask the device, which is
+ * what DisplayingPicture does.
+ *
+ * The cure is to reprogram it, which is measured rather than assumed:
+ * a dark adapter with the driver running was revived by one frame from
+ * the console tool, and the only thing that tool does differently is
+ * power the chip on and set the mode before every frame.
+ *
+ * Checked every few seconds rather than every frame: it is a control
+ * exchange, the fault is rare, and a few seconds of black is a great
+ * deal better than black until somebody unplugs it. */
+void Pipeline::CheckStillDisplaying(unsigned long long now) {
+  if (now - last_display_check_ms_ < kDisplayCheckMs) {
+    return;
+  }
+  last_display_check_ms_ = now;
+
+  /* Only once something has been sent. Before that there is nothing to
+   * display and a dark panel is correct. */
+  if (last_send_ms_ == 0 || device_->DisplayingPicture()) {
+    return;
+  }
+
+  Log("pipeline: the panel has stopped displaying, reprogramming");
+  if (!device_->Revive()) {
+    Log("pipeline: reprogramming failed: %s", device_->error().c_str());
+    return;
+  }
+
+  /* Everything the panel held is gone, so nothing known about it is
+   * worth keeping. The next pass redraws from scratch. */
+  onscreen_valid_ = false;
+  damage_.MarkAll();
+}
+
 void Pipeline::RefreshIdle() {
   /* The panel drops its signal after a second or two of silence, and a still
    * desktop means the compositor stops presenting entirely, so something has
@@ -650,6 +695,8 @@ void Pipeline::Run() {
         RefreshSettings();
         CheckAdapterReprogrammed();
       }
+
+      CheckStillDisplaying(now);
 
       /* The pointer, before deciding there is nothing to do.
        *
