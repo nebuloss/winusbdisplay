@@ -528,3 +528,37 @@ The wider lesson, and the second time this session has taught it: a
 register that correlates with a symptom is not a model of the hardware.
 Check a change against the thing you actually care about, which here means
 a person looking at the screen.
+
+## Ruled out: TRIGGER_FRAME as a cure for the shimmer
+
+The last untried explanation, and it is now tried.
+
+The notes above record `TRIGGER_FRAME`, sub-operation `0x00`, as the place
+to look: it takes an image index and a delay, it is present in the vendor's
+own Linux driver, and it is commented out there. If it chose which of the
+chip's two images is scanned out, a frame could be written to the hidden
+one and swapped in complete, every update would be atomic, and a
+progressive sweep could not happen.
+
+**The chip accepts it and ignores it.** Forty commands out of forty
+returned success, and the adapter went on displaying, so it is not
+rejected the way `BYPASS_MANUAL_BLOCK` was.
+
+The test that distinguishes accepting from obeying: fill one image red and
+the other green, then ask for each in turn, three seconds apart, with no
+pixels sent in between. A command that selects the displayed image makes
+the panel alternate on its own.
+
+It never showed red. The panel held green, which is simply the last frame
+written, and went black in between, which is the signal dropping for want
+of traffic. So the command does something, or nothing, but it does not
+select what is on screen.
+
+`usbdisplayctl trigger --select` reruns this, and is worth keeping for
+anyone who wants to check the same thing on a different part.
+
+That exhausts the hypotheses that can be tested from this side. What
+remains is what `AGENT_PROMPT.md` recommended at the start: capture the
+vendor driver's USB traffic while small text redraws, and diff it against
+ours. Everything reachable by reasoning about the protocol has now been
+reached.

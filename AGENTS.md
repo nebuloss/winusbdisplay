@@ -58,6 +58,7 @@ the display had broken, and with no history there was no way to bisect.
 ```
 usbdisplay\scripts\build-tool.bat         # usbdisplayctl -> usbdisplay\build\
 usbdisplay\scripts\test.bat [filter]      # build and run the tests
+usbdisplay\scripts\smoke.ps1 [-Install]   # check a build against real hardware
 usbdisplay\scripts\build-driver.bat       # the driver
 usbdisplay\scripts\install.ps1            # both packages, elevated
 usbdisplay\scripts\reattach.ps1           # after the USB package is replaced
@@ -121,6 +122,21 @@ usbdisplay\build\usbdisplayctl.exe testpattern --bars
 
 The driver writes `C:\Windows\Temp\usbdisplaydd.log`. **Read it first.** The
 Windows event log will generally only say "problem code 10".
+
+`scripts\smoke.ps1` checks a built driver against whatever is plugged in,
+in about two minutes. Everything in `tests\` runs without hardware, which
+is what makes it fast and also means none of it could have caught any of
+the faults that actually reached the panel: a register read that is valid
+on one chip and meaningless on the other, an adapter left dark while every
+counter reported success, a pointer drawn as a solid block. Run it after
+installing.
+
+`usbdisplayctl health` asks the adapter whether it is transmitting a
+picture. **It reports what the chip is sending, not what is on the glass**,
+and those two came apart once already: a change that removed the keepalive
+left the register insisting all was well while the panel was black. It is
+the right tool for spotting the dark state, and it is not evidence that a
+change is safe. Look at the screen.
 
 ## The one non-obvious thing that unblocks everything
 
@@ -467,12 +483,18 @@ Each cost real investigation; the evidence is in `docs/protocol-notes.md`.
 
 ## Known unresolved
 
-Small text shimmers on the panel. Inherited from the first implementation;
-five plausible causes were implemented and measured away, and
-`docs/troubleshooting.md` lists them so they are not retried. The remaining
-suspect is that the adapter displays progressively during a transfer, which
-would make a whole-screen update visible as a sweep. Settling it needs a USB
-capture of the vendor driver.
+Small text shimmers on the panel. Inherited from the first implementation.
+Seven explanations have now been implemented and measured away, including
+the one that looked most promising: `TRIGGER_FRAME`, which the vendor's own
+driver carries and leaves commented out, turns out to be accepted by the
+chip and ignored. `docs/troubleshooting.md` lists all seven so none is
+retried, and `usbdisplayctl trigger --select` reruns the last of them.
+
+The remaining suspect is that the adapter displays progressively during a
+transfer, which would make a whole-screen update visible as a sweep. That
+cannot be settled from this side: everything reachable by reasoning about
+the protocol has now been reached, and what is left is a USB capture of the
+vendor driver while small text redraws.
 
 ## Style
 

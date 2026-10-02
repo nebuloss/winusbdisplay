@@ -674,6 +674,119 @@ bool SendImageBanded(MacroSiliconDevice* chip, const Mode& mode,
   return true;
 }
 
+/* Does TRIGGER_FRAME let the chip hold a picture until it is complete?
+ *
+ * The last unexplained defect is a shimmer on small text, and the best
+ * remaining theory is that the chip displays progressively as data
+ * arrives rather than swapping a finished frame, so a large update shows
+ * as a sweep. Five other explanations were implemented and measured away;
+ * this one has never been tried, because it needs a command the vendor's
+ * own driver carries and leaves commented out.
+ *
+ * The command takes an image index and a delay. If it controls which of
+ * the chip's two images is scanned out, then writing one while the other
+ * is displayed and swapping afterwards makes every update atomic, and the
+ * sweep goes away.
+ *
+ * This sends fine vertical stripes that shift by a pixel each frame,
+ * because tearing is obvious on those and invisible on a flat colour.
+ *
+ *   usbdisplayctl trigger [--delay N] [--frames N]
+ */
+int CmdTrigger(int argc, char** argv) {
+  const Mode mode = ModeFromArgs(argc, argv);
+  const int delay = IntArg(argc, argv, "--delay", 0);
+  const int frames = IntArg(argc, argv, "--frames", 60);
+
+  std::unique_ptr<MacroSiliconDevice> chip = OpenChip(true);
+  if (!chip) {
+    return 1;
+  }
+  if (!chip->PowerOn() || !chip->SetMode(mode)) {
+    fprintf(stderr, "error: %s\n", chip->error().c_str());
+    return 1;
+  }
+
+  const size_t stride = static_cast<size_t>(mode.width) * 4;
+  std::vector<uint8_t> rgb(stride * mode.height);
+
+  Rect full;
+  full.x2 = mode.width;
+  full.y2 = mode.height;
+  std::vector<uint8_t> transfer(TransferLength(full));
+
+  printf("alternating two images, trigger delay %d, %d frames\n", delay,
+         frames);
+
+  int triggered = 0;
+  for (int i = 0; i < frames; ++i) {
+    for (int y = 0; y < mode.height; ++y) {
+      uint8_t* row = rgb.data() + static_cast<size_t>(y) * stride;
+      for (int x = 0; x < mode.width; ++x) {
+        const bool on = ((x + i) / 2) % 2 == 0;
+        row[x * 4 + 0] = on ? 230 : 20;
+        row[x * 4 + 1] = on ? 230 : 20;
+        row[x * 4 + 2] = on ? 230 : 20;
+        row[x * 4 + 3] = 255;
+      }
+    }
+
+    const size_t length =
+        FrameRect(transfer.data(), transfer.size(), rgb.data(), stride,
+                  mode.width, mode.height, full);
+    if (length == 0 || !chip->SendTransfer(transfer.data(), length)) {
+      fprintf(stderr, "error: %s\n", chip->error().c_str());
+      return 1;
+    }
+
+    /* Which physical image was just written cannot be known from here, so
+     * both indices are used in turn. Whichever is right will be right half
+     * the time, which is enough to see whether the command does anything
+     * at all. */
+    if (chip->TriggerFrame(static_cast<uint8_t>(i & 1),
+                           static_cast<uint8_t>(delay))) {
+      ++triggered;
+    }
+  }
+
+  printf("%d of %d triggers accepted\n", triggered, frames);
+  if (triggered == 0) {
+    printf("the chip refuses the command, so this line of attack is shut\n");
+    return 0;
+  }
+
+  /* Accepting the command proves nothing on its own: a chip will accept
+   * one it ignores. This is the test that tells those apart.
+   *
+   * Two images are filled with different colours, and then each is asked
+   * for in turn with nothing sent in between. If the command selects what
+   * is scanned out, the panel alternates on its own. If it is ignored,
+   * the panel keeps whatever the last transfer left there. */
+  if (HasFlag(argc, argv, "--select")) {
+    printf("\nfilling one image red, the other green\n");
+    for (int pass = 0; pass < 2; ++pass) {
+      FillSolid(rgb.data(), stride, mode.width, mode.height,
+                pass == 0 ? 220 : 30, pass == 0 ? 30 : 200, 30);
+      const size_t length =
+          FrameRect(transfer.data(), transfer.size(), rgb.data(), stride,
+                    mode.width, mode.height, full);
+      chip->SendTransfer(transfer.data(), length);
+    }
+
+    for (int round = 0; round < 6; ++round) {
+      const uint8_t index = static_cast<uint8_t>(round & 1);
+      chip->TriggerFrame(index, static_cast<uint8_t>(delay));
+      printf("  asked for image %u, watch the panel for three seconds\n",
+             index);
+      Sleep(3000);
+    }
+    printf("\nAlternating red and green means the command selects what is\n");
+    printf("displayed, and the shimmer has a cure. One steady colour means\n");
+    printf("it does not.\n");
+  }
+  return 0;
+}
+
 int CmdTestPattern(int argc, char** argv) {
   const Mode mode = ModeFromArgs(argc, argv);
   std::unique_ptr<MacroSiliconDevice> chip = OpenChip(g_dump_directory.empty());
@@ -859,6 +972,9 @@ int main(int argc, char** argv) {
   }
   if (strcmp(command, "plan") == 0) {
     return CmdPlan();
+  }
+  if (strcmp(command, "trigger") == 0) {
+    return CmdTrigger(rest_count, rest);
   }
   if (strcmp(command, "health") == 0) {
     return CmdHealth();
