@@ -135,6 +135,16 @@ const char* StringArg(int argc, char** argv, const char* name,
   return fallback;
 }
 
+/* An option with no value of its own. */
+bool HasFlag(int argc, char** argv, const char* name) {
+  for (int i = 0; i < argc; ++i) {
+    if (strcmp(argv[i], name) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
 double NowSeconds() {
   LARGE_INTEGER frequency, counter;
   QueryPerformanceFrequency(&frequency);
@@ -397,6 +407,61 @@ int RunPlannerCases(bool verbose) {
 
 int CmdPlan() { return RunPlannerCases(true) == 0 ? 0 : 1; }
 
+/* Reads registers by address.
+ *
+ * The control plane needs no driver, so this works whenever the adapter is
+ * plugged in, and it is the only way to see what the chip actually holds
+ * rather than what the code believes it holds. Added while chasing a dark
+ * panel, where the question "what is really in that register" had no way to
+ * be answered.
+ *
+ *   usbdisplayctl peek 0xFB07        one byte
+ *   usbdisplayctl peek 0xC000 16     a range
+ */
+int CmdPeek(int argc, char** argv) {
+  if (argc < 1) {
+    fprintf(stderr, "usage: peek <address> [count]\n");
+    return 1;
+  }
+  const unsigned long address = strtoul(argv[0], nullptr, 0);
+  const unsigned long count = argc > 1 ? strtoul(argv[1], nullptr, 0) : 1;
+  if (address > 0xFFFF || count == 0 || count > 256 ||
+      address + count > 0x10000) {
+    fprintf(stderr, "error: address must be 16 bit and the range must fit\n");
+    return 1;
+  }
+
+  std::unique_ptr<MacroSiliconDevice> chip = OpenChip(false);
+  if (!chip) {
+    return 1;
+  }
+
+  std::vector<uint8_t> data(count);
+  /* One exchange returns at most four consecutive bytes, so a range is
+   * several of them. Doing this here rather than in the device keeps the
+   * chunking where the convenience is wanted. */
+  for (size_t done = 0; done < data.size();) {
+    const size_t chunk =
+        data.size() - done < kMaxReadBytes ? data.size() - done : kMaxReadBytes;
+    if (!chip->Read(static_cast<uint16_t>(address + done), data.data() + done,
+                    chunk)) {
+      fprintf(stderr, "error: %s\n", chip->error().c_str());
+      return 1;
+    }
+    done += chunk;
+  }
+
+  for (size_t i = 0; i < data.size(); ++i) {
+    if (i % 16 == 0) {
+      printf("%s%04lX  ", i ? "\n" : "",
+             static_cast<unsigned long>(address + i));
+    }
+    printf("%02X ", data[i]);
+  }
+  printf("\n");
+  return 0;
+}
+
 /* A short sanity check for use in the field, on a machine that has the tool
  * but not the source. The thorough version is the test suite, built and run
  * by scripts\test.bat; this deliberately does not duplicate it, it only
@@ -455,6 +520,75 @@ bool SendImage(MacroSiliconDevice* chip, const Mode& mode, const uint8_t* rgb,
   return true;
 }
 
+/* Sends an image the way the driver does: in horizontal bands, each one
+ * transmitted twice back to back.
+ *
+ * The plain path above sends one full-frame transfer, once, and that has
+ * always worked. The driver does neither of those things, so when a panel
+ * looks wrong under the driver and right under the tool, there is no way to
+ * tell which difference is responsible. This reproduces the driver's
+ * behaviour with content that is known and static, which the driver's never
+ * is.
+ *
+ *   --bands      send in bands rather than one frame
+ *   --band N     rows per band, default 128 to match the driver
+ *   --single     send each band once, to test the double transmission
+ */
+bool SendImageBanded(MacroSiliconDevice* chip, const Mode& mode,
+                     const uint8_t* rgb, size_t stride, int band_rows,
+                     int transmissions) {
+  if (!chip->PowerOn() || !chip->SetMode(mode)) {
+    fprintf(stderr, "error: %s\n", chip->error().c_str());
+    return false;
+  }
+
+  Rect full;
+  full.x2 = mode.width;
+  full.y2 = mode.height;
+  std::vector<uint8_t> transfer(TransferLength(full));
+
+  const double start = NowSeconds();
+  size_t total = 0;
+  int bands = 0;
+
+  for (int y = 0; y < mode.height; y += band_rows) {
+    Rect band;
+    band.x1 = 0;
+    band.x2 = mode.width;
+    band.y1 = y;
+    band.y2 = y + band_rows > mode.height ? mode.height : y + band_rows;
+    band = AlignDamageRect(band, mode.width, mode.height);
+    if (band.empty()) {
+      continue;
+    }
+
+    const size_t length =
+        FrameRect(transfer.data(), transfer.size(), rgb, stride, mode.width,
+                  mode.height, band);
+    if (length == 0) {
+      fprintf(stderr, "error: framing %d,%d %dx%d failed\n", band.x1, band.y1,
+              band.width(), band.height());
+      return false;
+    }
+    /* Twice, back to back, exactly as the pipeline does, because the chip
+     * keeps two copies and alternates between them. */
+    for (int i = 0; i < transmissions; ++i) {
+      if (!chip->SendTransfer(transfer.data(), length)) {
+        fprintf(stderr, "error: %s\n", chip->error().c_str());
+        return false;
+      }
+      total += length;
+    }
+    ++bands;
+  }
+
+  const double elapsed = NowSeconds() - start;
+  printf("sent %d bands x%d, %zu bytes in %.1f ms (%.1f MB/s)\n", bands,
+         transmissions, total, elapsed * 1000.0,
+         total / elapsed / (1024.0 * 1024.0));
+  return true;
+}
+
 int CmdTestPattern(int argc, char** argv) {
   const Mode mode = ModeFromArgs(argc, argv);
   std::unique_ptr<MacroSiliconDevice> chip = OpenChip(g_dump_directory.empty());
@@ -478,6 +612,15 @@ int CmdTestPattern(int argc, char** argv) {
 
   printf("mode %dx%d@%d, chip index 0x%02X\n", mode.width, mode.height,
          mode.hz, mode.index);
+
+  if (HasFlag(argc, argv, "--bands")) {
+    const int rows = IntArg(argc, argv, "--band", 128);
+    const int transmissions = HasFlag(argc, argv, "--single") ? 1 : 2;
+    return SendImageBanded(chip.get(), mode, rgb.data(), stride, rows,
+                           transmissions)
+               ? 0
+               : 1;
+  }
   return SendImage(chip.get(), mode, rgb.data(), stride) ? 0 : 1;
 }
 
@@ -631,6 +774,9 @@ int main(int argc, char** argv) {
   }
   if (strcmp(command, "plan") == 0) {
     return CmdPlan();
+  }
+  if (strcmp(command, "peek") == 0) {
+    return CmdPeek(rest_count, rest);
   }
   if (strcmp(command, "testpattern") == 0) {
     return CmdTestPattern(rest_count, rest);

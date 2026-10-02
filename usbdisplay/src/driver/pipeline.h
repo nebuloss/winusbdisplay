@@ -158,6 +158,10 @@ class Pipeline {
   Settings settings_;
   unsigned long long last_settings_poll_ms_ = 0;
   int idle_band_row_ = 0;
+  /* Rows per keepalive update, worked out from what the device charges for
+   * a transfer rather than assumed. A whole screen on parts where a
+   * transfer costs the same whatever its size. */
+  int idle_band_rows_ = 128;
   unsigned long long last_send_ms_ = 0;
 
   std::thread thread_;
@@ -165,6 +169,10 @@ class Pipeline {
 
   uint64_t regions_sent_ = 0;
   uint64_t regions_skipped_ = 0;
+  uint64_t bytes_sent_ = 0;
+  /* How many transfers have had their geometry logged. The first few are
+   * worth seeing; a running log at sixty a second is not. */
+  unsigned regions_logged_ = 0;
   /* Transmissions the device requires per region, cached so the frame path
    * does not make a virtual call per update. */
   int transmissions_ = 2;

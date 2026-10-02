@@ -31,10 +31,10 @@ constexpr unsigned kBufferWaitMs = 36;
  * the repaint below exists at all. There is deliberately no interval: it runs
  * whenever the link is idle, so the spare capacity is used rather than
  * waited out. */
-/* Rows per keepalive update. At 1920 wide this is about 490 KB, which is
- * just inside one of the adapter's slots, so it is as large as it can be
- * without costing a second one. */
-constexpr int kIdleBandHeight = 128;
+
+/* Smallest keepalive band worth sending, in rows. Only a floor: the real
+ * height is worked out from the device, see ChooseIdleBandRows. */
+constexpr int kMinIdleBandRows = 8;
 
 /* Upper bound on how many times any device can ask for a region to be sent.
  * Two today; the array is sized from this so the frame path allocates
@@ -66,6 +66,46 @@ Rect FromRECT(const RECT& rect) {
   out.x2 = rect.right;
   out.y2 = rect.bottom;
   return out;
+}
+
+/* The tallest keepalive band that still costs a single slot.
+ *
+ * This used to be 128 rows, which is about 490 KB at 1920 wide and just
+ * inside one slot on the USB 2 parts. It was a fact about one chip written
+ * into the device independent half of the driver, and on the USB 3 parts it
+ * was badly wrong: there a transfer costs one slot whatever its size, so
+ * nine bands cost nine slots where the whole screen would have cost one.
+ * Measured, that is 122 ms a pass against 14.6 ms, and it looks like the
+ * picture being redrawn in visible stripes.
+ *
+ * Asking the device how much a band costs gets the right answer for both
+ * without the pipeline knowing anything about either: the USB 2 parts land
+ * back on about 134 rows, the USB 3 parts on the whole screen.
+ *
+ * Binary search because cost rises with height but in steps, so the largest
+ * height at a given cost cannot be calculated directly. */
+int ChooseIdleBandRows(const DisplayDevice* device, int width, int height) {
+  Rect whole;
+  whole.x2 = width;
+  whole.y2 = height;
+  if (device->TransferCost(whole) <= 1) {
+    return height;
+  }
+
+  int low = kMinIdleBandRows;
+  int high = height;
+  while (low < high) {
+    const int middle = low + (high - low + 1) / 2;
+    Rect band;
+    band.x2 = width;
+    band.y2 = middle;
+    if (device->TransferCost(band) <= 1) {
+      low = middle;
+    } else {
+      high = middle - 1;
+    }
+  }
+  return low < kMinIdleBandRows ? kMinIdleBandRows : low;
 }
 
 }  // namespace
@@ -141,8 +181,10 @@ bool Pipeline::Start() {
    * turns "why is this slow" into something answerable from a log file
    * rather than from a bench. */
   const Rect whole = {0, 0, mode_.width, mode_.height};
-  Log("pipeline: a full repaint costs %d period(s) on this adapter",
-      device_->TransferCost(whole));
+  idle_band_rows_ = ChooseIdleBandRows(device_, mode_.width, mode_.height);
+  Log("pipeline: a full repaint costs %d period(s) on this adapter, "
+      "keepalive band %d rows",
+      device_->TransferCost(whole), idle_band_rows_);
 
   thread_ = std::thread(&Pipeline::Run, this);
   return true;
@@ -330,6 +372,24 @@ bool Pipeline::SubmitConverted(const Rect& region, const Rect& sub) {
   for (int i = 0; i < transmissions_; ++i) {
     sender_->Submit(transfers[i], length);
     ++regions_sent_;
+    bytes_sent_ += length;
+  }
+
+  /* The first few regions, with their geometry.
+   *
+   * What the driver puts on the wire is otherwise invisible: the counters
+   * say transfers succeeded, not what was in them, and a chip will accept a
+   * transfer describing the wrong rectangle without complaint. Four lines
+   * once per session is a small price for being able to tell a full repaint
+   * from a stream of empty updates.
+   *
+   * Not a running log: at sixty updates a second that would be useless and
+   * would itself slow the frame thread. */
+  if (regions_logged_ < 4) {
+    ++regions_logged_;
+    Log("pipeline: transfer %u: %d,%d %dx%d of region %dx%d, %zu bytes",
+        regions_logged_, sub.x1, sub.y1, sub.width(), sub.height(),
+        region.width(), region.height(), length);
   }
 
   last_send_ms_ = GetTickCount64();
@@ -440,13 +500,13 @@ void Pipeline::RefreshIdle() {
   band.x1 = 0;
   band.x2 = mode_.width;
   band.y1 = idle_band_row_;
-  band.y2 = idle_band_row_ + kIdleBandHeight;
+  band.y2 = idle_band_row_ + idle_band_rows_;
   if (band.y2 > mode_.height) {
     band.y2 = mode_.height;
   }
   band = device_->AlignRegion(band, mode_.width, mode_.height);
 
-  idle_band_row_ += kIdleBandHeight;
+  idle_band_row_ += idle_band_rows_;
   if (idle_band_row_ >= mode_.height) {
     idle_band_row_ = 0;
     /* One full pass done, so everything on the panel has now been drawn
@@ -594,9 +654,10 @@ void Pipeline::Run() {
     const unsigned long long now = GetTickCount64();
     if (now - last_report_ms >= 10000) {
       last_report_ms = now;
-      Log("pipeline: sent=%llu skipped=%llu dropped=%llu failed=%llu",
+      Log("pipeline: sent=%llu skipped=%llu dropped=%llu failed=%llu, "
+          "%llu MB total",
           regions_sent_, regions_skipped_, sender_->dropped(),
-          sender_->failed());
+          sender_->failed(), bytes_sent_ / (1024ull * 1024ull));
     }
 
     if (WaitForSingleObject(terminate_event_, 0) == WAIT_OBJECT_0) {
