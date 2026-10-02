@@ -27,31 +27,40 @@ bool CursorOverlay::Attach(IDDCX_MONITOR monitor) {
     return false;
   }
 
-  /* What the compositor will accept is not documented in a way that can be
-   * relied on, and getting it wrong returns one undifferentiated invalid
-   * parameter. So the combinations are tried in order of preference and
-   * the first that is accepted is used, which also records in the log what
-   * this machine actually allows.
+  /* Alpha pointers are drawn here; inverting ones are left to the
+   * compositor.
    *
-   * Emulation is preferred over full support for the awkward formats. A
-   * masked pointer carries its mask in the alpha channel with the opposite
-   * meaning to an ordinary one, and the inverting kind needs the pixels
-   * underneath, which have been converted and discarded by the time
-   * anything here could use them. Letting the compositor convert both to
-   * ordinary alpha removes two whole classes of wrong pointer. */
+   * An inverting pointer, which is what the text caret and most of the
+   * resize arrows are, needs the pixels underneath to decide its own
+   * colour. By the time anything here could use them they have been
+   * converted to the adapteru{2019}s format and the original is gone.
+   *
+   * Asking the compositor to emulate those as ordinary alpha was tried
+   * and is much worse than it sounds, because it cannot know what is
+   * underneath either and has to guess. Measured on the text caret:
+   * of its 34 by 34 pixels it returned 1066 opaque and all of them
+   * dark, against 90 transparent. That is not a caret, it is a black
+   * block the size of the pointer, and that is exactly how it looked
+   * on a pale page.
+   *
+   * Declaring no support for them instead makes the compositor draw
+   * them into the desktop image itself, where it still has the pixels
+   * and can invert them properly. They then arrive as part of an
+   * ordinary frame and need no special handling at all.
+   *
+   * The sizes are tried in turn because what is accepted is not
+   * documented in a way worth relying on and a refusal says only
+   * u{201C}invalid parameteru{201D}. */
   struct Attempt {
     IDDCX_XOR_CURSOR_SUPPORT xor_support;
     UINT side;
     const char* describe;
   };
   static const Attempt kAttempts[] = {
+      {IDDCX_XOR_CURSOR_SUPPORT_NONE, 128, "alpha only, 128"},
+      {IDDCX_XOR_CURSOR_SUPPORT_NONE, 64, "alpha only, 64"},
       {IDDCX_XOR_CURSOR_SUPPORT_EMULATION, 128, "emulated xor, 128"},
-      {IDDCX_XOR_CURSOR_SUPPORT_EMULATION, 256, "emulated xor, 256"},
-      {IDDCX_XOR_CURSOR_SUPPORT_FULL, 512, "full xor, 512"},
-      {IDDCX_XOR_CURSOR_SUPPORT_FULL, 128, "full xor, 128"},
-      {IDDCX_XOR_CURSOR_SUPPORT_NONE, 128, "no xor, 128"},
   };
-
   NTSTATUS status = STATUS_INVALID_PARAMETER;
   UINT side = 0;
   for (const Attempt& attempt : kAttempts) {
@@ -132,11 +141,9 @@ bool CursorOverlay::Fetch() {
   const IDDCX_CURSOR_SHAPE_INFO& info = out.CursorShapeInfo;
   last_shape_id_ = info.ShapeId;
 
-  /* Every shape, the first few times. Which format a pointer arrives in
-   * decides how its alpha byte must be read, and reading it the wrong way
-   * paints a solid block where the transparent border should be. That is
-   * not visible from the code, only from the hardware, so it is worth
-   * saying out loud rather than reasoning about. */
+  /* The first few shapes, because which format a pointer arrives in
+   * decides how its coverage byte has to be read, and that is not
+   * visible from the code. */
   if (shapes_logged_ < 12) {
     ++shapes_logged_;
     Log("cursor: shape %u type %u %ux%u pitch %u", info.ShapeId,
