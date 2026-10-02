@@ -435,6 +435,33 @@ void IndirectDevice::RemoveMonitor() {
   monitor_ = nullptr;
 }
 
+bool IndirectDevice::AdapterCreated() const {
+  std::lock_guard<std::mutex> guard(lock_);
+  return adapter_ != nullptr;
+}
+
+/* Puts the hardware back after a sleep.
+ *
+ * A USB suspend leaves the chip powered but unprogrammed, and an
+ * unprogrammed chip accepts every transfer and displays nothing, which
+ * is indistinguishable from working unless somebody is looking at the
+ * panel. The vendor driver reprograms on resume for the same reason.
+ *
+ * Nothing is created or destroyed here. The adapter, the monitor and
+ * the swapchain all survived the sleep; only the chip forgot. */
+void IndirectDevice::WakeHardware() {
+  std::lock_guard<std::mutex> guard(lock_);
+  if (!device_) {
+    /* Unplugged while asleep. The watcher picks it up when it returns,
+     * and attaching from here would race with that. */
+    return;
+  }
+  if (!device_->Revive()) {
+    Log("wake: could not reprogram the adapter: %s",
+        device_->error().c_str());
+  }
+}
+
 void IndirectDevice::OnAdapterReady(IDDCX_ADAPTER adapter) {
   {
     std::lock_guard<std::mutex> guard(lock_);

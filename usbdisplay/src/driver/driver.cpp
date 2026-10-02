@@ -84,10 +84,38 @@ NTSTATUS EvtDeviceReleaseHardware(WDFDEVICE wdf_device, WDFCMRESLIST) {
   return STATUS_SUCCESS;
 }
 
-NTSTATUS EvtDeviceD0Entry(WDFDEVICE wdf_device, WDF_POWER_DEVICE_STATE) {
+/* Called when the device is powered up, which is not only at the start.
+ *
+ * It runs again on every resume from sleep, and the adapter may only be
+ * created once. Creating a second one fails with a status that reads like
+ * a configuration error and leaves the machine with no second monitor
+ * after the lid is opened.
+ *
+ * **Not verified against a real sleep.** Disabling and re-enabling the
+ * device looks like a power cycle and is not one: it tears the device
+ * down and builds a new one, so this path is never taken and the log
+ * starts afresh each time. Reaching it needs the machine genuinely
+ * suspended. What is here follows from what the framework documents and
+ * from the vendor driver, which reprograms the chip on resume for the
+ * same reason, and it is strictly better than initialising twice. It is
+ * reasoning rather than measurement until somebody closes a lid. */
+NTSTATUS EvtDeviceD0Entry(WDFDEVICE wdf_device,
+                          WDF_POWER_DEVICE_STATE previous) {
   IndirectDevice* device = DeviceFrom(wdf_device);
   if (!device) {
     return STATUS_DEVICE_CONFIGURATION_ERROR;
+  }
+
+  if (device->AdapterCreated()) {
+    /* Waking, not starting. The adapter, monitor and swapchain all
+     * survived; only the chip forgot. A USB suspend leaves it powered and
+     * unprogrammed, and an unprogrammed chip accepts every transfer while
+     * displaying nothing, which is indistinguishable from working unless
+     * somebody is watching the panel. */
+    Log("D0Entry: waking from %d, reprogramming the adapter",
+        static_cast<int>(previous));
+    device->WakeHardware();
+    return STATUS_SUCCESS;
   }
 
   IDDCX_ADAPTER_CAPS caps = {};

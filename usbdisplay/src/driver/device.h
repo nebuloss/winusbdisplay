@@ -57,6 +57,16 @@ class IndirectDevice {
   void ReleaseHardware();
 
   void OnAdapterReady(IDDCX_ADAPTER adapter);
+
+  /* Whether the adapter object exists, which distinguishes starting up
+   * from waking: the framework powers the device up both times and the
+   * adapter may only be created once. */
+  bool AdapterCreated() const;
+
+  /* Reprograms the hardware after a sleep. A chip that has been through
+   * a USB suspend has lost its mode and will accept transfers while
+   * displaying nothing. */
+  void WakeHardware();
   NTSTATUS CommitModes(const IDARG_IN_COMMITMODES* args);
   NTSTATUS AssignSwapChain(const IDARG_IN_SETSWAPCHAIN* args);
   void UnassignSwapChain();
@@ -104,7 +114,9 @@ class IndirectDevice {
 
   /* Guards everything above and below that the watcher thread and the OS
    * callbacks both touch. */
-  std::mutex lock_;
+  /* Mutable because asking whether the adapter exists does not change
+   * anything observable, and that question is const. */
+  mutable std::mutex lock_;
 
   std::thread watcher_;
   HANDLE watcher_stop_ = nullptr;
