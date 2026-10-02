@@ -358,6 +358,30 @@ bool UsbLink::OpenWinUsb(const std::wstring& path, std::string* error) {
     winusb_ = winusb;
     bulk_pipe_ = pipe.PipeId;
     bulk_packet_size_ = pipe.MaximumPacketSize;
+
+    /* Start from a known state, whatever the last owner of this pipe left
+     * behind.
+     *
+     * The chip reads the bulk stream as a sequence of blocks: a header
+     * saying how many pixels follow, then the pixels, then a zero length
+     * packet. A driver that is killed partway through a frame, which is
+     * what happens on every reinstall and on any crash, leaves the chip
+     * waiting for the rest of a block that will never arrive. The next
+     * driver's first header is then consumed as the tail of that block
+     * and every frame after it is misread.
+     *
+     * That is invisible from everywhere else: control is HID on another
+     * interface entirely, so the registers all answer correctly, the
+     * output reports itself enabled, and every write succeeds. The panel
+     * just stays dark, and until this reset the only cure was to unplug
+     * the adapter.
+     *
+     * Reset clears the halt condition and the data toggle, and the zero
+     * length packet after it closes whatever block the chip still thinks
+     * is open. */
+    WinUsb_ResetPipe(winusb, bulk_pipe_);
+    ULONG written = 0;
+    WinUsb_WritePipe(winusb, bulk_pipe_, nullptr, 0, &written, nullptr);
     return true;
   }
 
@@ -449,10 +473,23 @@ bool UsbLink::StillPresent() const {
 }
 
 void UsbLink::Cancel() {
-  if (winusb_) {
-    WinUsb_AbortPipe(static_cast<WINUSB_INTERFACE_HANDLE>(winusb_),
-                     bulk_pipe_);
+  if (!winusb_) {
+    return;
   }
+  auto handle = static_cast<WINUSB_INTERFACE_HANDLE>(winusb_);
+
+  /* Abort, then reset, then close the block.
+   *
+   * Aborting alone stops the host sending and leaves the chip waiting for
+   * the rest of a block it has already started reading. The next driver
+   * to open this pipe then has its first frame header eaten as the tail
+   * of that block, and nothing it sends afterwards is ever interpreted
+   * correctly. Reset clears the endpoint and the zero length packet ends
+   * the block, so what is left behind is a chip ready for a new one. */
+  WinUsb_AbortPipe(handle, bulk_pipe_);
+  WinUsb_ResetPipe(handle, bulk_pipe_);
+  ULONG written = 0;
+  WinUsb_WritePipe(handle, bulk_pipe_, nullptr, 0, &written, nullptr);
 }
 
 std::unique_ptr<FileLink> FileLink::Open(const std::string& directory,
