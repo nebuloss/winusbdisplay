@@ -171,6 +171,10 @@ class Pipeline {
   int idle_band_rows_ = 128;
   unsigned long long last_send_ms_ = 0;
   unsigned long long last_display_check_ms_ = 0;
+  /* Consecutive dark readings, and how many times reprogramming has been
+   * tried. One sample is not enough to act on and acting for ever is
+   * worse than not acting; see CheckStillDisplaying. */
+  int dark_readings_ = 0;
 
   std::thread thread_;
   HANDLE terminate_event_ = nullptr;

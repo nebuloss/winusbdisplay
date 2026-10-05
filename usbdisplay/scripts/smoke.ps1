@@ -128,11 +128,15 @@ if (-not (Test-Path $log)) {
         Fail 'pointer format' 'emulated xor, which draws a black block'
     }
 
-    $dark = ($text | Select-String 'stopped displaying').Count
+    # The driver only records this now, it does not act on it. A report
+    # means the status register claimed the panel was dark, which it has
+    # done on a demonstrably healthy adapter, so it is worth an eye rather
+    # than a verdict.
+    $dark = ($text | Select-String 'not displaying').Count
     if ($dark -eq 0) {
-        Pass 'no self inflicted reprogramming' ''
+        Pass 'the adapter never reported itself dark' ''
     } else {
-        Warn 'no self inflicted reprogramming' "$dark recoveries, expected on a USB 3 part under load"
+        Warn 'the adapter reported itself dark' "$dark time(s), look at the panel"
     }
 
     $last = $text | Select-String 'sent=\d+' | Select-Object -Last 1
@@ -150,15 +154,20 @@ Write-Output ''
 Write-Output '== the panel'
 
 # Only the USB 3 parts can answer this; see DisplayingPicture.
+#
+# A warning rather than a failure when it says dark, because it has said
+# so on an adapter that was visibly working: thirty three seconds of clean
+# transfers, then a claim of darkness. The register is useful for spotting
+# the dark state and is not reliable enough to call a build broken.
 $health = & $tool health 2>&1 | Out-String
 if ($health -match 'display:\s+showing') {
     if ($chip -eq 'MS9132') {
-        Pass 'a picture is being transmitted' ''
+        Pass 'the adapter says it is transmitting' ''
     } else {
-        Warn 'a picture is being transmitted' 'this part cannot report it'
+        Warn 'the adapter says it is transmitting' 'this part cannot report it'
     }
 } elseif ($health -match 'display:\s+DARK') {
-    Fail 'a picture is being transmitted' 'the adapter says it is dark'
+    Warn 'the adapter says it is dark' 'look at the panel before believing it'
 }
 
 Write-Output ''

@@ -34,6 +34,14 @@ constexpr unsigned kBufferWaitMs = 36;
  * black beats black until somebody unplugs it. */
 constexpr unsigned long long kDisplayCheckMs = 3000;
 
+/* How long after a frame is handed over before the panel can fairly be
+ * asked whether it is showing anything. A full screen is 16 ms on the
+ * wire at best and the adapter completes on its own vsync boundary, so
+ * this is several frame times rather than one. */
+constexpr unsigned long long kSettleMs = 250;
+
+
+
 /* Smallest keepalive band worth sending, in rows. Only a floor: the real
  * height is worked out from the device, see ChooseIdleBandRows. */
 constexpr int kMinIdleBandRows = 8;
@@ -487,44 +495,67 @@ void Pipeline::ProcessFrame(const IDARG_OUT_RELEASEANDACQUIREBUFFER& buffer) {
   }
 }
 
-/* Notices that the panel has gone dark, and brings it back.
+/* Reports a dark panel, and deliberately does nothing about it.
  *
- * Nothing on the frame path can detect this. The adapter keeps
- * accepting transfers, keeps reporting its output enabled, and stops
- * displaying, so sent, dropped and failed all look perfect while the
- * screen is black. The only way to know is to ask the device, which is
- * what DisplayingPicture does.
+ * Reprogramming automatically was tried and withdrawn, and the reason is
+ * worth keeping because the idea is a tempting one.
  *
- * The cure is to reprogram it, which is measured rather than assumed:
- * a dark adapter with the driver running was revived by one frame from
- * the console tool, and the only thing that tool does differently is
- * power the chip on and set the mode before every frame.
+ * The adapter can genuinely stop displaying while accepting everything
+ * sent to it, and reprogramming genuinely cures that: a dark adapter was
+ * revived by one frame from the console tool, which differs from the
+ * driver only in setting the mode before every frame. So the fault is
+ * real and the cure works.
  *
- * Checked every few seconds rather than every frame: it is a control
- * exchange, the fault is rare, and a few seconds of black is a great
- * deal better than black until somebody unplugs it. */
+ * What is not reliable is the trigger. The register this reads has now
+ * misled three times: it reported a picture while the panel was black,
+ * which is how the keepalive came to be removed; it reads zero on the
+ * USB 2 parts whether or not anything is displayed; and it reported a
+ * dark panel on an adapter that had been running cleanly for thirty
+ * three seconds with no failed transfers at all. Acting on that third
+ * one reprogrammed a healthy chip, and because reprogramming drops the
+ * signal and interrupts whatever is in flight, the transfers that
+ * followed failed. The cure was causing the disease.
+ *
+ * So the state is logged and left alone. A dark panel that needs one
+ * replug is a far better outcome than a working panel that blinks
+ * whenever a status register is read at an unlucky moment.
+ *
+ * The real defence against the dark state is elsewhere and does not
+ * depend on guessing: the pixel pipe is reset when it is opened and when
+ * a transfer is cancelled, so an interrupted frame cannot leave the chip
+ * waiting for the rest of a block. That addresses the cause rather than
+ * the symptom. `usbdisplayctl health` remains for asking the question by
+ * hand, which is what the register is good for. */
 void Pipeline::CheckStillDisplaying(unsigned long long now) {
   if (now - last_display_check_ms_ < kDisplayCheckMs) {
     return;
   }
   last_display_check_ms_ = now;
 
-  /* Only once something has been sent. Before that there is nothing to
-   * display and a dark panel is correct. */
-  if (last_send_ms_ == 0 || device_->DisplayingPicture()) {
+  /* Nothing sent yet, so a dark panel is the correct state. */
+  if (last_send_ms_ == 0) {
     return;
   }
 
-  Log("pipeline: the panel has stopped displaying, reprogramming");
-  if (!device_->Revive()) {
-    Log("pipeline: reprogramming failed: %s", device_->error().c_str());
+  /* A transfer in flight, or one too recent to have arrived, means the
+   * question cannot be answered honestly. */
+  if (!sender_->Idle() || now - last_send_ms_ < kSettleMs) {
+    dark_readings_ = 0;
     return;
   }
 
-  /* Everything the panel held is gone, so nothing known about it is
-   * worth keeping. The next pass redraws from scratch. */
-  onscreen_valid_ = false;
-  damage_.MarkAll();
+  if (device_->DisplayingPicture()) {
+    dark_readings_ = 0;
+    return;
+  }
+
+  /* Said once, not every interval, so a genuinely dark panel leaves a
+   * record without filling the log. */
+  if (++dark_readings_ == 2) {
+    Log("pipeline: the adapter reports it is not displaying. If the panel "
+        "is dark, unplug and replug it; if it is not, this register has "
+        "lied again and should not be trusted");
+  }
 }
 
 void Pipeline::RefreshIdle() {
@@ -654,6 +685,15 @@ void Pipeline::Run() {
    * far behind on the acquire loop as hung. */
   SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
   Log("pipeline: running, mode %dx%d@%d", mode_.width, mode_.height, mode_.hz);
+
+  /* The dark check starts its clock here, not at zero.
+   *
+   * Left at zero the first poll is due immediately, which asks whether
+   * the panel is showing a picture before one has been sent. It is
+   * not, so the driver reprogrammed, which drops the signal, and did
+   * it again every interval: a blinking screen from the moment the
+   * machine booted. */
+  last_display_check_ms_ = GetTickCount64();
 
   /* Nothing on the panel can be trusted until the first full update lands. */
   onscreen_valid_ = false;

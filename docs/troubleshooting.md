@@ -562,3 +562,55 @@ remains is what `AGENT_PROMPT.md` recommended at the start: capture the
 vendor driver's USB traffic while small text redraws, and diff it against
 ours. Everything reachable by reasoning about the protocol has now been
 reached.
+
+## Withdrawn: reprogramming the adapter automatically when it looks dark
+
+Added, shipped in v0.2.0, and withdrawn after a reboot. Worth recording in
+full, because the feature is tempting and the reasoning behind it was
+sound as far as it went.
+
+The fault it addressed is real. The adapter can stop displaying while
+accepting everything sent to it, and reprogramming genuinely cures it: a
+dark adapter was revived by a single frame from the console tool, which
+differs from the driver only in setting the mode before every frame.
+
+What is not reliable is the trigger. After a cold boot the driver blinked
+continuously, and the log shows why:
+
+```
+09:58:41 .. 09:59:11   failed=0 throughout, thirty three seconds clean
+09:59:14   the panel has stopped displaying, reprogramming
+09:59:19   transfer of 4147216 bytes failed
+09:59:24   transfer of 4147216 bytes failed
+09:59:29   transfer of 496 bytes failed
+```
+
+The adapter was healthy. The register claimed otherwise, the driver
+reprogrammed a working chip, and because reprogramming drops the signal
+and interrupts whatever is in flight, every transfer after it failed. The
+cure was causing the disease, and each attempt was a visible blink.
+
+An earlier version was worse still: the check fired twenty one
+milliseconds after the pipeline started, before any frame could have
+reached the glass, and then every three seconds for ever.
+
+**That register has now misled four times.** It reported a picture while
+the panel was black, which is how the keepalive came to be removed; it
+reads zero on the USB 2 parts whatever is happening; it reported darkness
+on an adapter running cleanly; and it reports darkness now, while the
+panel shows a steady picture.
+
+So the driver logs the state and does nothing. A dark panel that needs one
+replug is a better outcome than a working panel that blinks whenever a
+status register is read at an unlucky moment.
+
+The real defence against the dark state is elsewhere and does not depend
+on guessing: the pixel pipe is reset when opened and when a transfer is
+cancelled, so an interrupted frame cannot leave the chip waiting for the
+rest of a block. That addresses the cause. `usbdisplayctl health` remains
+for asking the question by hand.
+
+**The wider lesson, for the third time in this project.** A register that
+correlates with a symptom is not a model of the hardware, and the more
+convenient it is the more carefully it has to be checked. Each time this
+one was trusted a little further it held, until it did not.
