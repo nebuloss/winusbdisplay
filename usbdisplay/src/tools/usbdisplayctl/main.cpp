@@ -521,6 +521,48 @@ int CmdPoke(int argc, char** argv) {
  *
  * The control plane is a separate USB interface from the pixel pipe, so
  * this works while the driver is running and holding that pipe. */
+/* Re-asserts the chip's video output, and nothing else.
+ *
+ * The cheapest possible cure for a panel that has gone dark, and the
+ * question is whether it is enough. A full reprogram certainly works and
+ * is expensive: it drops the signal, interrupts whatever is in flight,
+ * and is visible as a blink.
+ *
+ * This is one control command. It needs no bulk pipe, so unlike every
+ * other repair it can be done while the driver is running and driving,
+ * which is what would make it usable as an automatic recovery.
+ *
+ *   usbdisplayctl enable        turn the output on
+ *   usbdisplayctl enable --off  turn it off, to prove it does something
+ */
+int CmdEnableOutput(int argc, char** argv) {
+  const bool on = !HasFlag(argc, argv, "--off");
+
+  std::unique_ptr<MacroSiliconDevice> chip = OpenChip(false);
+  if (!chip) {
+    return 1;
+  }
+
+  uint8_t before[4] = {0, 0, 0, 0};
+  chip->Read(kRegDisplayLive, before, sizeof(before));
+
+  if (!chip->EnableOutput(on)) {
+    fprintf(stderr, "error: %s\n", chip->error().c_str());
+    return 1;
+  }
+  Sleep(500);
+
+  uint8_t after[4] = {0, 0, 0, 0};
+  chip->Read(kRegDisplayLive, after, sizeof(after));
+
+  printf("output %s: live register %02X %02X %02X %02X -> %02X %02X %02X %02X\n",
+         on ? "on" : "off", before[0], before[1], before[2], before[3],
+         after[0], after[1], after[2], after[3]);
+  printf("%s\n", after[2] == kDisplayLiveShowing ? "showing a picture"
+                                                 : "not displaying");
+  return 0;
+}
+
 int CmdHealth() {
   std::unique_ptr<MacroSiliconDevice> chip = OpenChip(false);
   if (!chip) {
@@ -975,6 +1017,9 @@ int main(int argc, char** argv) {
   }
   if (strcmp(command, "trigger") == 0) {
     return CmdTrigger(rest_count, rest);
+  }
+  if (strcmp(command, "enable") == 0) {
+    return CmdEnableOutput(rest_count, rest);
   }
   if (strcmp(command, "health") == 0) {
     return CmdHealth();

@@ -175,6 +175,8 @@ class Pipeline {
    * tried. One sample is not enough to act on and acting for ever is
    * worse than not acting; see CheckStillDisplaying. */
   int dark_readings_ = 0;
+  int revivals_ = 0;
+  unsigned long long last_revival_ms_ = 0;
 
   std::thread thread_;
   HANDLE terminate_event_ = nullptr;

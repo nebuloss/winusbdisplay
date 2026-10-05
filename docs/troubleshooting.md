@@ -614,3 +614,57 @@ for asking the question by hand.
 correlates with a symptom is not a model of the hardware, and the more
 convenient it is the more carefully it has to be checked. Each time this
 one was trusted a little further it held, until it did not.
+
+## The dark panel, properly understood
+
+Three sessions of confusion and several wrong fixes went into this, so
+here is what the measurements actually support.
+
+**The fault.** Under sustained transfer the pixel pipe occasionally times
+out. After that the adapter accepts every transfer, reports its output
+unmuted and the panel attached, and puts out no signal at all. It is
+intermittent: the same test can fail once and then run twenty seconds at
+59 frames a second.
+
+**The cure.** Power on, set the mode, then send a **full frame**. That is
+what `usbdisplayctl testpattern` does, which is why the tool never
+appeared to suffer from this and why using the tool to check the panel
+repaired it first. Enabling the video output alone does nothing, measured.
+
+**The thing that is easy to get wrong.** After a mode set the chip needs a
+full frame before it will display anything. Send a partial band instead and
+the pipe times out and the panel stays dark:
+
+| first transfer after a mode set | result |
+|---|---|
+| one full frame | works |
+| 128 row bands | pipe timeout, dark |
+
+The driver gets this right because the repaint after reprogramming is
+`MarkAll`, which makes the next update the whole screen. Anything that
+changes that ordering will reintroduce this.
+
+**The keepalive must not send whole screens.** Sizing it from the cost
+model gives the whole screen on the USB 3 parts, because there a transfer
+costs one slot whatever it carries. That is true about timing and false
+about everything else: a stream of full frames is the pattern the adapter
+will not tolerate. Driving the keepalive from the cost model therefore
+built the known failure into the one path that runs when nothing else is
+happening, which is why a still desktop went dark while a moving mouse
+kept it alive. It is capped at 128 rows, which is what both families used
+before anything was measured.
+
+**Revival has to be rationed, not merely correct.** Reprogramming drops
+the signal, so an attempt that does not take is itself a visible blink. At
+three second intervals, which shipped in v0.2.0, a panel that kept falling
+dark flickered permanently. Removing revival altogether, which shipped in
+v0.2.1, left it dark instead. Neither is acceptable. What works: two
+consecutive dark readings, nothing in flight, at most one attempt every
+thirty seconds, three attempts in total, then stop and say so.
+
+**What the register is worth.** It has been accused of lying four times in
+these notes and it was telling the truth every time. Each apparent lie was
+a measurement taken from an unknown starting state, or taken with the tool,
+which repairs the thing it is measuring. Given a known baseline it has
+agreed with the panel in every test. The lesson is about the measurements,
+not the register.

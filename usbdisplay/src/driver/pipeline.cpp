@@ -40,11 +40,32 @@ constexpr unsigned long long kDisplayCheckMs = 3000;
  * this is several frame times rather than one. */
 constexpr unsigned long long kSettleMs = 250;
 
+/* The shortest gap between two attempts to revive a dark panel.
+ *
+ * Reprogramming drops the signal, so an attempt that does not work is
+ * itself a blink. At three seconds, which is what shipped once, a
+ * panel that kept falling dark flickered continuously. Half a minute
+ * means the worst case is a blink nobody would call a flicker, and a
+ * genuine recovery still happens quickly because the first attempt is
+ * not delayed. */
+constexpr unsigned long long kRevivalGapMs = 30000;
+
+/* How many attempts before giving up and saying so. A panel that is
+ * dark for a reason reprogramming cannot fix should be left alone
+ * rather than flickered at for the rest of the session. */
+constexpr int kMaxRevivals = 3;
+
 
 
 /* Smallest keepalive band worth sending, in rows. Only a floor: the real
  * height is worked out from the device, see ChooseIdleBandRows. */
 constexpr int kMinIdleBandRows = 8;
+
+/* And the tallest. The value both families used before anything was
+ * measured, and the one that kept a panel lit for as long as anyone
+ * watched. Anything larger on the USB 3 parts is a stream of full
+ * frames, which they will not tolerate. */
+constexpr int kMaxIdleBandRows = 128;
 
 /* Upper bound on how many times any device can ask for a region to be sent.
  * Two today; the array is sized from this so the frame path allocates
@@ -78,32 +99,42 @@ Rect FromRECT(const RECT& rect) {
   return out;
 }
 
-/* The tallest keepalive band that still costs a single slot.
+/* How much to repaint when the desktop is still.
  *
- * This used to be 128 rows, which is about 490 KB at 1920 wide and just
- * inside one slot on the USB 2 parts. It was a fact about one chip written
- * into the device independent half of the driver, and on the USB 3 parts it
- * was badly wrong: there a transfer costs one slot whatever its size, so
- * nine bands cost nine slots where the whole screen would have cost one.
- * Measured, that is 122 ms a pass against 14.6 ms, and it looks like the
- * picture being redrawn in visible stripes.
+ * The purpose is to put traffic on the wire, because the panel drops its
+ * signal when the wire goes quiet. It is not to repaint anything: the
+ * picture is already correct, and the band walks down the screen only so
+ * that a region which somehow went stale is eventually refreshed.
  *
- * Asking the device how much a band costs gets the right answer for both
- * without the pipeline knowing anything about either: the USB 2 parts land
- * back on about 134 rows, the USB 3 parts on the whole screen.
+ * It is capped, and the cap is the whole point. Sizing this by what a
+ * transfer costs gives the whole screen on the USB 3 parts, because there
+ * a transfer costs one slot whatever it carries. That reasoning is sound
+ * about timing and wrong about everything else: a stream of full frames
+ * is the one traffic pattern this adapter will not tolerate, measured
+ * twice, and it stops putting out a signal within seconds. Driving the
+ * keepalive from the cost model therefore built the known failure into
+ * the one path that runs when nothing else is happening, which is why a
+ * still desktop went dark while a moving mouse kept it alive.
  *
- * Binary search because cost rises with height but in steps, so the largest
- * height at a given cost cannot be calculated directly. */
+ * So: as tall as a single slot allows, and never more than the cap. On
+ * the USB 2 parts that lands on about 134 rows, which is what they always
+ * used. On the USB 3 parts it is the cap, which is a fortieth of the
+ * traffic a full screen costs and keeps the signal up.
+ *
+ * Binary search because cost rises with height but in steps, so the
+ * largest height at a given cost cannot be calculated directly. */
 int ChooseIdleBandRows(const DisplayDevice* device, int width, int height) {
+  const int cap = height < kMaxIdleBandRows ? height : kMaxIdleBandRows;
+
   Rect whole;
   whole.x2 = width;
-  whole.y2 = height;
+  whole.y2 = cap;
   if (device->TransferCost(whole) <= 1) {
-    return height;
+    return cap;
   }
 
   int low = kMinIdleBandRows;
-  int high = height;
+  int high = cap;
   while (low < high) {
     const int middle = low + (high - low + 1) / 2;
     Rect band;
@@ -495,37 +526,39 @@ void Pipeline::ProcessFrame(const IDARG_OUT_RELEASEANDACQUIREBUFFER& buffer) {
   }
 }
 
-/* Reports a dark panel, and deliberately does nothing about it.
+/* Brings the panel back when the adapter has stopped displaying.
  *
- * Reprogramming automatically was tried and withdrawn, and the reason is
- * worth keeping because the idea is a tempting one.
+ * The fault is real and intermittent. Under sustained transfer the pixel
+ * pipe occasionally times out, and after that the adapter accepts
+ * everything sent to it and puts out no signal at all. Measured many
+ * times, in both directions: the register read here reports it
+ * accurately whenever the starting state was known, and the cure is to
+ * power the chip on, set the mode, and send a full frame, which is
+ * exactly what the console tool does before every frame and why the tool
+ * has never appeared to suffer from this.
  *
- * The adapter can genuinely stop displaying while accepting everything
- * sent to it, and reprogramming genuinely cures that: a dark adapter was
- * revived by one frame from the console tool, which differs from the
- * driver only in setting the mode before every frame. So the fault is
- * real and the cure works.
+ * The hard part is not detecting it, it is not making things worse.
+ * Reprogramming drops the signal, so a revival that does not take is
+ * itself a visible blink. An earlier version checked every three seconds
+ * and reprogrammed every time the answer was no, which on a panel that
+ * kept falling dark again produced a permanent flicker. That was shipped,
+ * and withdrawing it left a panel that stayed dark instead. Neither is
+ * acceptable.
  *
- * What is not reliable is the trigger. The register this reads has now
- * misled three times: it reported a picture while the panel was black,
- * which is how the keepalive came to be removed; it reads zero on the
- * USB 2 parts whether or not anything is displayed; and it reported a
- * dark panel on an adapter that had been running cleanly for thirty
- * three seconds with no failed transfers at all. Acting on that third
- * one reprogrammed a healthy chip, and because reprogramming drops the
- * signal and interrupts whatever is in flight, the transfers that
- * followed failed. The cure was causing the disease.
+ * So the attempt is rationed rather than removed:
  *
- * So the state is logged and left alone. A dark panel that needs one
- * replug is a far better outcome than a working panel that blinks
- * whenever a status register is read at an unlucky moment.
+ *   - the register must say dark twice running, since one sample has
+ *     been wrong before,
+ *   - nothing may be in flight and the last frame must have had time to
+ *     arrive, or the question cannot be answered honestly,
+ *   - attempts are at least kRevivalGapMs apart, so the worst case is a
+ *     blink every half minute rather than every three seconds,
+ *   - and after kMaxRevivals the driver stops trying and says so, because
+ *     a panel that is dark for a reason this cannot fix should be left
+ *     alone rather than flickered at indefinitely.
  *
- * The real defence against the dark state is elsewhere and does not
- * depend on guessing: the pixel pipe is reset when it is opened and when
- * a transfer is cancelled, so an interrupted frame cannot leave the chip
- * waiting for the rest of a block. That addresses the cause rather than
- * the symptom. `usbdisplayctl health` remains for asking the question by
- * hand, which is what the register is good for. */
+ * A successful spell of displaying resets the count, so an adapter that
+ * recovers and later falls over again gets the same allowance afresh. */
 void Pipeline::CheckStillDisplaying(unsigned long long now) {
   if (now - last_display_check_ms_ < kDisplayCheckMs) {
     return;
@@ -546,16 +579,47 @@ void Pipeline::CheckStillDisplaying(unsigned long long now) {
 
   if (device_->DisplayingPicture()) {
     dark_readings_ = 0;
+    /* Displaying again, so whatever went wrong is over and the next
+     * failure deserves the full allowance. */
+    revivals_ = 0;
     return;
   }
 
-  /* Said once, not every interval, so a genuinely dark panel leaves a
-   * record without filling the log. */
-  if (++dark_readings_ == 2) {
-    Log("pipeline: the adapter reports it is not displaying. If the panel "
-        "is dark, unplug and replug it; if it is not, this register has "
-        "lied again and should not be trusted");
+  if (++dark_readings_ < 2) {
+    return;
   }
+
+  if (revivals_ >= kMaxRevivals) {
+    if (revivals_ == kMaxRevivals) {
+      ++revivals_;
+      Log("pipeline: the panel is dark and reprogramming has not helped "
+          "after %d attempts, leaving it alone. Unplug and replug the "
+          "adapter.", kMaxRevivals);
+    }
+    return;
+  }
+
+  if (last_revival_ms_ != 0 && now - last_revival_ms_ < kRevivalGapMs) {
+    return;
+  }
+
+  dark_readings_ = 0;
+  last_revival_ms_ = now;
+  ++revivals_;
+
+  Log("pipeline: the panel is dark, reprogramming (attempt %d of %d)",
+      revivals_, kMaxRevivals);
+  if (!device_->Revive()) {
+    Log("pipeline: reprogramming failed: %s", device_->error().c_str());
+    return;
+  }
+
+  /* Everything the panel held is gone, and the chip needs a full frame
+   * before it will show anything: a partial band straight after a mode
+   * set leaves it dark and times out the pipe. MarkAll is what makes the
+   * next update the whole screen. */
+  onscreen_valid_ = false;
+  damage_.MarkAll();
 }
 
 void Pipeline::RefreshIdle() {
