@@ -425,6 +425,51 @@ try {
 }
 
 Write-Host ''
+Write-Host '=== 5. keeping it working after a reboot ==='
+# Windows fails to load this driver during boot, every time. The device is
+# root enumerated, so Plug and Play starts it during early boot device
+# enumeration, before the user mode driver framework is running, and a user
+# mode driver cannot load that early: the reflector fails with
+# STATUS_FAILED_DRIVER_ENTRY (0xC0000365) and Plug and Play does not retry.
+# The monitor then stays black for the whole session.
+#
+# This is also why reinstalling always appeared to fix it, which misled this
+# project for a long time. Reinstalling re-enumerates the device, and by then
+# the framework is up.
+#
+# So a scheduled task re-enumerates it shortly after startup, as SYSTEM.
+# Both triggers are wanted: logon for the normal case, and boot with a delay
+# so a machine sitting at the logon screen still drives the panel.
+$taskName = 'usbdisplay repair after startup'
+$repairScript = Join-Path $PSScriptRoot 'repair.ps1'
+if (Test-Path $repairScript) {
+    try {
+        $action = New-ScheduledTaskAction -Execute 'powershell.exe' `
+            -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$repairScript`""
+        $atLogon = New-ScheduledTaskTrigger -AtLogOn
+        $atLogon.Delay = 'PT15S'
+        $atBoot = New-ScheduledTaskTrigger -AtStartup
+        $atBoot.Delay = 'PT1M'
+        $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' `
+            -LogonType ServiceAccount -RunLevel Highest
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
+            -DontStopIfGoingOnBatteries -StartWhenAvailable `
+            -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
+        Register-ScheduledTask -TaskName $taskName -Action $action `
+            -Trigger $atLogon, $atBoot -Principal $principal `
+            -Settings $settings -Force | Out-Null
+        Write-Host '    the display will be restarted automatically after startup'
+    } catch {
+        Write-Host '    WARNING: could not register the startup task'
+        Write-Host "    $($_.Exception.Message)"
+        Write-Host '    The monitor may be black after a reboot until you run'
+        Write-Host "    $repairScript"
+    }
+} else {
+    Write-Host "    WARNING: $repairScript is missing, startup repair not set up"
+}
+
+Write-Host ''
 Write-Host '=== result ==='
 Get-PnpDevice | Where-Object {
     $_.InstanceId -match 'usbdisplaydd' -or $_.InstanceId -match 'VID_345F.*MI_03' -or

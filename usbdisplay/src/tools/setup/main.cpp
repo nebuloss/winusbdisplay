@@ -66,6 +66,10 @@ std::wstring g_here;
 const wchar_t kHardwareId[] = L"root\\usbdisplaydd";
 const wchar_t kSettingsKey[] = L"SOFTWARE\\usbdisplay";
 
+/* The scheduled task that works around Windows refusing to load this
+ * driver at boot. See InstallBootRepair. */
+const wchar_t kBootTaskName[] = L"usbdisplay repair after startup";
+
 /* Names this project has used. An upgrade has to recognise its own past. */
 const wchar_t* kFormerHardwareIds[] = {
     L"root\\usbdisplaydd", L"root\\usbhdmidd", L"root\\ms912xidd",
@@ -113,6 +117,35 @@ std::wstring Combine(const std::wstring& directory, const wchar_t* name) {
 
 bool Exists(const std::wstring& path) {
   return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
+}
+
+/* Runs a command with no console window and waits for it.
+ *
+ * Used for schtasks. No window because this program may itself be running
+ * from a scheduled task or a silent install, and a console flashing up
+ * during logon would be noticed and resented. */
+bool RunQuietly(const std::wstring& command) {
+  std::vector<wchar_t> mutable_command(command.begin(), command.end());
+  mutable_command.push_back(L'\0');
+
+  STARTUPINFOW startup = {};
+  startup.cb = sizeof(startup);
+  startup.dwFlags = STARTF_USESHOWWINDOW;
+  startup.wShowWindow = SW_HIDE;
+  PROCESS_INFORMATION process = {};
+
+  if (!CreateProcessW(nullptr, mutable_command.data(), nullptr, nullptr, FALSE,
+                      CREATE_NO_WINDOW, nullptr, nullptr, &startup,
+                      &process)) {
+    return false;
+  }
+
+  WaitForSingleObject(process.hProcess, 60000);
+  DWORD code = 1;
+  GetExitCodeProcess(process.hProcess, &code);
+  CloseHandle(process.hThread);
+  CloseHandle(process.hProcess);
+  return code == 0;
 }
 
 /* Human readable form of a Windows error, because a bare number tells the
@@ -247,6 +280,212 @@ bool RetireDevice(const std::wstring& instance) {
 
   SetupDiDestroyDeviceInfoList(set);
   return ok;
+}
+
+/* Restarts our display device, which is the whole of the cold boot fix.
+ *
+ * Windows fails to load this driver during boot, every single time, and
+ * the reason is structural rather than a bug here. The device is root
+ * enumerated, so it has no parent hardware whose arrival could start it
+ * later; Plug and Play therefore starts it during early boot device
+ * enumeration, before the user mode driver framework is running. A user
+ * mode driver cannot load that early, so the reflector fails with
+ * STATUS_FAILED_DRIVER_ENTRY, and Plug and Play does not retry. The
+ * device sits in error for the rest of the session and the user has no
+ * second monitor.
+ *
+ * Measured, six boots out of six, one to two seconds after each:
+ *
+ *     Driver \Driver\WUDFRd failed to load for the device
+ *     ROOT\DISPLAY\0000.  Status: 0xC0000365
+ *
+ * It is also why every reinstall appeared to cure the problem, which
+ * misled this project for a long time: reinstalling re-enumerates the
+ * device, and by then the framework is up.
+ *
+ * So that is all this does, at a point in the session when it works. No
+ * reboot, nothing to configure, and the same operation the user was
+ * otherwise performing by hand. */
+bool RestartDisplayDevice(const std::wstring& instance) {
+  HDEVINFO set = SetupDiCreateDeviceInfoList(nullptr, nullptr);
+  if (set == INVALID_HANDLE_VALUE) {
+    return false;
+  }
+
+  SP_DEVINFO_DATA info = {};
+  info.cbSize = sizeof(info);
+  bool ok = false;
+
+  if (SetupDiOpenDeviceInfoW(set, instance.c_str(), nullptr, 0, &info)) {
+    SP_PROPCHANGE_PARAMS change = {};
+    change.ClassInstallHeader.cbSize = sizeof(change.ClassInstallHeader);
+    change.ClassInstallHeader.InstallFunction = DIF_PROPERTYCHANGE;
+    change.Scope = DICS_FLAG_GLOBAL;
+
+    /* Disable and enable rather than DICS_PROPCHANGE, because a device
+     * that failed to start is not running and has nothing to restart;
+     * the pair makes Plug and Play tear it down and build it again.
+     *
+     * Disable first and let it settle, never remove: a live display
+     * device removed with its monitor still in the desktop bug checked a
+     * machine during development. See RetireDevice. */
+    change.StateChange = DICS_DISABLE;
+    if (SetupDiSetClassInstallParamsW(set, &info, &change.ClassInstallHeader,
+                                      sizeof(change))) {
+      SetupDiCallClassInstaller(DIF_PROPERTYCHANGE, set, &info);
+    }
+    Sleep(2000);
+
+    change.StateChange = DICS_ENABLE;
+    if (SetupDiSetClassInstallParamsW(set, &info, &change.ClassInstallHeader,
+                                      sizeof(change))) {
+      ok = SetupDiCallClassInstaller(DIF_PROPERTYCHANGE, set, &info) != FALSE;
+    }
+    Sleep(2000);
+  }
+
+  SetupDiDestroyDeviceInfoList(set);
+  return ok;
+}
+
+/* The repair itself, as run at every logon by the scheduled task below and
+ * available by hand as `driversetup /repair`. */
+int Repair() {
+  const std::vector<DeviceNode> devices = FindOurDevices();
+  if (devices.empty()) {
+    Say(L"No display device is installed, so there is nothing to repair.\n");
+    return 1;
+  }
+
+  int repaired = 0;
+  for (const DeviceNode& device : devices) {
+    Say(L"restarting %s\n", device.instance.c_str());
+    if (RestartDisplayDevice(device.instance)) {
+      ++repaired;
+    }
+  }
+
+  if (repaired == 0) {
+    Say(L"The display device would not restart.\n");
+    return 1;
+  }
+  Say(L"Done. The monitor should appear within a few seconds.\n");
+  return 0;
+}
+
+/* Arranges for the repair above to run after every boot.
+ *
+ * A scheduled task rather than a service, because a service is a great
+ * deal of machinery for one call made once per session, and rather than a
+ * startup shortcut, because this needs the administrative rights that
+ * changing a device's state requires and must not prompt the user.
+ *
+ * Two triggers, and both are wanted. The logon trigger covers the normal
+ * case. The boot trigger with a delay covers a machine that is left at the
+ * logon screen, where the monitor should still work; a minute is long
+ * enough for the framework to be up and is not noticeable, since the user
+ * is waiting for Windows itself at that point anyway.
+ *
+ * Registered through schtasks with an XML definition. The command line
+ * form of schtasks cannot express a delayed boot trigger, and the COM
+ * interface is a great deal of code for something the XML says in a line.
+ */
+bool InstallBootRepair(const std::wstring& self) {
+  wchar_t temp_dir[MAX_PATH] = {};
+  if (!GetTempPathW(MAX_PATH, temp_dir)) {
+    return false;
+  }
+  const std::wstring xml_path = std::wstring(temp_dir) + L"usbdisplaytask.xml";
+
+  std::wstring xml =
+      L"<?xml version=\"1.0\" encoding=\"UTF-16\"?>\r\n"
+      L"<Task version=\"1.2\" "
+      L"xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\r\n"
+      L"  <RegistrationInfo>\r\n"
+      L"    <Description>Restarts the USB display device after startup. "
+      L"Windows cannot load a user mode display driver during boot, so "
+      L"without this the monitor stays black until the device is "
+      L"re-enumerated by hand.</Description>\r\n"
+      L"  </RegistrationInfo>\r\n"
+      L"  <Triggers>\r\n"
+      L"    <LogonTrigger>\r\n"
+      L"      <Enabled>true</Enabled>\r\n"
+      L"      <Delay>PT15S</Delay>\r\n"
+      L"    </LogonTrigger>\r\n"
+      L"    <BootTrigger>\r\n"
+      L"      <Enabled>true</Enabled>\r\n"
+      L"      <Delay>PT1M</Delay>\r\n"
+      L"    </BootTrigger>\r\n"
+      L"  </Triggers>\r\n"
+      L"  <Principals>\r\n"
+      L"    <Principal id=\"Author\">\r\n"
+      L"      <UserId>S-1-5-18</UserId>\r\n"
+      L"      <RunLevel>HighestAvailable</RunLevel>\r\n"
+      L"    </Principal>\r\n"
+      L"  </Principals>\r\n"
+      L"  <Settings>\r\n"
+      L"    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>\r\n"
+      L"    <DisallowStartIfOnBatteries>false"
+      L"</DisallowStartIfOnBatteries>\r\n"
+      L"    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>\r\n"
+      L"    <AllowHardTerminate>true</AllowHardTerminate>\r\n"
+      L"    <StartWhenAvailable>true</StartWhenAvailable>\r\n"
+      L"    <RunOnlyIfNetworkAvailable>false"
+      L"</RunOnlyIfNetworkAvailable>\r\n"
+      L"    <IdleSettings>\r\n"
+      L"      <StopOnIdleEnd>false</StopOnIdleEnd>\r\n"
+      L"      <RestartOnIdle>false</RestartOnIdle>\r\n"
+      L"    </IdleSettings>\r\n"
+      L"    <AllowStartOnDemand>true</AllowStartOnDemand>\r\n"
+      L"    <Enabled>true</Enabled>\r\n"
+      L"    <Hidden>false</Hidden>\r\n"
+      L"    <RunOnlyIfIdle>false</RunOnlyIfIdle>\r\n"
+      L"    <WakeToRun>false</WakeToRun>\r\n"
+      L"    <ExecutionTimeLimit>PT5M</ExecutionTimeLimit>\r\n"
+      L"    <Priority>7</Priority>\r\n"
+      L"  </Settings>\r\n"
+      L"  <Actions Context=\"Author\">\r\n"
+      L"    <Exec>\r\n"
+      L"      <Command>\"";
+  xml += self;
+  xml +=
+      L"\"</Command>\r\n"
+      L"      <Arguments>/repair /quiet</Arguments>\r\n"
+      L"    </Exec>\r\n"
+      L"  </Actions>\r\n"
+      L"</Task>\r\n";
+
+  /* UTF-16 with a byte order mark, which is what the schema declares and
+   * what schtasks refuses the file without. */
+  HANDLE file = CreateFileW(xml_path.c_str(), GENERIC_WRITE, 0, nullptr,
+                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (file == INVALID_HANDLE_VALUE) {
+    return false;
+  }
+  const wchar_t bom = 0xFEFF;
+  DWORD written = 0;
+  WriteFile(file, &bom, sizeof(bom), &written, nullptr);
+  WriteFile(file, xml.data(),
+            static_cast<DWORD>(xml.size() * sizeof(wchar_t)), &written,
+            nullptr);
+  CloseHandle(file);
+
+  std::wstring command = L"schtasks.exe /Create /F /TN \"";
+  command += kBootTaskName;
+  command += L"\" /XML \"";
+  command += xml_path;
+  command += L"\"";
+
+  const bool ok = RunQuietly(command);
+  DeleteFileW(xml_path.c_str());
+  return ok;
+}
+
+void RemoveBootRepair() {
+  std::wstring command = L"schtasks.exe /Delete /F /TN \"";
+  command += kBootTaskName;
+  command += L"\"";
+  RunQuietly(command);
 }
 
 /* Creates the device node the driver attaches to. */
@@ -668,7 +907,20 @@ int Install() {
   }
   Say(L"    display device created\n");
 
-  Say(L"\n  5. brightness\n");
+  Say(L"\n  5. keeping it working after a reboot\n");
+  {
+    wchar_t self[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, self, MAX_PATH);
+    if (InstallBootRepair(self)) {
+      Say(L"    the display will be restarted automatically after startup\n");
+    } else {
+      Say(L"    could not register the startup task, so the monitor may be\n"
+          L"    black after a reboot until you run this program again or\n"
+          L"    run: driversetup /repair\n");
+    }
+  }
+
+  Say(L"\n  6. brightness\n");
   if (AllowUsersToSetBrightness()) {
     Say(L"    anyone may now adjust it without administrator rights\n");
   } else {
@@ -676,7 +928,7 @@ int Install() {
         L"    fall back to a lower quality method\n");
   }
 
-  Say(L"\n  6. the brightness control\n");
+  Say(L"\n  7. the brightness control\n");
   /* Stopping a copy that is already running, because the installer around
    * this is about to replace its file and Windows will not overwrite a
    * program that is in memory. */
@@ -700,7 +952,11 @@ int Install() {
 int Uninstall() {
   Say(L"Removing the USB display driver\n\n");
 
-  Say(L"  1. the display device\n");
+  Say(L"  1. the startup repair task\n");
+  RemoveBootRepair();
+  Say(L"    removed\n");
+
+  Say(L"\n  2. the display device\n");
   const std::vector<DeviceNode> devices = FindOurDevices();
   if (devices.empty()) {
     Say(L"    none was installed\n");
@@ -710,10 +966,10 @@ int Uninstall() {
     RetireDevice(device.instance);
   }
 
-  Say(L"\n  2. the driver packages\n");
+  Say(L"\n  3. the driver packages\n");
   RemoveOldPackages();
 
-  Say(L"\n  3. the brightness control\n");
+  Say(L"\n  4. the brightness control\n");
   {
     /* Stopped before the installer around this deletes its file, or the
      * copy in memory keeps running until the next restart and the file
@@ -726,7 +982,7 @@ int Uninstall() {
     Say(L"    stopped\n");
   }
 
-  Say(L"\n  4. settings and trust\n");
+  Say(L"\n  5. settings and trust\n");
   RegDeleteTreeW(HKEY_LOCAL_MACHINE, kSettingsKey);
   ForgetReleaseCertificate();
   Say(L"    removed the picture settings and the release certificate\n");
@@ -747,23 +1003,34 @@ int wmain(int argc, wchar_t** argv) {
   g_here = (slash == std::wstring::npos) ? L"." : g_here.substr(0, slash);
 
   bool uninstall = false;
+  bool repair = false;
   bool wait = true;
   for (int i = 1; i < argc; ++i) {
     if (_wcsicmp(argv[i], L"/uninstall") == 0 ||
         _wcsicmp(argv[i], L"-uninstall") == 0) {
       uninstall = true;
+    } else if (_wcsicmp(argv[i], L"/repair") == 0 ||
+               _wcsicmp(argv[i], L"-repair") == 0) {
+      repair = true;
     } else if (_wcsicmp(argv[i], L"/quiet") == 0) {
       g_quiet = true;
       wait = false;
     } else if (_wcsicmp(argv[i], L"/nowait") == 0) {
       wait = false;
     } else {
-      wprintf(L"usage: %s [/uninstall] [/quiet]\n", argv[0]);
+      wprintf(L"usage: %s [/uninstall | /repair] [/quiet]\n", argv[0]);
       return 1;
     }
   }
 
-  const int result = uninstall ? Uninstall() : Install();
+  int result;
+  if (uninstall) {
+    result = Uninstall();
+  } else if (repair) {
+    result = Repair();
+  } else {
+    result = Install();
+  }
 
   /* Double-clicked, the window would otherwise close before anything could
    * be read. */

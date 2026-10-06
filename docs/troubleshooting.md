@@ -730,13 +730,49 @@ have already wasted a session:
   one look alike. `DriverEntry` now records the date and the machine's
   uptime, so "2 s after this machine started" is unambiguous.
 
-Known candidate remedies, none yet implemented or measured:
+**This is fixed.** `install.ps1` and `driversetup.exe` both register a
+scheduled task, `usbdisplay repair after startup`, which re-enumerates the
+device as SYSTEM once the framework is up. Two triggers: at logon with a
+15 second delay for the normal case, and at boot with a one minute delay so
+a machine left sitting at the logon screen still drives the panel.
 
-1. Re-enumerate the device after logon, when the framework is up, from a
-   scheduled task or a small service. Reliable, and the display appears a
-   few seconds into the session rather than at the logon screen.
-2. Create the device node at logon instead of installing it permanently, so
-   it is never present during boot enumeration.
+The repair itself is `usbdisplay/scripts/repair.ps1` for a source build and
+`driversetup /repair` for a release. Either is safe to run by hand at any
+time; restarting a working display costs about four seconds of black
+screen. It appends to `%TEMP%\usbdisplay-repair.log`.
 
-Neither has been tried. Whichever is chosen, the test is a real cold boot,
-because nothing short of one reproduces the fault.
+Verified end to end on the machine rather than reasoned about:
+
+```
+state    : Ready
+runas    : SYSTEM  level=Highest
+trigger  : MSFT_TaskLogonTrigger  delay=PT15S
+trigger  : MSFT_TaskBootTrigger   delay=PT1M
+result   : 0x0
+
+2026-10-06 10:51:59  repair starting, 5456 s after this machine booted
+2026-10-06 10:52:00  found ROOT\DISPLAY\0000, status OK
+2026-10-06 10:52:07  restarted ROOT\DISPLAY\0000, status now OK
+```
+
+and the driver's own log confirms it reloaded and lit the panel:
+
+```
+10:52:03  DriverEntry on 2026-10-06, 5460 s after this machine started
+10:52:04  pipeline: full frame 1: 1920x1080, 4147216 bytes
+```
+
+It restarts the device rather than removing and recreating it, because a
+live display device removed with its monitor still in the desktop bug
+checked a machine during development. Disable, settle, enable.
+
+The alternative considered and not taken was to create the device node at
+logon instead of installing it permanently, so that it is never present
+during boot enumeration. Tidier in principle and a great deal more code:
+the node must be owned by a running process for its whole lifetime, which
+means a service, and the failure mode when that service is late is the very
+one being fixed here. A restart after the fact is a few lines and testable.
+
+**The remaining cost is that the monitor appears a few seconds into the
+session rather than at the logon screen.** Windows will not load a user
+mode driver earlier than that, so it is a floor rather than an oversight.
