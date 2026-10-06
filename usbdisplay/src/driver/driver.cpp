@@ -357,7 +357,18 @@ extern "C" DRIVER_INITIALIZE DriverEntry;
 extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT driver_object,
                                 PUNICODE_STRING registry_path) {
   LogReset();
-  Log("DriverEntry");
+  /* The date, and how long the machine has been up.
+   *
+   * Every other line carries a time but no date, which is useless for the
+   * one question that matters about a bad session: was this the boot, or a
+   * later restart? Uptime answers it outright. A driver that started a
+   * couple of seconds after boot and a driver started by hand half an hour
+   * later look identical otherwise, and that ambiguity sent a whole
+   * debugging session after the wrong fault. */
+  SYSTEMTIME today;
+  GetLocalTime(&today);
+  Log("DriverEntry on %04u-%02u-%02u, %llu s after this machine started",
+      today.wYear, today.wMonth, today.wDay, GetTickCount64() / 1000);
 
   WDF_DRIVER_CONFIG config;
   WDF_DRIVER_CONFIG_INIT(&config, EvtDriverDeviceAdd);

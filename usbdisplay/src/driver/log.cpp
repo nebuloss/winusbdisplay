@@ -60,12 +60,29 @@ void Write(const char* text) {
 
 }  // namespace
 
+/* Keeps the previous session's log, and starts a fresh one.
+ *
+ * The previous copy matters more than it looks. This runs on every driver
+ * load, so without it the record of the last session is destroyed by the
+ * next one, and the sessions worth reading are exactly the ones followed
+ * by a restart: a driver that failed at boot leaves evidence that the
+ * first reinstall afterwards erases. That cost a whole debugging session,
+ * during which the boot fault was invisible because the only log on disk
+ * described a later, healthy run.
+ *
+ * One generation is enough. The fault is always in the run immediately
+ * before the restart. */
 void LogReset() {
   std::lock_guard<std::mutex> lock(g_mutex);
   const std::string& path = LogPath();
   if (path.empty()) {
     return;
   }
+
+  const std::string previous = path + ".prev";
+  DeleteFileA(previous.c_str());
+  MoveFileA(path.c_str(), previous.c_str());
+
   HANDLE file = CreateFileA(path.c_str(), GENERIC_WRITE,
                             FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                             CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);

@@ -668,3 +668,75 @@ a measurement taken from an unknown starting state, or taken with the tool,
 which repairs the thing it is measuring. Given a known baseline it has
 agreed with the panel in every test. The lesson is about the measurements,
 not the register.
+
+## No display after a cold boot, working after a reinstall
+
+**Settled, with a measurement. This is a Windows driver load failure, not
+anything the driver does, and the driver's own log cannot show it because
+the driver never runs.**
+
+The symptom is the one a user actually reports: power the laptop on in the
+morning, no second monitor. Reinstalling or re-enumerating the device fixes
+it until the next boot.
+
+Look in the Windows event log, not in `usbdisplaydd.log`:
+
+```powershell
+Get-WinEvent -FilterHashtable @{ LogName = 'System'; Id = 219 } |
+    Where-Object { $_.Message -match 'ROOT\\DISPLAY' } |
+    Select-Object TimeCreated, Message
+```
+
+What comes back, one to two seconds after every boot:
+
+```
+Driver \Driver\WUDFRd failed to load for the device ROOT\DISPLAY\0000.
+Status: 0xC0000365
+```
+
+`0xC0000365` is `STATUS_FAILED_DRIVER_ENTRY`. `WUDFRd` is Microsoft's
+user-mode driver reflector, the kernel side of the host process this driver
+runs in. It failed, so the host never started, so `DriverEntry` never ran.
+
+It is not intermittent. Every boot since the device node was created, with
+no exceptions:
+
+| boot | failure |
+|---|---|
+| 28/09 16:17:34 | 16:17:36 |
+| 29/09 09:39:15 | 09:39:16 |
+| 01/10 09:14:20 | 09:14:21 |
+| 02/10 09:34:22 | 09:34:23 |
+| 05/10 09:48:15 | 09:48:16 |
+| 06/10 09:21:04 | 09:21:05 |
+
+Why: this is a **root enumerated** device, so Windows starts it during boot
+device enumeration, which is before the user-mode driver framework is
+usable. A user-mode driver cannot run that early. Windows does not retry a
+failed driver load, so the device sits in error until something
+re-enumerates it, which is exactly why every reinstall appears to fix it.
+
+Being root enumerated is not a choice that can simply be reversed; see
+`AGENTS.md`, where binding to the USB interface instead is ruled out by the
+display stack's required upper filter.
+
+**Do not go looking for this in the driver log.** Two traps, both of which
+have already wasted a session:
+
+- The driver truncated its log on every load, so the first reinstall after
+  a bad boot destroyed the evidence. It now keeps one generation as
+  `usbdisplaydd.log.prev`. **Read that file when diagnosing a boot fault.**
+- Log lines carry a time but no date, so a boot session and a hand started
+  one look alike. `DriverEntry` now records the date and the machine's
+  uptime, so "2 s after this machine started" is unambiguous.
+
+Known candidate remedies, none yet implemented or measured:
+
+1. Re-enumerate the device after logon, when the framework is up, from a
+   scheduled task or a small service. Reliable, and the display appears a
+   few seconds into the session rather than at the logon screen.
+2. Create the device node at logon instead of installing it permanently, so
+   it is never present during boot enumeration.
+
+Neither has been tried. Whichever is chosen, the test is a real cold boot,
+because nothing short of one reproduces the fault.
