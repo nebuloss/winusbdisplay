@@ -416,17 +416,29 @@ bool Pipeline::SubmitConverted(const Rect& region, const Rect& sub) {
     bytes_sent_ += length;
   }
 
-  /* The first few partial updates, with their geometry.
+  /* The first few updates, with their geometry.
    *
-   * Full-screen transfers are skipped: they are the keepalive, there is one
-   * every half second, and they would bury the interesting ones. What is
-   * wanted here is what a moving pointer or a blinking caret actually
-   * produces, which is otherwise invisible. The counters say transfers
-   * succeeded, not what was in them, and the chip will accept a transfer
-   * describing the wrong rectangle without complaint. */
+   * The counters say transfers succeeded, not what was in them, and the
+   * chip will accept a transfer describing the wrong rectangle without
+   * complaint, so the geometry is the only way to see what it was
+   * actually told.
+   *
+   * Whole frames and smaller updates are counted separately, and both are
+   * capped, because they answer different questions and one would
+   * otherwise hide the other. A full frame every half second buries the
+   * small updates a moving pointer produces; equally, whole frames used
+   * to be left out of the log altogether, and that cost an afternoon:
+   * their absence was read as the chip never having been sent one, when
+   * in truth it was never recorded either way. */
   const bool whole_screen = sub.x1 == 0 && sub.y1 == 0 &&
                             sub.x2 >= mode_.width && sub.y2 >= mode_.height;
-  if (!whole_screen && regions_logged_ < 40) {
+  if (whole_screen) {
+    if (full_frames_logged_ < 8) {
+      ++full_frames_logged_;
+      Log("pipeline: full frame %u: %dx%d, %zu bytes", full_frames_logged_,
+          sub.width(), sub.height(), length);
+    }
+  } else if (regions_logged_ < 40) {
     ++regions_logged_;
     Log("pipeline: partial %u: %d,%d %dx%d of region %d,%d %dx%d, %zu bytes",
         regions_logged_, sub.x1, sub.y1, sub.width(), sub.height(),
@@ -551,6 +563,12 @@ void Pipeline::ProcessFrame(const IDARG_OUT_RELEASEANDACQUIREBUFFER& buffer) {
  * with every counter clean, so a timed-out transfer is not the trigger
  * and reprogramming is not treating a known cause.
  *
+ * And the reading itself is now known to be wrong sometimes, which
+ * settles the question. It fired at 10:21:15 on a display that the user
+ * was looking at and reported as working correctly, with every transfer
+ * succeeding before and after. Whatever this register describes, it is
+ * not reliably whether there is a picture on the glass.
+ *
  * What keeps the panel lit is the keepalive repaint, which depends on
  * guessing nothing: the adapter is fed often enough that it never sees
  * the stream stop. That is the defence, it is cheap, and it cannot make
@@ -592,13 +610,19 @@ void Pipeline::CheckStillDisplaying(unsigned long long now) {
   /* Two readings before saying anything, because one has been wrong
    * before, and then only once per spell: a register that disagrees with
    * a working panel for a whole session should leave a record without
-   * burying everything else in the log. */
+   * burying everything else in the log.
+   *
+   * Worded as a disagreement rather than a diagnosis, because it has now
+   * been seen to be wrong with the display plainly working: this fired
+   * while a user was looking at a correct picture, which is the clearest
+   * possible statement that it must not be acted on. */
   if (++dark_readings_ == kDarkReadingsToReport && !reported_dark_) {
     reported_dark_ = true;
-    Log("pipeline: the adapter reports it is not transmitting a picture. "
-        "Nothing is done about this on purpose: reprogramming to fix it "
-        "blinked panels that were working. If the panel really is dark, "
-        "run usbdisplayctl testpattern, or unplug and replug it.");
+    Log("pipeline: the adapter's status register says it is not "
+        "transmitting. This is recorded and nothing is done about it: the "
+        "register has said so while the display was working correctly, and "
+        "reprogramming on it blinked healthy displays. Only if the screen "
+        "really is blank, run usbdisplayctl testpattern or replug.");
   }
 }
 
@@ -623,29 +647,48 @@ void Pipeline::RefreshIdle() {
     return;
   }
 
-  /* The band is as tall as a single slot allows, whichever job this is.
+  /* A complete frame first, if the adapter has just been programmed, and
+   * then the band walk as usual.
    *
-   * Sending a short band when the picture is already correct was tried,
-   * on the reasoning that a transfer costs a slot whatever it carries so
-   * the bytes are free to save. It is not enough: the panel blanks and
-   * flickers on a still desktop. Whatever the adapter is counting to
-   * decide its output is still live, a few rows does not satisfy it.
+   * Not because it revives anything. That was the theory and it is wrong:
+   * three whole frames were delivered and acknowledged while the chip went
+   * on reporting that it was not transmitting, so a full frame is not what
+   * the dark state is waiting for. Do not reintroduce it as a cure.
    *
-   * So the saving comes from how often this runs, not from how much it
-   * sends. See the keepalive interval in Run. */
-  const int rows = idle_band_rows_;
+   * It is here because programming the adapter empties its picture memory,
+   * and this path repaints 128 rows per keepalive interval, so the screen
+   * would otherwise fill in visible stripes over about four and a half
+   * seconds whenever the desktop is too still for the compositor to
+   * present anything. One frame costs a single slot on the USB 3 parts and
+   * gets the whole picture up at once.
+   *
+   * Only after programming, never repeatedly: a stream of full frames is
+   * the one pattern these adapters are known not to tolerate. */
+  const bool whole_screen = needs_full_frame_;
+  const int rows = whole_screen ? mode_.height : idle_band_rows_;
 
   Rect band;
   band.x1 = 0;
   band.x2 = mode_.width;
-  band.y1 = idle_band_row_;
-  band.y2 = idle_band_row_ + rows;
+  band.y1 = whole_screen ? 0 : idle_band_row_;
+  band.y2 = band.y1 + rows;
   if (band.y2 > mode_.height) {
     band.y2 = mode_.height;
   }
   band = device_->AlignRegion(band, mode_.width, mode_.height);
 
-  idle_band_row_ += rows;
+  if (whole_screen) {
+    /* The whole screen has just been drawn, so the record of what is on
+     * the panel is accurate and the repaint that was owed is paid. Leaving
+     * that debt behind would send a second full frame the moment anything
+     * moved. */
+    needs_full_frame_ = false;
+    idle_band_row_ = 0;
+    onscreen_valid_ = true;
+    damage_.Clear();
+  } else {
+    idle_band_row_ += rows;
+  }
   if (idle_band_row_ >= mode_.height) {
     idle_band_row_ = 0;
     /* One full pass done, so everything on the panel has now been drawn
@@ -706,6 +749,9 @@ void Pipeline::CheckAdapterReprogrammed() {
   Log("pipeline: adapter was reprogrammed, repainting everything");
   adapter_generation_ = generation;
   onscreen_valid_ = false;
+  /* Its picture memory is empty, so the repaint owed is the whole screen
+   * and the idle path should pay it in one go rather than in stripes. */
+  needs_full_frame_ = true;
   damage_.MarkAll();
 }
 

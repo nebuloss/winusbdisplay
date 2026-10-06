@@ -73,6 +73,13 @@ class DamageTracker {
 
   void Add(const Rect& rect);
 
+  /* Forgets what is owed, for a caller that has just satisfied it another
+   * way. The idle repaint draws straight from the last image it was given
+   * without consulting this, so once it has covered the whole screen the
+   * accumulated damage describes work already done, and planning it later
+   * would send a redundant full frame. */
+  void Clear() { pending_.Clear(); }
+
   bool Empty() const { return pending_.empty(); }
 
   /* Fills `out` with the regions to send now, aligned to the adapter's pixel

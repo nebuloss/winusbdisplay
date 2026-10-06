@@ -342,3 +342,29 @@ TEST(costmodel, the_tracker_uses_the_model_it_was_given) {
                    "the tracker must plan with the supplied model rather "
                    "than falling back to a built-in one");
 }
+
+TEST(costmodel, clearing_forgets_what_was_owed) {
+  /* The idle repaint covers the whole screen itself when the adapter has
+   * just been programmed, drawing from the last image rather than from
+   * this tracker. Without a way to say so, the full repaint it has just
+   * performed stays owed and goes out a second time as soon as anything
+   * moves, which on these adapters is the one traffic pattern that stops
+   * them transmitting. */
+  const FlatCost flat;
+  DamageTracker tracker;
+  tracker.Configure(1920, 1080, &flat);
+
+  tracker.MarkAll();
+  CHECK_BECAUSE(!tracker.Empty(), "MarkAll must leave a debt to clear");
+
+  tracker.Clear();
+  CHECK_BECAUSE(tracker.Empty(),
+                "a caller that has repainted everything by another route "
+                "must be able to say the debt is paid");
+
+  Rect planned[kMaxTransfersPerFrame];
+  CHECK_EQ_BECAUSE(tracker.Plan(planned, kMaxTransfersPerFrame),
+                   static_cast<size_t>(0),
+                   "and nothing may be planned afterwards, or the frame it "
+                   "already sent is sent again");
+}

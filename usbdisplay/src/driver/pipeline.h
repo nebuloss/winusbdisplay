@@ -165,6 +165,10 @@ class Pipeline {
   Settings settings_;
   unsigned long long last_settings_poll_ms_ = 0;
   int idle_band_row_ = 0;
+  /* Set while the adapter has been programmed but has not yet been given a
+   * complete frame, which it needs before it will transmit anything at
+   * all. See RefreshIdle. */
+  bool needs_full_frame_ = true;
   /* Rows per keepalive update, worked out from what the device charges for
    * a transfer rather than assumed. A whole screen on parts where a
    * transfer costs the same whatever its size. */
@@ -184,8 +188,10 @@ class Pipeline {
   uint64_t regions_skipped_ = 0;
   uint64_t bytes_sent_ = 0;
   /* How many transfers have had their geometry logged. The first few are
-   * worth seeing; a running log at sixty a second is not. */
+   * worth seeing; a running log at sixty a second is not. Whole frames are
+   * counted apart from smaller updates so that neither hides the other. */
   unsigned regions_logged_ = 0;
+  unsigned full_frames_logged_ = 0;
   /* Transmissions the device requires per region, cached so the frame path
    * does not make a virtual call per update. */
   int transmissions_ = 2;
