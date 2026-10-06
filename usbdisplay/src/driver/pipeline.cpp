@@ -40,20 +40,10 @@ constexpr unsigned long long kDisplayCheckMs = 3000;
  * this is several frame times rather than one. */
 constexpr unsigned long long kSettleMs = 250;
 
-/* The shortest gap between two attempts to revive a dark panel.
- *
- * Reprogramming drops the signal, so an attempt that does not work is
- * itself a blink. At three seconds, which is what shipped once, a
- * panel that kept falling dark flickered continuously. Half a minute
- * means the worst case is a blink nobody would call a flicker, and a
- * genuine recovery still happens quickly because the first attempt is
- * not delayed. */
-constexpr unsigned long long kRevivalGapMs = 30000;
-
-/* How many attempts before giving up and saying so. A panel that is
- * dark for a reason reprogramming cannot fix should be left alone
- * rather than flickered at for the rest of the session. */
-constexpr int kMaxRevivals = 3;
+/* How many consecutive dark readings before the log says so. One sample
+ * has been wrong before. Nothing is acted on either way; see
+ * CheckStillDisplaying. */
+constexpr int kDarkReadingsToReport = 2;
 
 
 
@@ -526,39 +516,55 @@ void Pipeline::ProcessFrame(const IDARG_OUT_RELEASEANDACQUIREBUFFER& buffer) {
   }
 }
 
-/* Brings the panel back when the adapter has stopped displaying.
+/* Records what the adapter says about its own output, and deliberately
+ * does nothing about it.
  *
- * The fault is real and intermittent. Under sustained transfer the pixel
- * pipe occasionally times out, and after that the adapter accepts
- * everything sent to it and puts out no signal at all. Measured many
- * times, in both directions: the register read here reports it
- * accurately whenever the starting state was known, and the cure is to
- * power the chip on, set the mode, and send a full frame, which is
- * exactly what the console tool does before every frame and why the tool
- * has never appeared to suffer from this.
+ * Reprogramming from here has now been tried twice and withdrawn twice,
+ * and the reason is worth keeping at length, because the idea is
+ * tempting every single time: the dark state is real, and reprogramming
+ * really does cure it.
  *
- * The hard part is not detecting it, it is not making things worse.
- * Reprogramming drops the signal, so a revival that does not take is
- * itself a visible blink. An earlier version checked every three seconds
- * and reprogrammed every time the answer was no, which on a panel that
- * kept falling dark again produced a permanent flicker. That was shipped,
- * and withdrawing it left a panel that stayed dark instead. Neither is
- * acceptable.
+ * It cannot be done from this reading, because the cure costs more than
+ * the disease when the reading is wrong, and the reading is wrong often.
+ * Reprogramming drops the HDMI signal for about a second, which is
+ * visible, and it kills whatever transfer is in flight, and three failed
+ * transfers in a row make the device layer reprogram again. So one bad
+ * reading does not produce one blink, it produces a loop. Measured, from
+ * a session on an adapter whose picture was fine throughout:
  *
- * So the attempt is rationed rather than removed:
+ *     10:00:11  the panel is dark, reprogramming (attempt 1 of 3)
+ *     10:00:16  transfer of 491536 bytes failed: timeout
+ *     10:00:21  transfer of 491536 bytes failed: timeout
+ *     10:00:26  transfer of 491536 bytes failed: timeout
+ *     10:00:26  adapter was reprogrammed, repainting everything
  *
- *   - the register must say dark twice running, since one sample has
- *     been wrong before,
- *   - nothing may be in flight and the last frame must have had time to
- *     arrive, or the question cannot be answered honestly,
- *   - attempts are at least kRevivalGapMs apart, so the worst case is a
- *     blink every half minute rather than every three seconds,
- *   - and after kMaxRevivals the driver stops trying and says so, because
- *     a panel that is dark for a reason this cannot fix should be left
- *     alone rather than flickered at indefinitely.
+ * That is the "goes black, comes back a second later, over and over"
+ * that users reported, and every failure in it is downstream of the
+ * first line. Rationing the attempts, which was the previous attempt at
+ * a compromise, changes how often this happens rather than whether a
+ * working panel gets blinked at.
  *
- * A successful spell of displaying resets the count, so an adapter that
- * recovers and later falls over again gets the same allowance afresh. */
+ * The ordering also refutes the explanation this comment used to give.
+ * The dark reading comes first and the failed transfers follow it, in
+ * every log: 09:35:44 before 09:35:54, 10:00:11 before 10:00:16. The
+ * chip stops reporting a picture during apparently healthy operation,
+ * with every counter clean, so a timed-out transfer is not the trigger
+ * and reprogramming is not treating a known cause.
+ *
+ * What keeps the panel lit is the keepalive repaint, which depends on
+ * guessing nothing: the adapter is fed often enough that it never sees
+ * the stream stop. That is the defence, it is cheap, and it cannot make
+ * things worse.
+ *
+ * Why the chip enters the state at all is still unknown. Rate is not it,
+ * nor size: a keepalive at 33 ms and one at 500 ms both reach it, and so
+ * do whole screens and 128 row bands. Three candidates eliminated and no
+ * fourth, which is precisely why this must not act on a theory.
+ *
+ * So the state is logged and left alone. `usbdisplayctl health` asks the
+ * question by hand and `usbdisplayctl testpattern` performs the cure,
+ * which is the right home for both: a person can see the screen, and
+ * this cannot. */
 void Pipeline::CheckStillDisplaying(unsigned long long now) {
   if (now - last_display_check_ms_ < kDisplayCheckMs) {
     return;
@@ -579,47 +585,21 @@ void Pipeline::CheckStillDisplaying(unsigned long long now) {
 
   if (device_->DisplayingPicture()) {
     dark_readings_ = 0;
-    /* Displaying again, so whatever went wrong is over and the next
-     * failure deserves the full allowance. */
-    revivals_ = 0;
+    reported_dark_ = false;
     return;
   }
 
-  if (++dark_readings_ < 2) {
-    return;
+  /* Two readings before saying anything, because one has been wrong
+   * before, and then only once per spell: a register that disagrees with
+   * a working panel for a whole session should leave a record without
+   * burying everything else in the log. */
+  if (++dark_readings_ == kDarkReadingsToReport && !reported_dark_) {
+    reported_dark_ = true;
+    Log("pipeline: the adapter reports it is not transmitting a picture. "
+        "Nothing is done about this on purpose: reprogramming to fix it "
+        "blinked panels that were working. If the panel really is dark, "
+        "run usbdisplayctl testpattern, or unplug and replug it.");
   }
-
-  if (revivals_ >= kMaxRevivals) {
-    if (revivals_ == kMaxRevivals) {
-      ++revivals_;
-      Log("pipeline: the panel is dark and reprogramming has not helped "
-          "after %d attempts, leaving it alone. Unplug and replug the "
-          "adapter.", kMaxRevivals);
-    }
-    return;
-  }
-
-  if (last_revival_ms_ != 0 && now - last_revival_ms_ < kRevivalGapMs) {
-    return;
-  }
-
-  dark_readings_ = 0;
-  last_revival_ms_ = now;
-  ++revivals_;
-
-  Log("pipeline: the panel is dark, reprogramming (attempt %d of %d)",
-      revivals_, kMaxRevivals);
-  if (!device_->Revive()) {
-    Log("pipeline: reprogramming failed: %s", device_->error().c_str());
-    return;
-  }
-
-  /* Everything the panel held is gone, and the chip needs a full frame
-   * before it will show anything: a partial band straight after a mode
-   * set leaves it dark and times out the pipe. MarkAll is what makes the
-   * next update the whole screen. */
-  onscreen_valid_ = false;
-  damage_.MarkAll();
 }
 
 void Pipeline::RefreshIdle() {

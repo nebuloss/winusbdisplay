@@ -132,7 +132,7 @@ if (-not (Test-Path $log)) {
     # means the status register claimed the panel was dark, which it has
     # done on a demonstrably healthy adapter, so it is worth an eye rather
     # than a verdict.
-    $dark = ($text | Select-String 'not displaying').Count
+    $dark = ($text | Select-String 'not transmitting').Count
     if ($dark -eq 0) {
         Pass 'the adapter never reported itself dark' ''
     } else {
