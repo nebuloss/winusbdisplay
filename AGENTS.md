@@ -542,9 +542,15 @@ Each cost real investigation; the evidence is in `docs/protocol-notes.md`.
   100 ms and PnP will not wait.
 - **Even x, multiple-of-four width, even y and height** on every region. UYVY
   encodes pixel pairs and the vendor masks the extent with 0xFFC.
-- **Zero length bulk packet after every transfer.** Without it the adapter
-  waits for data that never comes and the panel stays dark while every write
-  reports success.
+- **Zero length bulk packet after every transfer, including a failed one.**
+  Without it the adapter waits for data that never comes and the panel stays
+  dark while every write reports success. **The failure path is the one that
+  matters and was the one missing it**: a failed write has usually delivered
+  part of a block, so returning early leaves the chip waiting for the rest
+  for ever, and nothing the host can send afterwards recovers it because
+  what is out of step is inside the chip. Only a power cycle clears that.
+  The vendor sends the terminator unconditionally, even after a transfer it
+  has killed on a timeout.
 - **Do not enable the output during mode programming.** It is enabled once a
   frame has landed, so the panel never shows leftover memory.
 - **Probe the chip id, never infer it from the USB product id.** The test
@@ -642,16 +648,25 @@ dark adapter" is too strong: it revives the picture, not the chip.** Every
 failed remedy in the history of this bug was applied to a chip that was
 still in that state.
 
-**The sharpest statement available: re-programming the mode on a chip that
-is already live and configured is what darkens it.** A freshly powered
-adapter takes its first mode set and works, whether that power came from a
-replug or from a reboot. The same chip re-initialised without losing power
-goes dark within seconds while every transfer still succeeds. An attach
-path correlation that looked convincing over seven sessions was refuted by
-two later ones and is recorded in `docs/troubleshooting.md` so nobody
-chases `TryAttach` again. **Practical consequence: installing the driver
-restarts the device, so on a running adapter it darkens the panel and the
-install needs a replug to finish.**
+**A mechanism has been found and fixed, and it is the best candidate so
+far**: a failed bulk transfer returned without sending the end-of-block
+packet, leaving the chip waiting for the rest of a block that never came.
+Nothing the host can send recovers from that, which is the fault's exact
+signature, and the vendor's driver sends that packet unconditionally even
+after a transfer it has killed. **It is not yet proven to be the cause**,
+because the teardown that wedged the adapter could not be inspected: the
+driver keeps only one previous log and the install rotated it away.
+`docs/troubleshooting.md` has the test that would settle it, including why
+the fix cannot be judged by the install that delivers it.
+
+Two explanations that looked convincing and are **refuted, so do not
+revisit them**: that the attach path matters, which held for seven sessions
+and was broken by the next two, and that re-programming the mode on a live
+chip is what darkens it, which is contradicted by the tool doing exactly
+that four times in a row with the panel staying lit. **Practical
+consequence that still holds: installing the driver restarts the device, so
+on a running adapter it darkens the panel and the install needs a replug to
+finish.**
 
 ## Style
 

@@ -643,6 +643,36 @@ bool MacroSiliconDevice::SendTransfer(const uint8_t* data, size_t len) {
   std::lock_guard<std::mutex> lock(device_lock_);
 
   if (!link_->BulkWrite(data, len)) {
+    /* Close the block even though the data write failed, before anything
+     * else.
+     *
+     * This is the fix for an adapter that goes dark and then cannot be
+     * recovered by any means short of unplugging it. A failed or aborted
+     * write has usually delivered part of a block, and the chip is then
+     * waiting for the rest of it. Returning here without the terminator
+     * leaves it waiting for ever: the next frame header is consumed as the
+     * tail of the abandoned block, so everything sent afterwards is
+     * misinterpreted, and neither reprogramming the mode nor resetting the
+     * host endpoint tells the chip anything, because the thing that is out
+     * of step is inside the chip. Only cutting its power clears it.
+     *
+     * The vendor's driver sends the terminator unconditionally, including
+     * after a transfer it has just killed on a timeout, which is the
+     * strongest evidence that this is required rather than merely tidy.
+     *
+     * `Cancel` already did this for the one case that was understood, a
+     * deliberate stop. The ordinary failure path needs it for the same
+     * reason and did not have it, which is how reinstalling the driver
+     * could darken a working panel: transfers fail as the outgoing driver
+     * is torn down, each one leaving a block open, and the incoming driver
+     * then talks to a chip that is no longer listening for a new frame.
+     *
+     * Deliberately not checked. This is best effort on a path that has
+     * already failed, the caller is about to be told so, and the error
+     * worth reporting is the one from the data write rather than from the
+     * attempt to tidy up after it. */
+    link_->BulkWrite(nullptr, 0);
+
     /* Several failures in a row means the chip has stopped accepting data
      * rather than that one transfer was unlucky, and reprogramming is the
      * only way back. Without this the panel stays dark until the dongle is

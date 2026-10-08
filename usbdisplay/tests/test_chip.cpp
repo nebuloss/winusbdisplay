@@ -698,6 +698,23 @@ TEST(transfer, every_frame_is_followed_by_a_zero_length_packet) {
       "and the panel stays dark while every write reports success");
 }
 
+TEST(transfer, a_failed_frame_is_also_followed_by_a_zero_length_packet) {
+  Harness harness;
+  harness.link->fail_bulk = true;
+  const uint8_t frame[64] = {0xFF, 0x00};
+  CHECK(!harness.chip->SendTransfer(frame, sizeof(frame)));
+
+  /* The data write, then the terminator, even though the data failed. */
+  CHECK_EQ(harness.link->bulks.size(), static_cast<size_t>(2));
+  CHECK_EQ_BECAUSE(
+      harness.link->bulks[1].length, static_cast<size_t>(0),
+      "a failed write has usually delivered part of a block, so skipping "
+      "the terminator leaves the chip waiting for the rest of it for ever "
+      "and the next frame header is eaten as that block's tail; the chip "
+      "is then unrecoverable without cutting its power, which is how "
+      "reinstalling the driver could darken a working panel");
+}
+
 TEST(transfer, the_output_is_enabled_only_after_the_first_frame_lands) {
   Harness harness;
   CHECK(harness.chip->SetMode(Mode1080p60()));

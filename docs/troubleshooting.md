@@ -1160,6 +1160,91 @@ darkens it.** A chip that has just come up takes its first mode set and
 works. The same chip, re-initialised without losing power, goes dark within
 seconds while accepting every transfer.
 
+**Retracted. That statement is refuted by a measurement taken earlier in
+the same session.** The A/B/C/D table above has the tool calling `PowerOn`
+and `SetMode` on an already live, displaying chip four times in a row, and
+the panel stays lit every time. Re-programming a live chip is therefore not
+sufficient to darken it, and what the driver does differently had to be
+found elsewhere. Recorded rather than quietly corrected, because the wrong
+version was written with more confidence than the evidence supported.
+
+### Found: a failed transfer skipped the end-of-block packet
+
+**This is the first mechanism for the dark panel that explains every
+measurement, and it came from the user's own hypothesis**, that the update
+had wedged the dongle rather than the new driver merely failing to light
+it.
+
+The project's own notes have said all along that omitting the zero length
+bulk packet is "the classic cause of a dark panel where every single
+transfer reported success, because the chip sits waiting for more data that
+never arrives". `SendTransfer` sent it after every successful transfer, and
+**returned early without it whenever a transfer failed**:
+
+```c
+if (!link_->BulkWrite(data, len)) {
+  ...
+  return FailLink("bulk write");   /* <- no terminator, block left open */
+}
+...
+link_->BulkWrite(nullptr, 0);      /* only ever reached on success */
+```
+
+A failed or aborted write has usually delivered part of a block. Skipping
+the terminator leaves the chip waiting for the rest of it, and the next
+frame header is then consumed as that block's tail, so nothing sent
+afterwards is interpreted correctly. **Neither reprogramming the mode nor
+resetting the host endpoint helps, because the thing out of step is inside
+the chip.** That is exactly the fault's signature: survives everything the
+host can send, cleared only by cutting power.
+
+**The vendor's driver does not have this hole.** In
+`usb_hal_dev_send_frame`, the zero length message is sent unconditionally,
+outside the error branch, including after a transfer the vendor has just
+killed on a timeout:
+
+```c
+ret = usb_hal_start_wait_urb(data_urb, 2000, &snd_len);
+if (ret) { dev_err(...); real_ret = ret; }      /* logged, not returned */
+ret = usb_bulk_msg(udev, usb_sndbulkpipe(udev, ep), zero_msg, 0, &snd_len, 2000);
+```
+
+That is the strongest available evidence that the terminator is required
+rather than merely tidy, and it is why this is a defect rather than a
+guess. `Cancel` already did the same thing for the one case that had been
+understood, a deliberate stop, with a comment explaining precisely this
+reasoning; the ordinary failure path needed it for the same reason and did
+not have it.
+
+How that produces the reported symptom: transfers fail as the outgoing
+driver is torn down during an install, each one leaving a block open, and
+the incoming driver then talks to a chip that is no longer listening for a
+new frame. Which is what the user described.
+
+**Fixed**, with a test that fails without the fix, and the terminator is
+now sent on both paths.
+
+**What is not yet proven.** That this is *the* cause of the install-time
+darkening, rather than a real defect that happens to fit. Two honest gaps:
+
+- The teardown that actually wedged the adapter at 11:29 cannot be
+  inspected. The driver keeps one previous log and the install rotated it
+  away, so whether that teardown had failing transfers or a clean `Cancel`
+  is unknown. **This is the trap this document already warns about, and it
+  cost the decisive evidence here.**
+- `Cancel` was already correct for a deliberate stop, so a clean PnP stop
+  should have been covered. If the install-time teardown took that path,
+  something else is still missing.
+
+**The test that settles it** needs the fixed driver installed and the
+adapter freshly replugged, so that a chip in a known good state is handed
+to a driver that terminates its blocks on the way out. Then restart the
+device, which currently darkens the panel every time without exception. If
+it survives, the hole was the cause. Note the ordering: installing the fix
+over an unfixed driver will still go dark, because the damage is done by
+the *outgoing* driver, so the fix cannot be judged by the install that
+delivers it.
+
 It also explains the one thing that previously looked contradictory. A
 frame from the tool lights a wedged panel because the tool sets the mode
 and sends a whole frame in one go; the driver then starts, programs the
