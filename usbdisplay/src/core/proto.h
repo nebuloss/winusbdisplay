@@ -77,15 +77,36 @@ constexpr uint16_t kRegChipId913x = 0xFF00;
  * succeed, the output can report itself enabled, and the screen can still
  * be dark. Found by dumping every register of a freshly plugged adapter
  * and of one that had stopped displaying, and comparing: the byte at
- * kRegDisplayLive + 2 reads 0x44 in the first case and 0x01 in the second,
- * reliably.
+ * kRegDisplayLive + 2 reads 0x44 in the first case and 0x01 in the second.
  *
  * What it means is unknown and does not matter. It is a detector, and
  * having one turns "ask somebody to look at the screen" into something a
  * script can decide, which is the difference between measuring this
- * hardware and guessing about it. */
+ * hardware and guessing about it.
+ *
+ * **It is a dark signature, not a showing value, and that distinction
+ * cost a session.** The detector was calibrated on exactly two readings
+ * and was written to require the showing one exactly. An MS9132 then read
+ * 0x43 while a person was looking at a perfectly normal desktop, and the
+ * driver reported a dark panel for a display that was working. The low
+ * bits evidently vary; the high nibble is what separates the two states.
+ *
+ * So the test is for the dark case, and anything unrecognised counts as
+ * displaying. That asymmetry is deliberate: a false "dark" reading drove
+ * reprogramming that blinked healthy panels, which is far worse than a
+ * false "displaying" reading, whose only cost is a dark panel needing one
+ * replug. Err on the side the hardware forgives.
+ *
+ * Observed so far: 0x44 displaying, 0x43 displaying (confirmed by eye),
+ * 0x01 dark. */
 constexpr uint16_t kRegDisplayLive = 0xFB1A;
 constexpr uint8_t kDisplayLiveShowing = 0x44;
+
+/* The dark readings seen so far all have a zero high nibble, and both
+ * displaying readings have 0x40. Compared as a nibble rather than a whole
+ * byte so a varying low nibble cannot turn a working panel into a fault. */
+constexpr uint8_t kDisplayLiveMask = 0xF0;
+constexpr uint8_t kDisplayLiveDark = 0x00;
 
 /* One register, mirrored across 0xF900 to 0xFAFF because it does not
  * decode its low address bits, and the only clean difference between a

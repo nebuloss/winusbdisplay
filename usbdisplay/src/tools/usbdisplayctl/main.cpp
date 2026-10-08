@@ -513,11 +513,15 @@ int CmdPoke(int argc, char** argv) {
  * succeed, the output can report itself enabled, and the screen can still
  * be dark, so "it works" has meant asking somebody to look at it.
  *
- * The third byte at kRegDisplayLive is 0x44 whenever a picture is on the
- * glass and 0x01 when it is not. Found by dumping every register in both
- * states and comparing, verified repeatedly against frames known to
- * display. It is a detector rather than an explanation: what the register
- * means is unknown, only that it answers the question.
+ * The third byte at kRegDisplayLive has a high nibble of 4 whenever a
+ * picture is on the glass and 0 when it is not. Found by dumping every
+ * register in both states and comparing. It is a detector rather than an
+ * explanation: what the register means is unknown, only that it answers
+ * the question.
+ *
+ * The low bits vary while displaying, which matters: this once tested for
+ * 0x44 exactly and so called an adapter reading 0x43 dark while a person
+ * was looking at an ordinary desktop on it.
  *
  * The control plane is a separate USB interface from the pixel pipe, so
  * this works while the driver is running and holding that pipe. */
@@ -558,8 +562,9 @@ int CmdEnableOutput(int argc, char** argv) {
   printf("output %s: live register %02X %02X %02X %02X -> %02X %02X %02X %02X\n",
          on ? "on" : "off", before[0], before[1], before[2], before[3],
          after[0], after[1], after[2], after[3]);
-  printf("%s\n", after[2] == kDisplayLiveShowing ? "showing a picture"
-                                                 : "not displaying");
+  printf("%s\n", (after[2] & kDisplayLiveMask) != kDisplayLiveDark
+                     ? "showing a picture"
+                     : "not displaying");
   return 0;
 }
 
@@ -574,7 +579,7 @@ int CmdHealth() {
     fprintf(stderr, "error: %s\n", chip->error().c_str());
     return 1;
   }
-  const bool showing = live[2] == kDisplayLiveShowing;
+  const bool showing = (live[2] & kDisplayLiveMask) != kDisplayLiveDark;
 
   uint8_t guard = 0;
   chip->ReadByte(kRegPipeGuard, &guard);
@@ -582,10 +587,15 @@ int CmdHealth() {
   printf("display:  %s (%02X %02X %02X %02X)\n",
          showing ? "showing a picture" : "DARK", live[0], live[1], live[2],
          live[3]);
-  printf("pipe:     %02X%s\n", guard,
-         (guard & kPipeGuardStuck) ? "  (the bit that is set only when "
-                                     "the adapter has stopped displaying)"
-                                   : "");
+  /* Printed as a raw number with no interpretation, deliberately. This was
+   * once labelled as the bit that is set only when the adapter has stopped
+   * displaying, and that is settled as wrong: watched across a recovery,
+   * the panel went from dark to showing a picture while this stayed at
+   * 0x9E throughout. The old label asserted a dark panel next to a working
+   * one and cost a session. Keep the value, which is occasionally useful
+   * when comparing two adapters, and claim nothing about it. */
+  printf("pipe:     %02X  (meaning unknown, not a display indicator)\n",
+         guard);
   return showing ? 0 : 1;
 }
 

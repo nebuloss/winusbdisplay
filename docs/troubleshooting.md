@@ -947,4 +947,117 @@ display's name changes (`\\.\DISPLAY7` became `\\.\DISPLAY8`). Windows
 matches it by monitor rather than by path, so the arrangement has to be
 established once per session, not after every repair.
 
+## The live detector had an off-by-one, and it explains some of its "lies"
+
+**The detector was calibrated on two readings and written to require one of
+them exactly**, which is the bug. `kRegDisplayLive + 2` was compared with
+`== 0x44`, so any other value counted as dark.
+
+Measured on an MS9132 while a person was looking at an ordinary, correct
+desktop on the panel:
+
+```
+display:  DARK (10 F7 43 12)      <- 0x43, and the panel was fine
+```
+
+Observed values of that byte since, with the panel state confirmed by eye
+each time:
+
+| byte | panel | occurrences |
+|---|---|---|
+| 0x44 | showing | the original calibration |
+| 0x43 | showing | confirmed by eye |
+| 0x9D | showing | immediately after a full frame |
+| 0x01 | dark | confirmed by eye, twice |
+
+So the low bits vary while displaying, and the high nibble is what
+separates the states. The test is now for the **dark signature**, not for a
+showing value: dark only when the high nibble is zero, anything else
+displaying. `0x9D` is why that direction matters, because it would have
+failed any whitelist of known-good values too.
+
+**This partly retracts "that register has now misled four times."** At
+least one of those four was this off-by-one rather than the hardware: a
+reading of 0x43 on a working panel is exactly the false alarm that made
+automatic revival look untrustworthy and got it withdrawn. The register was
+answering correctly and the comparison was wrong.
+
+It does not retract the rest. The limit recorded above still stands, that
+the register describes what the chip is **transmitting** and not what is on
+the glass, and that remains the reason silence is not safe.
+
+The asymmetry in the new test is deliberate. A false "dark" used to drive
+reprogramming that blinked healthy displays; a false "displaying" costs a
+dark panel that needs one replug. Unknown readings therefore count as
+displaying. `usbdisplayctl health` now agrees with the panel in both
+directions, where before it reported DARK over a working desktop.
+
+The `pipe:` line it printed is also fixed. It was labelled as "the bit that
+is set only when the adapter has stopped displaying" while this document
+already recorded, two sections above, that 0xF900 is **not** a display
+indicator. It asserted a dark panel next to a working one. The value is
+still printed, because it is occasionally useful when comparing two
+adapters, and it now claims nothing.
+
+## Unsolved: this adapter's driver cannot light a panel the tool can
+
+**Status: reproducible, cause unknown, several explanations eliminated.**
+Recorded because it is the first time this fault has been reproducible on
+demand; every previous session described it as intermittent.
+
+The reproduction, on the MS9132 adapter, with nothing else running:
+
+```
+driver stopped, one full frame from the tool   ->  showing a picture   6/6
+start the driver                               ->  DARK within 8 s     5/6
+```
+
+The driver's log is clean through this: mode programmed, `full frame 1:
+1920x1080, 4147216 bytes`, further frames, `dropped=0 failed=0`, no
+cancellations, no timeouts. Every transfer the driver makes succeeds and
+the panel is dark anyway. The single exception stayed lit for 30 seconds
+and could not be reproduced.
+
+**What this is not.** Each of these was measured, not reasoned about, and
+each is now ruled out:
+
+- **Not the brightness tray or the gamma repaint.** The log shows the tray
+  forcing a second full repaint milliseconds after the first, which looked
+  promising. Killing the tray entirely changes nothing: the panel still
+  goes dark.
+- **Not the keepalive band walk.** Turning it off with `IdleRefresh=0` once
+  produced a panel that stayed lit for 30 seconds, which looked like the
+  answer. It did not hold: with the keepalive off, both a plain driver
+  restart and a tool-lit panel handed to the driver went dark anyway. One
+  promising measurement, disproved by the next two. The registry override
+  was removed again rather than shipped.
+- **Not the transfer pattern.** `testpattern --bands` reproduces the
+  driver's exact shape, 128 row bands each transmitted twice, with no
+  driver involved. The panel stays lit. So neither banding, nor the double
+  transmission, nor 9 bands in 272 ms is what does it:
+
+  ```
+  one full frame, once          ->  showing
+  128 row bands, each twice     ->  showing
+  one full frame again          ->  showing
+  128 row bands, each once      ->  showing
+  ```
+- **Not a failing or cancelled transfer.** `failed=0` and `dropped=0`
+  throughout, and the dark reading precedes nothing.
+- **Not the mode programming being skipped.** The driver logs `adapter was
+  reprogrammed, repainting everything` and does `PowerOn` then `SetMode`,
+  the same pair the tool calls, through the same `SendTransfer` that sends
+  the zero length packet and enables the output.
+
+**What is left.** The two paths call the same functions in the same order
+and differ in how the pixel pipe is owned: the driver's handle is opened
+inside WUDFHost as LOCAL SERVICE and written from `FrameSender`'s thread,
+the tool's from an ordinary elevated process on its main thread. That is
+the next thing to examine, and it is not something the tool can be made to
+imitate from outside.
+
+Until then the honest statement is that **this adapter needs a physical
+replug**, and that the driver may darken it again on the next start.
+
+
 

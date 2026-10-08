@@ -275,6 +275,44 @@ TEST(health, a_chip_that_reports_dark_is_detected) {
                 "the glass, so asking the adapter is the only way to know");
 }
 
+TEST(health, the_low_bits_of_the_live_register_do_not_mean_dark) {
+  Harness harness;
+  harness.link->registers[kRegChipId913x] = kSignaturePart912A;
+  harness.link->registers[kRegChipId913x + 1] = kSignatureFamily913x;
+  harness.link->registers[kRegChipId913x + 2] = kSignatureTail;
+  ChipId id;
+  CHECK(harness.chip->ReadChipId(&id));
+
+  /* Measured on hardware: an MS9132 read 0x43 here while a person was
+   * looking at an ordinary desktop on the panel. The detector used to
+   * demand 0x44 exactly and so reported a working display as dark. */
+  harness.link->registers[kRegDisplayLive + 2] = 0x43;
+  CHECK_BECAUSE(harness.chip->DisplayingPicture(),
+                "0x43 was observed while the panel showed a normal "
+                "desktop, so only the high nibble distinguishes dark from "
+                "displaying and the low bits must not be compared");
+}
+
+TEST(health, an_unrecognised_live_reading_is_not_called_dark) {
+  Harness harness;
+  harness.link->registers[kRegChipId913x] = kSignaturePart912A;
+  harness.link->registers[kRegChipId913x + 1] = kSignatureFamily913x;
+  harness.link->registers[kRegChipId913x + 2] = kSignatureTail;
+  ChipId id;
+  CHECK(harness.chip->ReadChipId(&id));
+
+  /* A value this detector has never been calibrated against. Claiming a
+   * dark panel wrongly used to drive reprogramming, which blinked
+   * displays that were working; claiming a working one wrongly costs a
+   * replug. Only three readings of this register have ever been
+   * observed, so the unknown cases must fall on the cheap side. */
+  harness.link->registers[kRegDisplayLive + 2] = 0x77;
+  CHECK_BECAUSE(harness.chip->DisplayingPicture(),
+                "a reading nobody has characterised must not be reported "
+                "as a fault, because the cure for a dark panel is more "
+                "disruptive than the symptom of a false all-clear");
+}
+
 TEST(health, a_chip_that_will_not_answer_is_given_the_benefit_of_the_doubt) {
   Harness harness;
   harness.link->FailReadsAt(kRegDisplayLive);

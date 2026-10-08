@@ -171,6 +171,16 @@ left the register insisting all was well while the panel was black. It is
 the right tool for spotting the dark state, and it is not evidence that a
 change is safe. Look at the screen.
 
+**The detector tests for a dark signature, not for a known-good value**, and
+that distinction was a real bug. It used to require `0x44` exactly and so
+called a working panel dark whenever the register read `0x43`, which happens
+often; `0x9D` has also been seen on a working panel. Dark is a zero high
+nibble and everything else counts as displaying, because a false "dark" used
+to drive reprogramming that blinked healthy displays while a false
+"displaying" only costs a replug. This also partly explains the register's
+reputation for lying: at least one of its four recorded "lies" was this
+comparison, not the hardware.
+
 ## The one non-obvious thing that unblocks everything
 
 The control side of the adapter **needs no driver**. Its control transfers are
@@ -615,6 +625,17 @@ transfer, which would make a whole-screen update visible as a sweep. That
 cannot be settled from this side: everything reachable by reasoning about
 the protocol has now been reached, and what is left is a USB capture of the
 vendor driver while small text redraws.
+
+**The dark panel is reproducible on the MS9132 adapter and still
+unexplained.** One full frame from the tool lights it every time; starting
+the driver darkens it within seconds, with a clean log and every transfer
+succeeding. Measured away already: the brightness tray and its gamma
+repaint, the keepalive band walk, the band pattern itself including the
+double transmission, failing or cancelled transfers, and skipped mode
+programming. **Do not re-test those.** What is left is that the two paths
+own the pixel pipe differently, the driver's handle living in WUDFHost and
+written from `FrameSender`'s thread. `docs/troubleshooting.md` has the
+measurements.
 
 ## Style
 
