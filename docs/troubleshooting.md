@@ -776,3 +776,81 @@ one being fixed here. A restart after the fact is a few lines and testable.
 **The remaining cost is that the monitor appears a few seconds into the
 session rather than at the logon screen.** Windows will not load a user
 mode driver earlier than that, so it is a floor rather than an oversight.
+
+## The startup repair must decide whether it is needed, and the device status cannot tell it
+
+A follow-up to the entry above, reported as "the driver still does not work
+after reboot". It did work, and the complaint was fair anyway.
+
+With both triggers registered, the task runs **twice** in an ordinary
+session, and the repair restarted the device unconditionally both times. One
+boot, measured:
+
+```
+09:00:44  machine booted
+09:00:46  WUDFRd failed to load for ROOT\DISPLAY\0000, status 0xC0000365
+09:01:30  repair ran (logon trigger, +46 s), restarted the device
+09:01:34  DriverEntry, 50 s after this machine started   <- display works
+09:02:18  repair ran (boot trigger, +94 s), restarted it again
+09:02:22  DriverEntry, 98 s after this machine started
+```
+
+So the panel went black, came up, and went black again, the second time to
+cure a display that was already working. From the user's side that is a
+display that does not work after a reboot.
+
+**The device's own status cannot be used to decide.** This is the trap, and
+it is the same one that hid the original fault. From the repair log of that
+boot, at 09:01:30, 44 seconds after the load had definitively failed and
+before anything had restarted it:
+
+```
+2026-10-08 09:01:30  repair starting, 45 s after this machine booted
+2026-10-08 09:01:31  found ROOT\DISPLAY\0000, status OK
+```
+
+`Get-PnpDevice` reports **OK, `CM_PROB_NONE`, "this device is working
+properly"** for a device whose user mode driver never loaded. The kernel
+side started fine; it is the host process that did not. So the status reads
+identically in the broken case and the working one, and a check built on it
+would either restart always or never.
+
+**What does answer the question is the driver's own log**, because nothing
+else writes that file. If `C:\Windows\Temp\usbdisplaydd.log` was last
+written before this machine booted, the driver has not run this session,
+which is exactly the fault. Both the script and `driversetup /repair` now
+check that, and the second trigger is a no-op when the first has already
+done the work. `/force` and `-Force` override it.
+
+Two details worth keeping:
+
+- **The post-restart check compares against the log's position before the
+  restart, not against the boot time.** Under `/force` the driver has
+  usually been running, so its log already postdates the boot and a check
+  against that would report success without the driver having restarted at
+  all. The restart is only confirmed when the log moves.
+- **This deliberately does not try to detect a driver that started and
+  later stopped showing a picture.** That is a different fault, automatic
+  recovery for it was implemented and withdrawn, and the reasoning is under
+  "Withdrawn: reprogramming the adapter automatically when it looks dark".
+  Confining the check to "has the driver run at all this session" is what
+  keeps it from blinking healthy displays.
+
+Verified both ways on the machine. Declining when the driver is up:
+
+```
+The driver has already run this session, so nothing is being
+restarted: its log has been written since this machine booted.
+Use /force to restart it anyway.
+```
+
+and restarting when told to, with the driver confirmed back:
+
+```
+restarting ROOT\DISPLAY\0000
+Done: the driver is running. The monitor should appear within a few seconds.
+
+09:35:20.078  DriverEntry on 2026-10-08, 2075 s after this machine started
+09:35:20.560  pipeline: full frame 1: 1920x1080, 4147216 bytes
+```
+

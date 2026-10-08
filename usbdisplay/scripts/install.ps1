@@ -440,6 +440,11 @@ Write-Host '=== 5. keeping it working after a reboot ==='
 # So a scheduled task re-enumerates it shortly after startup, as SYSTEM.
 # Both triggers are wanted: logon for the normal case, and boot with a delay
 # so a machine sitting at the logon screen still drives the panel.
+#
+# Both therefore fire in an ordinary session, so repair.ps1 decides for
+# itself whether a restart is needed. Without that it blanked the panel twice
+# in the first two minutes of every session, the second time to cure a
+# display that was already working.
 $taskName = 'usbdisplay repair after startup'
 $repairScript = Join-Path $PSScriptRoot 'repair.ps1'
 if (Test-Path $repairScript) {

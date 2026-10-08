@@ -348,14 +348,105 @@ bool RestartDisplayDevice(const std::wstring& instance) {
   return ok;
 }
 
-/* The repair itself, as run at every logon by the scheduled task below and
- * available by hand as `driversetup /repair`. */
-int Repair() {
+/* Has the driver run at all since this machine booted?
+ *
+ * The repair below is registered on two triggers and so runs twice per
+ * session, and it must not restart a display that is already working: that
+ * costs a four second blackout for nothing, and it was happening twice in
+ * the first two minutes of every session.
+ *
+ * The device's own status cannot answer the question. Measured: 46 seconds
+ * into a boot where the driver had definitively never loaded, Plug and Play
+ * reported the device as OK with no problem code. A user mode driver that
+ * fails to load leaves the devnode looking healthy, which is also why this
+ * fault stayed invisible for so long.
+ *
+ * The driver's log does answer it, because nothing else writes that file. A
+ * log last written before this machine booted means the driver has not run
+ * this session, which is precisely the cold boot fault.
+ *
+ * Note what this deliberately does not attempt: spotting a driver that
+ * started and later stopped putting a picture on the panel. Automatic
+ * recovery for that was implemented, measured and withdrawn, because it
+ * blinked displays that were working correctly. See docs/troubleshooting.md.
+ *
+ * Missing or unreadable is not evidence of health, so both answer no. */
+
+/* When this machine booted, as a file time. */
+ULONGLONG BootFileTime() {
+  const ULONGLONG uptime_ms = GetTickCount64();
+  FILETIME now_ft = {};
+  GetSystemTimeAsFileTime(&now_ft);
+  ULARGE_INTEGER now = {};
+  now.LowPart = now_ft.dwLowDateTime;
+  now.HighPart = now_ft.dwHighDateTime;
+  /* File times count 100 nanosecond intervals, so a millisecond is 10000. */
+  return now.QuadPart - uptime_ms * 10000ULL;
+}
+
+/* When the driver last wrote its log, or zero if it never has. */
+ULONGLONG DriverLogWriteTime() {
+  wchar_t windir[MAX_PATH] = {};
+  if (!GetWindowsDirectoryW(windir, MAX_PATH)) {
+    return 0;
+  }
+  const std::wstring path = Combine(windir, L"Temp\\usbdisplaydd.log");
+
+  WIN32_FILE_ATTRIBUTE_DATA attributes = {};
+  if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard,
+                            &attributes)) {
+    return 0;
+  }
+  ULARGE_INTEGER written = {};
+  written.LowPart = attributes.ftLastWriteTime.dwLowDateTime;
+  written.HighPart = attributes.ftLastWriteTime.dwHighDateTime;
+  return written.QuadPart;
+}
+
+bool DriverRanThisSession(std::wstring* because) {
+  const ULONGLONG written = DriverLogWriteTime();
+  if (written == 0) {
+    *because = L"the driver has written no log at all";
+    return false;
+  }
+  if (written > BootFileTime()) {
+    *because = L"its log has been written since this machine booted";
+    return true;
+  }
+  *because = L"its log predates this boot";
+  return false;
+}
+
+/* The repair itself, as run after startup by the scheduled task below and
+ * available by hand as `driversetup /repair`. `force` is `/force`, for a
+ * user who wants the restart whatever this program thinks. */
+int Repair(bool force) {
   const std::vector<DeviceNode> devices = FindOurDevices();
   if (devices.empty()) {
     Say(L"No display device is installed, so there is nothing to repair.\n");
     return 1;
   }
+
+  std::wstring because;
+  if (DriverRanThisSession(&because) && !force) {
+    Say(L"The driver has already run this session, so nothing is being\n"
+        L"restarted: %s.\n"
+        L"Use /force to restart it anyway.\n",
+        because.c_str());
+    return 0;
+  }
+  if (!force) {
+    Say(L"The driver has not run this session: %s.\n", because.c_str());
+  }
+
+  /* Where the log stands before anything is restarted. The check below has
+   * to see it move past this, not merely past the boot time: with /force the
+   * driver has usually been running, so its log already postdates the boot
+   * and a check against that would pass without the driver having restarted
+   * at all. */
+  const ULONGLONG before = DriverLogWriteTime();
+  const ULONGLONG boot = BootFileTime();
+  const ULONGLONG must_exceed = before > boot ? before : boot;
 
   int repaired = 0;
   for (const DeviceNode& device : devices) {
@@ -369,8 +460,27 @@ int Repair() {
     Say(L"The display device would not restart.\n");
     return 1;
   }
-  Say(L"Done. The monitor should appear within a few seconds.\n");
-  return 0;
+
+  /* Report whether the restart achieved anything, rather than reporting
+   * success because two Plug and Play calls returned. The devnode status is
+   * no use here for the same reason it was no use above.
+   *
+   * This matters for the earlier of the two triggers, which can fire before
+   * the user mode driver framework is ready. When it does, this says so, and
+   * the later trigger finds the driver still absent and tries again. */
+  for (int waited = 0; waited < 15; ++waited) {
+    if (DriverLogWriteTime() > must_exceed) {
+      Say(L"Done: the driver is running. The monitor should appear within a\n"
+          L"few seconds.\n");
+      return 0;
+    }
+    Sleep(1000);
+  }
+
+  Say(L"The device restarted but the driver still has not run, so it did\n"
+      L"not start. If this was run early in the session, the attempt after\n"
+      L"it should succeed.\n");
+  return 1;
 }
 
 /* Arranges for the repair above to run after every boot.
@@ -385,6 +495,13 @@ int Repair() {
  * logon screen, where the monitor should still work; a minute is long
  * enough for the framework to be up and is not noticeable, since the user
  * is waiting for Windows itself at that point anyway.
+ *
+ * Both therefore fire in an ordinary session, which is why the repair
+ * checks whether it is needed before restarting anything. Without that
+ * check the panel went black twice in the first two minutes of every
+ * session, the second time to cure a display that was already working.
+ * Whichever trigger comes first does the work; the other finds the driver
+ * running and does nothing, or finds it still absent and tries again.
  *
  * Registered through schtasks with an XML definition. The command line
  * form of schtasks cannot express a delayed boot trigger, and the COM
@@ -1004,6 +1121,7 @@ int wmain(int argc, wchar_t** argv) {
 
   bool uninstall = false;
   bool repair = false;
+  bool force = false;
   bool wait = true;
   for (int i = 1; i < argc; ++i) {
     if (_wcsicmp(argv[i], L"/uninstall") == 0 ||
@@ -1012,13 +1130,17 @@ int wmain(int argc, wchar_t** argv) {
     } else if (_wcsicmp(argv[i], L"/repair") == 0 ||
                _wcsicmp(argv[i], L"-repair") == 0) {
       repair = true;
+    } else if (_wcsicmp(argv[i], L"/force") == 0 ||
+               _wcsicmp(argv[i], L"-force") == 0) {
+      force = true;
     } else if (_wcsicmp(argv[i], L"/quiet") == 0) {
       g_quiet = true;
       wait = false;
     } else if (_wcsicmp(argv[i], L"/nowait") == 0) {
       wait = false;
     } else {
-      wprintf(L"usage: %s [/uninstall | /repair] [/quiet]\n", argv[0]);
+      wprintf(L"usage: %s [/uninstall | /repair [/force]] [/quiet]\n",
+              argv[0]);
       return 1;
     }
   }
@@ -1027,7 +1149,7 @@ int wmain(int argc, wchar_t** argv) {
   if (uninstall) {
     result = Uninstall();
   } else if (repair) {
-    result = Repair();
+    result = Repair(force);
   } else {
     result = Install();
   }

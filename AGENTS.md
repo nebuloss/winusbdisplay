@@ -60,8 +60,17 @@ usbdisplay\scripts\build-tool.bat         # usbdisplayctl -> usbdisplay\build\
 usbdisplay\scripts\test.bat [filter]      # build and run the tests
 usbdisplay\scripts\smoke.ps1 [-Install]   # check a build against real hardware
 usbdisplay\scripts\build-driver.bat       # the driver
+usbdisplay\scripts\build-setup.bat        # driversetup.exe, the install step
+usbdisplay\scripts\build-tray.bat         # usbdisplaytray.exe, brightness
+usbdisplay\scripts\build-probe.bat        # brightnessprobe.exe, diagnostic
+usbdisplay\scripts\build-shader.bat       # regenerate the committed shader
 usbdisplay\scripts\install.ps1            # both packages, elevated
 usbdisplay\scripts\reattach.ps1           # after the USB package is replaced
+usbdisplay\scripts\repair.ps1             # re-enumerate a device that failed
+                                          # to start; this is the cold boot fix.
+                                          # Does nothing unless the driver has
+                                          # not run this session; -Force to
+                                          # restart regardless
 usbdisplay\scripts\purge.ps1              # remove everything
 
 scripts\elev.ps1 -Start                # one UAC prompt per session
@@ -90,7 +99,13 @@ to a stand-in that records what was sent:
 usbdisplay\scripts\test.bat
 usbdisplay\scripts\test.bat planner      # one group
 cd usbdisplay && make test                # same tests, no Windows needed
+cd usbdisplay && make build               # compile only
 ```
+
+`make` refuses to run on anything but 64-bit x86, and says why rather than
+failing later at a missing header: the conversion kernels are written against
+SSE2 directly, which is baseline there and would need a second
+implementation anywhere else.
 
 Everything the tests cover is free of any operating system, which is why
 they also build with an ordinary compiler on an ordinary Linux box. Keep it
@@ -120,8 +135,25 @@ usbdisplay\build\usbdisplayctl.exe benchsizes      # re-measure the cost model
 usbdisplay\build\usbdisplayctl.exe testpattern --bars
 ```
 
+Five commands are deliberately missing from its own usage text because they
+are for investigation rather than use: `health`, `enable`, `trigger`, `peek`
+and `poke`. They work; `peek` and `poke` talk straight to chip registers.
+
 The driver writes `C:\Windows\Temp\usbdisplaydd.log`. **Read it first.** The
 Windows event log will generally only say "problem code 10".
+
+Three things about that log, each of which has already cost time:
+
+- It is truncated on every load, so a reinstall destroys the record of the
+  session that went wrong. One generation is kept as
+  `usbdisplaydd.log.prev`, and **that is the file to read for anything about
+  startup.**
+- Lines carry a time but no date, so a boot session and a hand started one
+  look alike. `DriverEntry` records the date and the machine's uptime; find
+  that line before trusting any timestamp.
+- **An empty log is itself a finding.** It means the driver never ran, which
+  is a Windows load failure invisible from inside the driver. See the cold
+  boot entry under settled questions.
 
 `scripts\smoke.ps1` checks a built driver against whatever is plugged in,
 in about two minutes. Everything in `tests\` runs without hardware, which
@@ -154,18 +186,35 @@ signing and no reboot. Only pixels need WinUSB.
 ```
 usbdisplay/src/core/  display_device.h  the seam: what the rest of the driver
                                         may assume about any adapter
+                      link.h            where control exchanges and pixels go,
+                                        with no operating system in sight; it
+                                        is why the tests run on Linux
                       macrosilicon.*    the MS912x/MS913x implementation
-                      proto.h           its wire constants, no logic
+                      proto.*           its wire constants, no logic
                       mode.h            device independent mode and connector
                       usb.*             HID control plus WinUSB bulk handles
+                      open_device.cpp   enumeration and probing, Windows
 usbdisplay/src/render/ rect.*        rectangles and the cost model interface
                       damage.*       the planner, and refinement
                       convert.*      conversion kernels and framing
                       converter.*    RegionConverter, processor and graphics
+                      overlay.*      blending the pointer into already
+                                     converted pixels; arithmetic only, so
+                                     it can be tested without a compositor
 usbdisplay/src/driver/   driver.cpp     the display callbacks
                       device.*       adapter, monitor, mode list
                       pipeline.*     the frame loop
                       sender.*       the thread that owns the USB write
+                      graphics.*     the long lived Direct3D device
+                      cursor.*       pointer shape and position, from the OS
+                      settings.*     runtime knobs, read from the registry
+                      log.*          where every investigation starts
+usbdisplay/src/tools/ usbdisplayctl/   the hardware harness
+                      setup/           driversetup.exe: packages, device
+                                       nodes, certificate, permissions
+                      usbdisplaytray/  brightness, notification area
+                      brightnessprobe/ which brightness paths a monitor
+                                       actually answers
 usbdisplay/tests/        runs without hardware
 ```
 
@@ -407,6 +456,44 @@ Each cost real investigation; the evidence is in `docs/protocol-notes.md`.
   everything changed". Repainting on those frames costs a full repaint on
   frames with nothing to draw, and lags the display by hundreds of
   milliseconds.
+- **The panel needs traffic to stay lit, and a still desktop produces
+  none**, because the compositor stops presenting entirely. The pipeline
+  repaints a band on an interval the device reports (`KeepaliveMs`), sized
+  from the cost model so it fits one transfer slot. Remove it and the panel
+  goes black while every counter reports success. The one exception is the
+  repaint after reprogramming, which goes out whole rather than in bands,
+  because stripes filling in over four seconds are worse than paying for a
+  single expensive transfer.
+- **The driver has to draw the mouse pointer itself.** An indirect display
+  is handed the desktop without it, on the assumption the hardware has a
+  cursor of its own. Harder than drawing it is **erasing** it: moving the
+  pointer changes two areas of the screen and the compositor reports
+  neither, so both must be added to the damage by hand or the panel fills
+  with copies. Blending happens after conversion, in the adapter's own
+  format, which looks wrong and is right: the colour transform is a matrix,
+  so it is linear.
+- **Windows fails to load this driver at boot, every single time, and that
+  is structural rather than a bug.** The device is root enumerated, so Plug
+  and Play starts it during early boot device enumeration, before the user
+  mode driver framework exists. The load fails with
+  `STATUS_FAILED_DRIVER_ENTRY` (`0xC0000365`, System event id 219) and
+  Windows never retries, so there is no second monitor for the rest of the
+  session. Six boots out of six on record. Installation registers a
+  scheduled task that re-enumerates the device at logon and again a minute
+  after boot; `repair.ps1` is the same thing by hand, and also recovers an
+  adapter that stopped for any other reason. This is why reinstalling always
+  appeared to cure a dark panel, and that coincidence sent this project
+  chasing faults in how the adapter is driven.
+- **A device whose user mode driver failed to load still reports itself
+  healthy.** `Get-PnpDevice` says `OK` / `CM_PROB_NONE` / "working
+  properly", measured 44 seconds after a load failure and before anything
+  had restarted it. The kernel side started; only the host process did not.
+  So **never decide anything from the devnode status**: it reads identically
+  in the broken case and the working one. The usable signal is the driver's
+  log, because nothing else writes it. A log last written before the machine
+  booted means the driver has not run this session. The startup repair uses
+  exactly that, so the second trigger does not blank a display the first one
+  already fixed.
 
 ## Rules that are easy to violate
 
@@ -449,6 +536,20 @@ Each cost real investigation; the evidence is in `docs/protocol-notes.md`.
 - **Replacing the WinUSB package detaches the pixel interface** and it does
   not come back on its own. The installer skips the package when it is
   already current; if it did replace it, run `reattach.ps1`.
+- **Settings live in `HKLM\SOFTWARE\usbdisplay`, not `HKCU`.** The driver
+  runs inside WUDFHost as LOCAL SERVICE and has no user hive to read. The
+  installer widens the ACL on that one key so the brightness control can
+  write it without elevating every time a slider moves.
+- **Brightness is the gamma ramp path, applied during conversion.** Windows
+  has three mechanisms: DDC/CI cannot reach a display that is not on a
+  graphics card's signalling hardware, and the WMI path needs a kernel
+  driver this project does not have and could not test. `brightnessprobe`
+  reports which paths a given monitor answers.
+- **Create the Direct3D device once, not per swapchain.** The first creation
+  in a process loads the graphics driver and takes hundreds of
+  milliseconds, by which time a swapchain handed to a callback has gone
+  stale and fails with `DXGI_ERROR_ACCESS_LOST`. Measured here: 412 ms and
+  a failure, then 60 ms and success. Hence `driver/graphics.*`.
 - **Never remove a live display device node.** Disable it, wait for the stop
   to finish, then remove. Removing one outright while its monitor is still
   in the desktop bug checked a machine during development, in kernel code
