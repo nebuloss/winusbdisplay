@@ -632,10 +632,16 @@ the driver darkens it within seconds, with a clean log and every transfer
 succeeding. Measured away already: the brightness tray and its gamma
 repaint, the keepalive band walk, the band pattern itself including the
 double transmission, failing or cancelled transfers, and skipped mode
-programming. **Do not re-test those.** What is left is that the two paths
-own the pixel pipe differently, the driver's handle living in WUDFHost and
-written from `FrameSender`'s thread. `docs/troubleshooting.md` has the
-measurements.
+programming. **Do not re-test those.**
+
+**A physical replug cures it and nothing in software does.** That is the
+shape of the fault: a wedge in the adapter that survives everything the
+host can send. A frame from the tool lights the panel while the chip is
+still wedged, and the driver re-darkens it, so **"a full frame revives a
+dark adapter" is too strong: it revives the picture, not the chip.** Every
+failed remedy in the history of this bug was applied to a chip that was
+still in that state. `docs/troubleshooting.md` has the measurements, the
+one confound not yet separated, and the test that would separate it.
 
 ## Style
 

@@ -1059,5 +1059,63 @@ imitate from outside.
 Until then the honest statement is that **this adapter needs a physical
 replug**, and that the driver may darken it again on the next start.
 
+### The replug worked, and it says what kind of fault this is
+
+Confirmed on the machine: a physical unplug and replug restored the panel,
+and it then stayed lit under the driver with no complaint at all.
+
+```
+10:42:07  attach: 345F:9133, after the driver had been waiting 9 s for it
+10:42:08  full frame 1, then the ordinary band walk
+10:43:58  sent=436 skipped=1 dropped=0 failed=0, 212 MB
+          health: showing a picture (10 F7 43 12), held over 60 s
+```
+
+Not one "not transmitting" line in the whole session, where every previous
+session today produced one within seconds.
+
+**Every session today splits perfectly on one line of the log:**
+
+| how the driver attached | sessions | outcome |
+|---|---|---|
+| `PrepareHardware: adapter present` | 09:01, 09:02, 09:45, 10:02, 10:17, 10:23, 10:33 | dark, every time |
+| `PrepareHardware: no adapter yet, watching for one` | 10:41 | works |
+
+That looks like the answer and it is probably not, which is worth stating
+plainly so the next person does not chase it. **The two cases are
+confounded.** The second one is both a different code path *and* a
+freshly power-cycled adapter, because the only way to reach it is to
+unplug the thing.
+
+The code path is the weaker explanation of the two. `TryAttach` is one
+function called from two places, synchronously from `PrepareHardware` when
+the adapter is already there and from `WatcherLoop` when it arrives later.
+It does the same work to the chip either way, so there is little for the
+ordering alone to break.
+
+**So the better reading is that the dark state is a wedge in the adapter
+that only a power cycle clears**, which is what this document said at the
+outset and what today's measurements support from a new direction:
+
+- A full frame from the tool lights the panel **temporarily**, and the
+  driver then darkens it again within seconds. The wedge survives the frame
+  that appears to cure it.
+- Reprogramming, output enable, and a device restart all leave it dark.
+- A power cycle clears it permanently.
+
+That is why no software remedy has ever held: every one of them was applied
+to a chip that was still wedged. It also means the earlier conclusion, that
+a frame revives a dark adapter, is **too strong**. It revives the picture,
+not the chip.
+
+To separate the confound properly, restart the device now, while the
+adapter is freshly replugged and working, so that the driver takes the
+`adapter present` path on a chip that is not wedged. If it stays lit the
+code path is innocent and the wedge is the whole story. If it goes dark the
+path matters after all. **That test costs a working display and a physical
+replug to undo, so it needs the user's agreement rather than being run on
+its own.**
+
+
 
 
