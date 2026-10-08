@@ -474,6 +474,39 @@ if (Test-Path $repairScript) {
     Write-Host "    WARNING: $repairScript is missing, startup repair not set up"
 }
 
+# Getting the driver running is not the same as getting a second screen, and
+# the difference is invisible from inside the driver: it can be loaded, the
+# monitor announced and frames flowing while Windows has not extended the
+# desktop onto it, so the user sees nothing. Measured in exactly that state.
+#
+# The desktop layout belongs to an interactive session, so the SYSTEM task
+# above cannot do this. In a release the tray program handles it, because it
+# already starts at sign-in as the signed-in user. For a source build, do it
+# now, so installing leaves a working screen rather than a working driver.
+Write-Host ''
+Write-Host '--- adding the display to the desktop ---'
+$setupExe = Join-Path $root 'build\driversetup.exe'
+$extendScript = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'scripts\extend-desktop.ps1'
+Add-Type -AssemblyName System.Windows.Forms
+$before = @([System.Windows.Forms.Screen]::AllScreens).Count
+try {
+    if (Test-Path $setupExe) {
+        # Preferred: the same conditional check the release ships, so this
+        # does not rearrange screens somebody has arranged on purpose.
+        & $setupExe /extend /nowait 2>&1 | ForEach-Object { Write-Host "    $_" }
+    } elseif (Test-Path $extendScript) {
+        # The development helper, which extends unconditionally.
+        & $extendScript | ForEach-Object { Write-Host "    $_" }
+    } else {
+        Write-Host '    note: no driversetup.exe and no extend-desktop.ps1, skipped'
+    }
+    $after = @([System.Windows.Forms.Screen]::AllScreens).Count
+    Write-Host ("    screens: {0} -> {1}" -f $before, $after)
+} catch {
+    Write-Host '    WARNING: could not extend the desktop'
+    Write-Host "    $($_.Exception.Message)"
+}
+
 Write-Host ''
 Write-Host '=== result ==='
 Get-PnpDevice | Where-Object {

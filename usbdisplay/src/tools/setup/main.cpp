@@ -70,6 +70,11 @@ const wchar_t kSettingsKey[] = L"SOFTWARE\\usbdisplay";
  * driver at boot. See InstallBootRepair. */
 const wchar_t kBootTaskName[] = L"usbdisplay repair after startup";
 
+/* How our adapter describes itself to the display enumeration APIs. Matched
+ * loosely, on the leading words, so that renaming the device description in
+ * the INF does not silently stop this from recognising it. */
+const wchar_t kAdapterMatch[] = L"USB Display";
+
 /* Names this project has used. An upgrade has to recognise its own past. */
 const wchar_t* kFormerHardwareIds[] = {
     L"root\\usbdisplaydd", L"root\\usbhdmidd", L"root\\ms912xidd",
@@ -417,6 +422,83 @@ bool DriverRanThisSession(std::wstring* because) {
   return false;
 }
 
+/* Is our monitor part of the desktop?
+ *
+ * A monitor arriving is not the same as a screen appearing, and this is the
+ * distinction that made the display look broken while every other signal
+ * said it was fine. The driver can be loaded, the monitor announced, a
+ * swapchain assigned and frames flowing, and the user still has no second
+ * screen, because Windows has not extended the desktop onto it. Measured in
+ * exactly that state: one screen in the desktop, a 1920x1080 virtual
+ * desktop, and our adapter sitting there at 1920x1080 with 489 MB sent and
+ * nothing dropped.
+ *
+ * `found` says whether the adapter exists at all, which separates "there is
+ * nothing to attach" from "there is, and it is not attached". */
+bool MonitorIsOnTheDesktop(bool* found) {
+  *found = false;
+  for (DWORD i = 0;; ++i) {
+    DISPLAY_DEVICEW adapter = {};
+    adapter.cb = sizeof(adapter);
+    if (!EnumDisplayDevicesW(nullptr, i, &adapter, 0)) {
+      break;
+    }
+    if (wcsstr(adapter.DeviceString, kAdapterMatch) == nullptr) {
+      continue;
+    }
+    *found = true;
+    if ((adapter.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) != 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/* Extends the desktop onto our monitor, if it is not on it already.
+ *
+ * Deliberately conditional. Reapplying an extend topology unconditionally
+ * at every logon would override a deliberate choice: somebody who has set
+ * this panel as their only screen, or arranged it above rather than beside
+ * the built-in one, would find it rearranged behind their back. If the
+ * monitor is on the desktop in any arrangement, this does nothing.
+ *
+ * Must run in the user's own session, which is why it cannot be folded into
+ * the repair task. The desktop topology belongs to an interactive session;
+ * SYSTEM in session 0 has no say over it. */
+int ExtendDesktop() {
+  bool found = false;
+  if (MonitorIsOnTheDesktop(&found)) {
+    Say(L"The display is already part of the desktop, so nothing is being\n"
+        L"rearranged.\n");
+    return 0;
+  }
+  if (!found) {
+    Say(L"No USB display adapter is present, so there is no screen to add.\n");
+    return 1;
+  }
+
+  Say(L"The display is present but not part of the desktop. Extending.\n");
+  const LONG result = SetDisplayConfig(0, nullptr, 0, nullptr,
+                                       SDC_APPLY | SDC_TOPOLOGY_EXTEND);
+  if (result != ERROR_SUCCESS) {
+    Say(L"Windows refused to extend the desktop (error %ld).\n", result);
+    return 1;
+  }
+
+  /* Confirm against the desktop rather than trusting the return value, for
+   * the same reason the repair confirms against the driver's log. */
+  for (int waited = 0; waited < 5; ++waited) {
+    Sleep(1000);
+    if (MonitorIsOnTheDesktop(&found)) {
+      Say(L"Done: the display is now a second screen.\n");
+      return 0;
+    }
+  }
+  Say(L"Windows accepted the change but the display is still not on the\n"
+      L"desktop.\n");
+  return 1;
+}
+
 /* The repair itself, as run after startup by the scheduled task below and
  * available by hand as `driversetup /repair`. `force` is `/force`, for a
  * user who wants the restart whatever this program thinks. */
@@ -472,6 +554,15 @@ int Repair(bool force) {
     if (DriverLogWriteTime() > must_exceed) {
       Say(L"Done: the driver is running. The monitor should appear within a\n"
           L"few seconds.\n");
+      /* A running driver is not yet a second screen, so finish the job when
+       * this is being run by hand in somebody's session. Only when the
+       * monitor is visible here and unattached, which is never the case for
+       * the SYSTEM task, so that path stays silent. Its own result is
+       * ignored: the repair succeeded either way. */
+      bool found = false;
+      if (!MonitorIsOnTheDesktop(&found) && found) {
+        ExtendDesktop();
+      }
       return 0;
     }
     Sleep(1000);
@@ -1121,6 +1212,7 @@ int wmain(int argc, wchar_t** argv) {
 
   bool uninstall = false;
   bool repair = false;
+  bool extend = false;
   bool force = false;
   bool wait = true;
   for (int i = 1; i < argc; ++i) {
@@ -1130,6 +1222,9 @@ int wmain(int argc, wchar_t** argv) {
     } else if (_wcsicmp(argv[i], L"/repair") == 0 ||
                _wcsicmp(argv[i], L"-repair") == 0) {
       repair = true;
+    } else if (_wcsicmp(argv[i], L"/extend") == 0 ||
+               _wcsicmp(argv[i], L"-extend") == 0) {
+      extend = true;
     } else if (_wcsicmp(argv[i], L"/force") == 0 ||
                _wcsicmp(argv[i], L"-force") == 0) {
       force = true;
@@ -1139,7 +1234,8 @@ int wmain(int argc, wchar_t** argv) {
     } else if (_wcsicmp(argv[i], L"/nowait") == 0) {
       wait = false;
     } else {
-      wprintf(L"usage: %s [/uninstall | /repair [/force]] [/quiet]\n",
+      wprintf(L"usage: %s [/uninstall | /repair [/force] | /extend]"
+              L" [/quiet]\n",
               argv[0]);
       return 1;
     }
@@ -1150,6 +1246,8 @@ int wmain(int argc, wchar_t** argv) {
     result = Uninstall();
   } else if (repair) {
     result = Repair(force);
+  } else if (extend) {
+    result = ExtendDesktop();
   } else {
     result = Install();
   }

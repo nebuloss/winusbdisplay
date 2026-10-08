@@ -854,3 +854,97 @@ Done: the driver is running. The monitor should appear within a few seconds.
 09:35:20.560  pipeline: full frame 1: 1920x1080, 4147216 bytes
 ```
 
+## A monitor arriving is not a screen appearing
+
+**This is what "I still don't see a second screen" actually was**, after the
+driver load failure above had been worked around and the driver was
+demonstrably running. The two entries above are about getting the driver to
+load. Neither of them produces a screen.
+
+The state, measured while the user had no second display:
+
+```
+driver     : running, DriverEntry 98 s after boot
+device     : OK, CM_PROB_NONE
+monitors   : 2 active (WmiMonitorID), both Acer KA240HQ
+adapter    : USB Display (indirect display driver), 1920x1080
+pipeline   : sent=23694 skipped=1316 dropped=0 failed=0, 489 MB total
+desktop    : ONE screen, \\.\DISPLAY1, virtual desktop 1920x1080
+```
+
+Everything inside the driver reported success because everything inside the
+driver *was* succeeding. The monitor had arrived, a swapchain was assigned,
+frames were going out and none were dropped. Windows had simply never
+extended the desktop onto it, so there was no second screen for the user and
+nothing whatever in the driver's log to find.
+
+**This is the third distinct way this display appears broken, and the only
+one with no symptom on the driver side at all.** The others are a dark panel
+while frames flow, and a driver that never loaded. Check in this order: the
+driver log, then whether the driver ran this session, then the topology.
+
+Diagnose it with the topology, not with the driver:
+
+```powershell
+Add-Type -AssemblyName System.Windows.Forms
+[System.Windows.Forms.Screen]::AllScreens |
+    ForEach-Object { "$($_.DeviceName) $($_.Bounds) primary=$($_.Primary)" }
+```
+
+One screen listed while `Win32_VideoController` shows the USB adapter at a
+real resolution is this fault exactly.
+
+The cure is one call:
+
+```
+SetDisplayConfig(0, NULL, 0, NULL, SDC_APPLY | SDC_TOPOLOGY_EXTEND)
+```
+
+which took the desktop from 1920x1080 to 3840x1080 and produced
+`\\.\DISPLAY7` at (1920,0). `scripts/extend-desktop.ps1` is that call;
+`driversetup /extend` is the same with a condition on it.
+
+**It cannot be done from the startup repair task**, and that shapes the fix.
+The desktop layout belongs to an interactive session, so SYSTEM in session 0
+has no say over it. Nor can a task run `driversetup /extend` as the
+logged-on user, because that program's manifest requires elevation and a
+standard user's task could not start it.
+
+So it lives in **the tray program**, which already starts at sign-in from
+`HKCU\...\Run` as the signed-in user, unelevated: exactly the identity
+needed, where the alternative was a second program that did nothing else.
+See `EnsureDisplayIsOnTheDesktop` in `src/tools/usbdisplaytray/main.cpp`.
+
+Two limits on it, both deliberate:
+
+- **Conditional.** If the display is attached in any arrangement it does
+  nothing, so somebody who has put the panel above the built-in screen, or
+  made it their only one, does not find it rearranged behind their back.
+- **Only for the first two minutes of a session.** The fault is a startup
+  one, and the driver is often not up when the tray starts, because the
+  repair may need two attempts. After that it stops looking, so a user
+  detaching this screen on purpose is not fought over it every few seconds.
+
+What is verified and what is not:
+
+- Verified: the fault exists, in the state measured above.
+- Verified: `SDC_TOPOLOGY_EXTEND` cures it. That is how the screen was
+  brought back.
+- Verified: the condition reads the attached case correctly, and the tray
+  leaves an attached display alone across 24 seconds of polling without
+  disturbing its position.
+- **Not verified: the branch that fires.** Reproducing "present but not
+  attached" on demand defeated two attempts. `SDC_TOPOLOGY_INTERNAL`
+  returns success and changes nothing, and detaching a single display with
+  `ChangeDisplaySettingsEx` at 0x0 returns `DISP_CHANGE_BADFLAGS`. The state
+  appears to need a monitor arriving mid-session for which Windows has no
+  remembered topology, which is what a cold boot plus a late driver load
+  produces. **A reboot is the test.**
+
+One encouraging measurement: restarting the device with
+`driversetup /repair /force` **keeps** the extended desktop, even though the
+display's name changes (`\\.\DISPLAY7` became `\\.\DISPLAY8`). Windows
+matches it by monitor rather than by path, so the arrangement has to be
+established once per session, not after every repair.
+
+

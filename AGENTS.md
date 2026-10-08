@@ -77,6 +77,7 @@ scripts\elev.ps1 -Start                # one UAC prompt per session
 scripts\elev.ps1 -Script <abs path>
 scripts\elev.ps1 -Command '<powershell>'
 scripts\elev.ps1 -Stop
+scripts\extend-desktop.ps1             # force the panel into the desktop
 ```
 
 On Linux, where the whole release is built:
@@ -494,6 +495,24 @@ Each cost real investigation; the evidence is in `docs/protocol-notes.md`.
   booted means the driver has not run this session. The startup repair uses
   exactly that, so the second trigger does not blank a display the first one
   already fixed.
+- **A monitor arriving is not a screen appearing, and this failure is
+  invisible from inside the driver.** Measured: driver loaded, monitor
+  announced, swapchain assigned, 489 MB sent, nothing dropped, and *one*
+  screen on the desktop, because Windows had never extended onto the new
+  monitor. There is nothing in the driver's log to find, because nothing in
+  the driver is wrong. Check the topology, with
+  `[System.Windows.Forms.Screen]::AllScreens`, not the driver. The cure is
+  `SetDisplayConfig(SDC_APPLY | SDC_TOPOLOGY_EXTEND)`.
+  **So there are three separate ways this display looks broken**: a dark
+  panel while frames flow, a driver that never loaded, and a monitor that
+  is not on the desktop. They have nothing in common, and only the first
+  two show up in the log.
+- **The desktop layout cannot be set from a SYSTEM task.** It belongs to an
+  interactive session, so the startup repair cannot do it, and
+  `driversetup /extend` cannot be a standard user's task either because its
+  manifest demands elevation. It is done by the tray program, which already
+  autostarts in the user's session, and that is the only reason the tray
+  carries display code at all.
 
 ## Rules that are easy to violate
 

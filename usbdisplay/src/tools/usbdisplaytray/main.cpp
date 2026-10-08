@@ -54,6 +54,12 @@ constexpr UINT kRescanMs = 4000;
 constexpr UINT kSaveTimer = 2;
 constexpr UINT kSaveDelayMs = 600;
 
+/* Watches for the USB display arriving without becoming a screen, early in
+ * the session only. See EnsureDisplayIsOnTheDesktop. */
+constexpr UINT kExtendTimer = 3;
+constexpr UINT kExtendMs = 3000;
+constexpr unsigned kExtendAttempts = 40;
+
 const wchar_t kWindowClass[] = L"UsbDisplayBrightnessTray";
 const wchar_t kSettingsKey[] = L"SOFTWARE\\usbdisplay\\Brightness";
 const wchar_t kAutostartKey[] =
@@ -75,6 +81,7 @@ std::vector<Monitor> g_monitors;
 int g_dragging = -1;
 int g_dpi = 96;
 unsigned long long g_hidden_at_ms = 0;
+unsigned g_extend_attempts = 0;
 
 int Scale(int value) { return MulDiv(value, g_dpi, 96); }
 
@@ -406,6 +413,63 @@ void ApplyBrightness(int index, int percent, bool save) {
   }
 }
 
+/* Makes the USB display an actual screen, if it has arrived without being
+ * one.
+ *
+ * A monitor arriving is not the same as a screen appearing, and the gap
+ * between those two is what made the display look broken while every signal
+ * inside the driver said it was working. Measured in exactly that state:
+ * the driver loaded, the monitor announced, a swapchain assigned, frames
+ * going out, nothing dropped, 489 MB sent, and one single screen on the
+ * desktop. Windows had simply not extended onto it, so there was nothing
+ * for the user to see and nothing in the driver to find.
+ *
+ * This lives in the tray program because of where it has to run. The
+ * desktop layout belongs to an interactive session, so SYSTEM cannot change
+ * it, which rules out the startup repair task. The tray already starts at
+ * sign-in as the signed-in user, unelevated, which is exactly the identity
+ * needed, so the alternative was a second program that did nothing else.
+ *
+ * Two deliberate limits:
+ *
+ * Conditional. If the display is on the desktop in any arrangement this
+ * does nothing, so somebody who has put the panel above the built-in screen
+ * or made it their only one does not find it rearranged behind their back.
+ *
+ * Early in the session only, for about two minutes. The fault is a startup
+ * one: the driver often is not up yet when the tray starts, because it may
+ * take the repair task two attempts to get it there. Past that this stops
+ * looking, so a user who later detaches this screen on purpose is not
+ * fought over it every few seconds. */
+void EnsureDisplayIsOnTheDesktop() {
+  bool present = false;
+  for (DWORD i = 0;; ++i) {
+    DISPLAY_DEVICEW adapter = {};
+    adapter.cb = sizeof(adapter);
+    if (!EnumDisplayDevicesW(nullptr, i, &adapter, 0)) {
+      break;
+    }
+    if (wcsstr(adapter.DeviceString, L"USB Display") == nullptr) {
+      continue;
+    }
+    present = true;
+    if ((adapter.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) != 0) {
+      /* Already a screen, so the job is done and there is no reason to keep
+       * watching. */
+      g_extend_attempts = kExtendAttempts;
+      return;
+    }
+  }
+
+  if (!present) {
+    /* The driver is not up yet, or there is no adapter plugged in. Either
+     * way there is nothing to extend onto; keep waiting. */
+    return;
+  }
+
+  SetDisplayConfig(0, nullptr, 0, nullptr, SDC_APPLY | SDC_TOPOLOGY_EXTEND);
+}
+
 /* Re-reads the attached monitors, keeping the values already on screen.
  *
  * Called on a timer and when Windows reports a display change, so plugging
@@ -654,6 +718,11 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam,
             UpdateTooltip();
           }
         }
+      } else if (wparam == kExtendTimer) {
+        if (++g_extend_attempts >= kExtendAttempts) {
+          KillTimer(window, kExtendTimer);
+        }
+        EnsureDisplayIsOnTheDesktop();
       } else if (wparam == kSaveTimer) {
         KillTimer(window, kSaveTimer);
         for (Monitor& monitor : g_monitors) {
@@ -837,6 +906,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command_line, int) {
   }
 
   SetTimer(g_window, kRescanTimer, kRescanMs, nullptr);
+
+  /* Check once straight away, then on a timer, because the common case is a
+   * display that is already waiting by the time this starts. */
+  EnsureDisplayIsOnTheDesktop();
+  SetTimer(g_window, kExtendTimer, kExtendMs, nullptr);
 
   MSG message;
   while (GetMessageW(&message, nullptr, 0, 0) > 0) {
