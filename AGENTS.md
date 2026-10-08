@@ -648,25 +648,24 @@ dark adapter" is too strong: it revives the picture, not the chip.** Every
 failed remedy in the history of this bug was applied to a chip that was
 still in that state.
 
-**A mechanism has been found and fixed, and it is the best candidate so
-far**: a failed bulk transfer returned without sending the end-of-block
-packet, leaving the chip waiting for the rest of a block that never came.
-Nothing the host can send recovers from that, which is the fault's exact
-signature, and the vendor's driver sends that packet unconditionally even
-after a transfer it has killed. **It is not yet proven to be the cause**,
-because the teardown that wedged the adapter could not be inspected: the
-driver keeps only one previous log and the install rotated it away.
-`docs/troubleshooting.md` has the test that would settle it, including why
-the fix cannot be judged by the install that delivers it.
+**A real defect was found and fixed here, and it is not the cure.** A failed
+bulk transfer returned without sending the end-of-block packet, leaving the
+chip waiting for the rest of a block. That is genuinely wrong, the vendor
+never does it, and it is fixed. **But the dark panel survives the fix**:
+with it installed and the adapter in a known good state, the first device
+restart darkened the panel again with zero failed transfers and a clean
+teardown. So the trigger is something in the stop sequence that is not a
+failed transfer.
 
-Two explanations that looked convincing and are **refuted, so do not
-revisit them**: that the attach path matters, which held for seven sessions
-and was broken by the next two, and that re-programming the mode on a live
-chip is what darkens it, which is contradicted by the tool doing exactly
-that four times in a row with the panel staying lit. **Practical
-consequence that still holds: installing the driver restarts the device, so
-on a running adapter it darkens the panel and the install needs a replug to
-finish.**
+Three explanations are now **refuted, so do not revisit them**: that the
+attach path matters, which held for seven sessions and broke on the next
+two; that re-programming the mode on a live chip is what darkens it, which
+the tool disproves by doing exactly that four times with the panel lit; and
+that the missing terminator was the cause. The remaining untested suspect,
+with the reasoning, is in `docs/troubleshooting.md`: `Cancel` sends a bare
+terminator even when no transfer was in flight, which the vendor never
+does. **The restart is what darkens it, not the install**, and not every
+time.
 
 ## Style
 

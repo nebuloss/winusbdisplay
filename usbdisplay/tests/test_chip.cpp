@@ -709,10 +709,10 @@ TEST(transfer, a_failed_frame_is_also_followed_by_a_zero_length_packet) {
   CHECK_EQ_BECAUSE(
       harness.link->bulks[1].length, static_cast<size_t>(0),
       "a failed write has usually delivered part of a block, so skipping "
-      "the terminator leaves the chip waiting for the rest of it for ever "
-      "and the next frame header is eaten as that block's tail; the chip "
-      "is then unrecoverable without cutting its power, which is how "
-      "reinstalling the driver could darken a working panel");
+      "the terminator leaves the chip waiting for the rest of it and the "
+      "next frame header is eaten as that block's tail; the vendor sends "
+      "it unconditionally. This is not a cure for the dark panel, which "
+      "was measured to survive it, only a hole that was genuinely open");
 }
 
 TEST(transfer, the_output_is_enabled_only_after_the_first_frame_lands) {

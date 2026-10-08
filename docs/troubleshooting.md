@@ -1245,6 +1245,55 @@ over an unfixed driver will still go dark, because the damage is done by
 the *outgoing* driver, so the fix cannot be judged by the install that
 delivers it.
 
+#### That test has been run, and the fix is not the cure
+
+Settled, and negative. The fixed driver was installed, the adapter was in a
+known good state, and the first device restart darkened the panel anyway:
+
+```
+start      : showing a picture (10 F7 43 12)
+restart 1  : DARK (10 58 01 00)
+failed transfers in the outgoing session: 0
+teardown   : pipeline: stopped, sent=384 skipped=4
+             detach: adapter is gone, removing the monitor
+```
+
+**Zero failed transfers, so no block was ever left open, and the panel went
+dark regardless.** The missing terminator was a real defect and is worth
+having fixed, but it is not what darkens this adapter. The hypothesis is
+refuted.
+
+Keep the fix: the vendor sends that packet unconditionally, this project's
+own rules require it, and leaving a block open is wrong whether or not it
+causes this particular fault. But **do not record it as a cure, and do not
+expect it to help a dark panel.**
+
+Two corrections to measurements taken while chasing this, both mine:
+
+- An earlier note here counted "67 failed transfers" in a teardown. That
+  was an artifact of matching the word `failed`, which appears in every
+  routine `failed=0` counter line. The real count was **zero**. Match on
+  `transfer of N bytes failed` instead.
+- "Installing the driver darkens the panel on a running adapter" is too
+  strong. One install did, another did not, and the restart that followed
+  the second one did. So the trigger is the device restart rather than the
+  install, and it is not perfectly deterministic either.
+
+**What the refutation leaves.** The teardown is clean and the panel still
+dies, so the damage is done by something in the stop sequence that is not a
+failed transfer. The remaining suspect in that sequence is `Cancel`, which
+aborts the pipe, resets it, and then sends a zero length packet
+**unconditionally, even when no transfer was in flight**. The vendor never
+sends a bare terminator: theirs always follows a frame. If the chip reads
+one as the end of a block that never started, it would advance its internal
+buffer index and leave the host's idea of which of the two images is next
+permanently out of step, which is the right shape for a display that goes
+dark while every transfer still succeeds.
+
+That is a hypothesis and nothing more. It has not been tested, and testing
+it costs a working display and a physical replug each time, so it needs the
+user's agreement rather than being tried on spec.
+
 It also explains the one thing that previously looked contradictory. A
 frame from the tool lights a wedged panel because the tool sets the mode
 and sends a whole frame in one go; the driver then starts, programs the

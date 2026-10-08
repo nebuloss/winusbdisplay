@@ -646,26 +646,26 @@ bool MacroSiliconDevice::SendTransfer(const uint8_t* data, size_t len) {
     /* Close the block even though the data write failed, before anything
      * else.
      *
-     * This is the fix for an adapter that goes dark and then cannot be
-     * recovered by any means short of unplugging it. A failed or aborted
-     * write has usually delivered part of a block, and the chip is then
-     * waiting for the rest of it. Returning here without the terminator
-     * leaves it waiting for ever: the next frame header is consumed as the
-     * tail of the abandoned block, so everything sent afterwards is
+     * A failed or aborted write has usually delivered part of a block, and
+     * the chip is then waiting for the rest of it. Returning here without
+     * the terminator leaves it waiting: the next frame header is consumed
+     * as the tail of the abandoned block, so everything sent afterwards is
      * misinterpreted, and neither reprogramming the mode nor resetting the
      * host endpoint tells the chip anything, because the thing that is out
-     * of step is inside the chip. Only cutting its power clears it.
+     * of step is inside the chip.
      *
      * The vendor's driver sends the terminator unconditionally, including
-     * after a transfer it has just killed on a timeout, which is the
-     * strongest evidence that this is required rather than merely tidy.
+     * after a transfer it has just killed on a timeout, which is why this
+     * is here. `Cancel` does the same for a deliberate stop, with the same
+     * reasoning; this path needed it too and did not have it.
      *
-     * `Cancel` already did this for the one case that was understood, a
-     * deliberate stop. The ordinary failure path needs it for the same
-     * reason and did not have it, which is how reinstalling the driver
-     * could darken a working panel: transfers fail as the outgoing driver
-     * is torn down, each one leaving a block open, and the incoming driver
-     * then talks to a chip that is no longer listening for a new frame.
+     * **This is not a cure for the dark panel, and was measured not to be.**
+     * It was added as a candidate explanation for that fault and then
+     * tested: with it in place, a device restart on a known good adapter
+     * darkened the panel again, with zero failed transfers and a clean
+     * teardown. The hole was real and this closes it, but something else in
+     * the stop sequence is what darkens the adapter. Read
+     * docs/troubleshooting.md before spending time here.
      *
      * Deliberately not checked. This is best effort on a path that has
      * already failed, the caller is about to be told so, and the error
