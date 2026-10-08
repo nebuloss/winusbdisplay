@@ -640,8 +640,18 @@ host can send. A frame from the tool lights the panel while the chip is
 still wedged, and the driver re-darkens it, so **"a full frame revives a
 dark adapter" is too strong: it revives the picture, not the chip.** Every
 failed remedy in the history of this bug was applied to a chip that was
-still in that state. `docs/troubleshooting.md` has the measurements, the
-one confound not yet separated, and the test that would separate it.
+still in that state.
+
+**The sharpest statement available: re-programming the mode on a chip that
+is already live and configured is what darkens it.** A freshly powered
+adapter takes its first mode set and works, whether that power came from a
+replug or from a reboot. The same chip re-initialised without losing power
+goes dark within seconds while every transfer still succeeds. An attach
+path correlation that looked convincing over seven sessions was refuted by
+two later ones and is recorded in `docs/troubleshooting.md` so nobody
+chases `TryAttach` again. **Practical consequence: installing the driver
+restarts the device, so on a running adapter it darkens the panel and the
+install needs a replug to finish.**
 
 ## Style
 

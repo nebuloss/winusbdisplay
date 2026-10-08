@@ -1137,6 +1137,43 @@ the adapter is already there and from `WatcherLoop` when it arrives later.
 It does the same work to the chip either way, so there is little for the
 ordering alone to break.
 
+**And the correlation is now refuted outright.** Two later sessions, both
+taking the `adapter present` path, came out opposite ways:
+
+| session | attach path | adapter last power-cycled | outcome |
+|---|---|---|---|
+| 11:13, after a reboot | `adapter present` | at that reboot | **stayed lit** |
+| 11:29, after reinstalling | `adapter present` | 16 minutes earlier | **dark in 9 s** |
+
+So the attach path predicts nothing, and the table above is a coincidence
+of seven samples. Do not spend time on `TryAttach`.
+
+**What the two tables agree on is the power cycle.** Every session that
+worked had freshly powered hardware, whether from a replug or from a
+reboot, which also power-cycles the USB bus. Every session that went dark
+had an adapter that had been powered continuously while the driver
+restarted around it.
+
+That gives a sharper statement of the fault than "a wedge": **re-running
+the mode programming on a chip that is already live and configured is what
+darkens it.** A chip that has just come up takes its first mode set and
+works. The same chip, re-initialised without losing power, goes dark within
+seconds while accepting every transfer.
+
+It also explains the one thing that previously looked contradictory. A
+frame from the tool lights a wedged panel because the tool sets the mode
+and sends a whole frame in one go; the driver then starts, programs the
+mode *again* on that same live chip, and darkens it. The chip was never
+un-wedged, so there was no contradiction to explain.
+
+**The practical consequence, which matters to anybody installing this:**
+installing or reinstalling the driver restarts the device, so on an adapter
+that is already running it will darken the panel, and the install then
+needs a replug to finish. Seen immediately on installing v0.3.0 over a
+working v0.3.0-equivalent source build: a correct install in every other
+respect, and a dark panel nine seconds later.
+
+
 **So the better reading is that the dark state is a wedge in the adapter
 that only a power cycle clears**, which is what this document said at the
 outset and what today's measurements support from a new direction:
@@ -1159,6 +1196,13 @@ code path is innocent and the wedge is the whole story. If it goes dark the
 path matters after all. **That test costs a working display and a physical
 replug to undo, so it needs the user's agreement rather than being run on
 its own.**
+
+**That test has since been run, by accident, and the path is innocent.**
+Installing the release restarted the device on a freshly rebooted and
+working adapter, which is exactly the missing case: `adapter present` on a
+chip that was not wedged, and it went dark in nine seconds. Combined with
+the 11:13 boot session, which took the same path and stayed lit, the only
+variable left standing is whether the adapter had lost power recently.
 
 
 
