@@ -941,6 +941,50 @@ What is verified and what is not:
   remembered topology, which is what a cold boot plus a late driver load
   produces. **A reboot is the test.**
 
+### The reboot happened, and the session came up working
+
+The test above has now been run, by rebooting the machine. Reported by the
+user as the first time the display has worked after a reboot, and the
+measurements agree:
+
+```
+11:13:39  booted
+11:13:41  WUDFRd failed to load, 0xC0000365   <- still happens, as expected
+11:13:55  DriverEntry, 16 s after this machine started
+11:14:20  startup repair ran: declined, the driver has already run
+11:15:01  startup repair ran again: declined, the same
+11:16:39  two screens, 3840x1080, health says showing a picture
+```
+
+What this confirms, and what it does not:
+
+- **Confirmed: the repair no longer blanks a working display.** Both
+  triggers fired and both declined, where before this fix each one
+  restarted the device and cost four seconds of black screen. The decision
+  came from the driver's log being newer than the boot, exactly as
+  intended.
+- **Confirmed: the detector fix matters in practice.** The register read
+  `0x43` on the working panel, which is the value the old comparison called
+  dark. Without that fix this session would have logged a dark panel while
+  the user looked at a working one.
+- **Confirmed: no dark panel this session.** Not one "not transmitting"
+  line, where every session before the replug produced one within seconds.
+  Consistent with the wedge being cleared by the power cycle and not
+  returning on its own.
+- **Not explained: what started the driver at 16 s.** The load failed at
+  2 s and `DriverEntry` ran at 16 s, before either repair trigger. So
+  something re-enumerated the device in between, and it was not this
+  project's task. Windows may retry once for a root enumerated device when
+  the framework comes up, which would mean the repair task is a safety net
+  rather than the mechanism. **Do not conclude the task is unnecessary from
+  one boot**: six earlier boots on record failed with no recovery at all,
+  which is why it exists.
+- **Still confounded: the desktop extend.** Two screens were present, but
+  Windows may have remembered the arrangement from the previous session
+  rather than the tray having applied it. A boot with the arrangement
+  deliberately cleared first would separate those.
+
+
 One encouraging measurement: restarting the device with
 `driversetup /repair /force` **keeps** the extended desktop, even though the
 display's name changes (`\\.\DISPLAY7` became `\\.\DISPLAY8`). Windows
