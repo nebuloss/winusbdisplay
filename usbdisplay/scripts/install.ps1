@@ -426,56 +426,126 @@ try {
 
 Write-Host ''
 Write-Host '=== 5. keeping it working after a reboot ==='
-# Windows fails to load this driver during boot, every time. The device is
-# root enumerated, so Plug and Play starts it during early boot device
-# enumeration, before the user mode driver framework is running, and a user
-# mode driver cannot load that early: the reflector fails with
-# STATUS_FAILED_DRIVER_ENTRY (0xC0000365) and Plug and Play does not retry.
-# The monitor then stays black for the whole session.
+# Windows fails to load this driver during boot, every time, and the reason
+# is neither a bug here nor special to this device: the user mode reflector
+# cannot reach the service control manager that early, so it fails every
+# user mode driver on the machine. Windows logs both halves of that in the
+# system log within the same second, Kernel-PnP 219 naming the device and
+# UMDF 10118 saying "this is expected during boot ... a retry will occur
+# once it has started".
 #
-# This is also why reinstalling always appeared to fix it, which misled this
-# project for a long time. Reinstalling re-enumerates the device, and by then
-# the framework is up.
+# That retry is Microsoft's and it usually works, about fifteen seconds in.
+# Nothing in an INF or a service start type moves it earlier; the floor is
+# when the service control manager is running. So this task is insurance for
+# the boot where the retries all fail, and the cure for a driver that loaded
+# and then died.
 #
-# So a scheduled task re-enumerates it shortly after startup, as SYSTEM.
-# Both triggers are wanted: logon for the normal case, and boot with a delay
-# so a machine sitting at the logon screen still drives the panel.
+# It is also why reinstalling always appeared to fix it, which misled this
+# project for a long time. Reinstalling re-enumerates the device, and by
+# then the framework is up.
 #
-# Both therefore fire in an ordinary session, so repair.ps1 decides for
-# itself whether a restart is needed. Without that it blanked the panel twice
-# in the first two minutes of every session, the second time to cure a
-# display that was already working.
+# Four triggers. Logon and boot cover the clock: logon for the normal case,
+# boot with a delay so a machine sitting at the logon screen still drives
+# the panel, each repeating every two minutes for the first fifteen, because
+# firing twice and stopping only catches a display that is already broken by
+# the time the second run happens.
 #
-# Each trigger then repeats every two minutes for the first fifteen. Firing
-# twice and stopping only catches a display that is already broken by the
-# time the second run happens: measured on one boot, the driver died at 75 s
-# and the last scheduled run at 98 s caught it with 23 seconds to spare,
-# which is luck rather than design. Repeating is only safe because the repair
-# declines when the display is healthy.
+# The other two watch the event log, so the repair answers the fault instead
+# of guessing when it happens: 219 for this device, waited out long enough
+# for the framework's own retry to win, and 10110/10111 for this device,
+# which is the host process dying and can happen at any point in a session,
+# long after the fifteen minute window has closed.
+#
+# All of them are safe to fire because repair.ps1 decides for itself whether
+# a restart is needed. Without that check the panel went black twice in the
+# first two minutes of every session, the second time to cure a display that
+# was already working.
 $taskName = 'usbdisplay repair after startup'
 $repairScript = Join-Path $PSScriptRoot 'repair.ps1'
+$scheduler = 'Root/Microsoft/Windows/TaskScheduler'
+
+# Repetition is set on the trigger afterwards rather than passed to
+# New-ScheduledTaskTrigger. Its RepetitionInterval parameters belong to the
+# -Once parameter set, so combining them with -AtLogOn or -AtStartup fails to
+# resolve and the whole registration lands in the catch below: measured, this
+# installer had been printing "could not register the startup task" and
+# leaving every source build with no startup repair at all.
+function New-Repetition([string]$interval, [string]$duration) {
+    $class = Get-CimClass -ClassName MSFT_TaskRepetitionPattern -Namespace $scheduler
+    $pattern = New-CimInstance -CimClass $class -ClientOnly
+    $pattern.Interval = $interval
+    $pattern.Duration = $duration
+    $pattern.StopAtDurationEnd = $true
+    return $pattern
+}
+
+# There is no cmdlet for an event trigger, so the CIM class is built by hand.
+# The subscription is a QueryList document carried as a string, hence the
+# escaping, and the instance id is pinned into the query so that another user
+# mode driver failing to load at boot, of which there are usually several,
+# does not wake this up.
+function New-LogEventTrigger([string]$xpath, [string]$delay, $repetition) {
+    $class = Get-CimClass -ClassName MSFT_TaskEventTrigger -Namespace $scheduler
+    $trigger = New-CimInstance -CimClass $class -ClientOnly
+    $trigger.Enabled = $true
+    $trigger.Delay = $delay
+    $trigger.Subscription =
+        '<QueryList><Query Id="0" Path="System"><Select Path="System">' +
+        [System.Security.SecurityElement]::Escape($xpath) +
+        '</Select></Query></QueryList>'
+    if ($repetition) { $trigger.Repetition = $repetition }
+    return $trigger
+}
+
 if (Test-Path $repairScript) {
     try {
         $action = New-ScheduledTaskAction -Execute 'powershell.exe' `
             -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$repairScript`""
-        $repeat = @{
-            RepetitionInterval = (New-TimeSpan -Minutes 2)
-            RepetitionDuration = (New-TimeSpan -Minutes 15)
-        }
-        $atLogon = New-ScheduledTaskTrigger -AtLogOn @repeat
+
+        $atLogon = New-ScheduledTaskTrigger -AtLogOn
         $atLogon.Delay = 'PT15S'
-        $atBoot = New-ScheduledTaskTrigger -AtStartup @repeat
+        $atLogon.Repetition = New-Repetition 'PT2M' 'PT15M'
+        $atBoot = New-ScheduledTaskTrigger -AtStartup
         $atBoot.Delay = 'PT1M'
+        $atBoot.Repetition = New-Repetition 'PT2M' 'PT15M'
+
+        $triggers = @($atLogon, $atBoot)
+        $ourDevices = @(Get-PnpDevice -InstanceId 'ROOT\DISPLAY\*' -ErrorAction SilentlyContinue |
+            Where-Object { $_.FriendlyName -match 'USB Display' })
+        foreach ($device in $ourDevices) {
+            $instance = $device.InstanceId
+            # The load failure itself, one to two seconds into every boot.
+            # Waited out rather than acted on at once, because the framework
+            # recovers it on its own about fifteen seconds in and a restart on
+            # top of that would blank a display that was coming up anyway.
+            $triggers += New-LogEventTrigger (
+                "*[System[Provider[@Name='Microsoft-Windows-Kernel-PnP'] and (EventID=219)]]" +
+                " and *[EventData[Data[@Name='DriverName']='$instance']]") 'PT25S' $null
+            # The host process dying, which is the "started and then stopped"
+            # case. The framework restarts the device five times before giving
+            # up, so this looks again while that is going on: the devnode only
+            # settles into an error state the repair can see once it has.
+            $triggers += New-LogEventTrigger (
+                "*[System[Provider[@Name='Microsoft-Windows-DriverFrameworks-UserMode']" +
+                " and (EventID=10110 or EventID=10111)]]" +
+                " and *[UserData/UmdfDeviceOffline/InstanceId='$instance']") 'PT30S' (New-Repetition 'PT1M' 'PT5M')
+        }
+        if ($ourDevices.Count -eq 0) {
+            Write-Host '    WARNING: no display device found, so the event triggers'
+            Write-Host '    were not added; the clock triggers still cover a boot'
+        }
+
         $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' `
             -LogonType ServiceAccount -RunLevel Highest
         $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
             -DontStopIfGoingOnBatteries -StartWhenAvailable `
             -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
         Register-ScheduledTask -TaskName $taskName -Action $action `
-            -Trigger $atLogon, $atBoot -Principal $principal `
+            -Trigger $triggers -Principal $principal `
             -Settings $settings -Force | Out-Null
-        Write-Host '    the display will be restarted automatically after startup,'
-        Write-Host '    and again if it fails during the first 15 minutes'
+        Write-Host '    the display will be restarted after startup, and whenever'
+        Write-Host ('    Windows reports it failed to load or stopped (' +
+            $triggers.Count + ' triggers)')
     } catch {
         Write-Host '    WARNING: could not register the startup task'
         Write-Host "    $($_.Exception.Message)"

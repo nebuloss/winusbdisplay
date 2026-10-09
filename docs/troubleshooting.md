@@ -110,7 +110,7 @@ WDF collapses most initialisation failures into a single generic status, so
 the driver keeps its own log:
 
 ```
-C:\Windows\Temp\ms912xidd.log
+C:\Windows\Temp\usbdisplaydd.log
 ```
 
 It records every step of `DriverEntry`, `PrepareHardware`, `D0Entry`, adapter
@@ -772,6 +772,129 @@ starts and later dies, which is the case that actually happened. Since it
 now declines when the display is healthy it costs nothing to leave in place,
 and on both boots above it correctly did nothing at all.
 
+### Why the first attempt fails, in Windows' own words, and why it cannot be moved earlier
+
+**Settled. Do not look for an INF directive, a service start type or a load
+order group that makes this driver start earlier: there is none, and the
+reasoning this entry used to give for the failure was wrong in a way that
+made one sound plausible.**
+
+The old explanation was that the device is root enumerated, so Plug and Play
+starts it before the framework exists. Being root enumerated is not what
+does it. Windows logs the actual cause in the same second as the failure,
+and it is about the service control manager, not about Plug and Play:
+
+```
+10:45:22  Kernel-PnP 219
+          Driver \Driver\WUDFRd failed to load for the device
+          ROOT\DISPLAY\0000.  Status: 0xC0000365
+
+10:45:22  DriverFrameworks-UserMode 10118
+          The UMDF reflector is unable to connect to the service control
+          manager. This is expected during boot, when it has not started
+          yet. A retry will occur once it has.
+```
+
+Two things follow, and both are measurements rather than readings of the
+documentation.
+
+**This happens to every user mode driver on the machine, not to this one.**
+On the boot above, six devices failed with 0xC0000365 within three seconds:
+this display, a fingerprint reader, an NFC radio and two Bluetooth
+interfaces. Nothing about those is root enumerated or peculiar to this
+project. They all came up afterwards, because they are all waiting on the
+same thing.
+
+**So the floor is when the service control manager is running, and nothing
+in a package moves it.** The reflector retries by itself at that point,
+which is the ~15 second recovery measured above. There is no supported way
+to ask for an earlier start: `UmdfHostProcessSharing`,
+`UmdfKernelModeClientPolicy` and the rest control process and access
+policy, not timing; the reflector service is system managed and is not ours
+to re-sequence; and there is no delayed-start directive for a UMDF device.
+Enumerating under real hardware instead would change when the device
+appears, but that is ruled out independently, by the display stack's upper
+filter.
+
+What is left to improve is therefore the *recovery*, not the start, and the
+improvement is to stop guessing when the fault happens. Both events above
+name the device, so the repair task is triggered by them:
+
+| trigger | fires | why that delay |
+|---|---|---|
+| Kernel-PnP 219 for this instance | +25 s after the load failure | the framework's own retry wins at about +16 s, so this waits it out and then finds the driver running and declines. If the retries all failed, the repair now happens at about +27 s instead of +60 s. |
+| UMDF 10110 / 10111 for this instance | +30 s, then every minute for five | the host process dying, which is "loaded and then died". The framework restarts the device five times before giving up, and the devnode only settles into an error state the repair can see once it has. |
+
+Both subscriptions pin the device instance id, which matters precisely
+because five other devices log the same event at the same moment. A
+deliberate disable also logs 10111, and the repair declines for it: a
+disabled device is excluded by problem code, and the driver's log postdates
+the boot.
+
+The clock triggers stay as a backstop, unchanged. The event triggers'
+advantage is coverage rather than speed: the clock ones only repeat for the
+first fifteen minutes, so a host process that dies an hour into a session
+was previously not noticed at all.
+
+**Considered and not done: racing the framework's retry.** A scheduled task
+cannot run before the task scheduler service, which starts after the
+service control manager, so a boot trigger with no delay would fire roughly
+when the reflector becomes able to work and before its own retry lands at
+about +16 s. Restarting the device there might bring the driver up a few
+seconds earlier. It is not worth it: the gain is seconds on a path the user
+spends logging in anyway, and the cost is a restart aimed at a device the
+framework is in the middle of retrying, which is how this project previously
+produced a display that blinked rather than appeared. If somebody measures
+it, measure the driver's `DriverEntry` timestamp across several boots, not
+one.
+
+Checking them is awkward enough to be worth a tool, because the
+subscription is XML inside XML and a mistake in it is silent: the task
+registers cleanly and never fires. So:
+
+```
+driversetup /taskxml                  # write the definition, register nothing
+usbdisplay\scripts\check-task.ps1     # parse it, and run each query for real
+```
+
+`/taskxml` is deliberately absent from the usage text, like the console
+tool's investigation commands. It needs elevation, as everything in
+`driversetup` does, because its manifest demands it.
+
+`check-task.ps1` feeds the definition to the task scheduler's own parser and
+then runs every event query against the live system log, which is the only
+way to find out that a filter matches nothing. Verified on this machine,
+with the definition registered and then removed again:
+
+```
+definition parses: 4 triggers
+  MSFT_TaskLogonTrigger  delay=PT15S  rep=PT2M/PT15M
+  MSFT_TaskBootTrigger   delay=PT1M   rep=PT2M/PT15M
+  MSFT_TaskEventTrigger  delay=PT25S
+    *[System[Provider[@Name='Microsoft-Windows-Kernel-PnP'] and (EventID=219)]]
+      and *[EventData[Data[@Name='DriverName']='ROOT\DISPLAY\0000']]
+    matches in the live log: 219 at 10:45:22, 09:08:59, 11:13:41
+  MSFT_TaskEventTrigger  delay=PT30S  rep=PT1M/PT5M
+    *[System[Provider[@Name='Microsoft-Windows-DriverFrameworks-UserMode']
+      and (EventID=10110 or EventID=10111)]]
+      and *[UserData/UmdfDeviceOffline/InstanceId='ROOT\DISPLAY\0000']
+    matches in the live log: 10111 at 10:44:45, 10:39:46, 10:09:10
+```
+
+The three 219 timestamps are the last three boots, one to two seconds into
+each, which is the point: the trigger matches the real fault on real boots
+rather than a query that merely parses. **What is still unverified is a boot
+with the task installed**, because that needs a reboot.
+
+**A defect found while doing this, in the source-build installer only.**
+`install.ps1` was building its clock triggers with
+`New-ScheduledTaskTrigger -AtLogOn` plus the repetition parameters, which
+belong to the `-Once` parameter set. PowerShell cannot resolve that
+combination, the exception landed in the catch around the whole block, and
+every source install printed "could not register the startup task" and had
+no startup repair whatsoever. The release path was unaffected: it builds
+the XML itself. Repetition is now set on the trigger object afterwards,
+through `MSFT_TaskRepetitionPattern`, and the registration is verified.
 
 Being root enumerated is not a choice that can simply be reversed; see
 `AGENTS.md`, where binding to the USB interface instead is ruled out by the
@@ -789,9 +912,10 @@ have already wasted a session:
 
 **This is fixed.** `install.ps1` and `driversetup.exe` both register a
 scheduled task, `usbdisplay repair after startup`, which re-enumerates the
-device as SYSTEM once the framework is up. Two triggers: at logon with a
-15 second delay for the normal case, and at boot with a one minute delay so
-a machine left sitting at the logon screen still drives the panel.
+device as SYSTEM once the framework is up. Four triggers: at logon with a
+15 second delay for the normal case, at boot with a one minute delay so a
+machine left sitting at the logon screen still drives the panel, and two
+event triggers on the failures themselves, described in the section above.
 
 The repair itself is `usbdisplay/scripts/repair.ps1` for a source build and
 `driversetup /repair` for a release. Either is safe to run by hand at any

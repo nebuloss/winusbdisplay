@@ -287,26 +287,33 @@ bool RetireDevice(const std::wstring& instance) {
   return ok;
 }
 
-/* Restarts our display device, which is the whole of the cold boot fix.
+/* Restarts our display device, which is how a failed start is recovered.
  *
- * Windows fails to load this driver during boot, every single time, and
- * the reason is structural rather than a bug here. The device is root
- * enumerated, so it has no parent hardware whose arrival could start it
- * later; Plug and Play therefore starts it during early boot device
- * enumeration, before the user mode driver framework is running. A user
- * mode driver cannot load that early, so the reflector fails with
- * STATUS_FAILED_DRIVER_ENTRY, and Plug and Play does not retry. The
- * device sits in error for the rest of the session and the user has no
- * second monitor.
- *
- * Measured, six boots out of six, one to two seconds after each:
+ * Windows fails to load this driver during boot, every single time, and the
+ * reason is neither a bug here nor peculiar to this device. The user mode
+ * reflector cannot reach the service control manager that early, so it
+ * fails every user mode driver the machine has; measured on one boot, six
+ * devices failed together, of which this was one and the others were a
+ * fingerprint reader, an NFC radio and two Bluetooth interfaces. Windows
+ * says so itself, in the same second, in the system log:
  *
  *     Driver \Driver\WUDFRd failed to load for the device
- *     ROOT\DISPLAY\0000.  Status: 0xC0000365
+ *     ROOT\DISPLAY\0000.  Status: 0xC0000365          (Kernel-PnP, 219)
  *
- * It is also why every reinstall appeared to cure the problem, which
- * misled this project for a long time: reinstalling re-enumerates the
- * device, and by then the framework is up.
+ *     The UMDF reflector is unable to connect to the service control
+ *     manager. This is expected during boot, when it has not started yet.
+ *     A retry will occur once it has.                 (UMDF, 10118)
+ *
+ * **So the load failure is expected and is retried, and the driver comes up
+ * on its own about fifteen seconds in.** That retry is Microsoft's, not
+ * ours, and nothing in an INF or a service start type moves it earlier: the
+ * floor is when the service control manager is running. This restart is
+ * therefore insurance for the boot where every retry fails, and the cure
+ * for a driver that loaded and later died.
+ *
+ * It is also why every reinstall appeared to fix the problem, which misled
+ * this project for a long time: reinstalling re-enumerates the device, and
+ * by then the framework is up.
  *
  * So that is all this does, at a point in the session when it works. No
  * reboot, nothing to configure, and the same operation the user was
@@ -640,11 +647,11 @@ int Repair(bool force) {
  * startup shortcut, because this needs the administrative rights that
  * changing a device's state requires and must not prompt the user.
  *
- * Two triggers, and both are wanted. The logon trigger covers the normal
- * case. The boot trigger with a delay covers a machine that is left at the
- * logon screen, where the monitor should still work; a minute is long
- * enough for the framework to be up and is not noticeable, since the user
- * is waiting for Windows itself at that point anyway.
+ * Two clock triggers, and both are wanted. The logon trigger covers the
+ * normal case. The boot trigger with a delay covers a machine that is left
+ * at the logon screen, where the monitor should still work; a minute is
+ * long enough for the framework to be up and is not noticeable, since the
+ * user is waiting for Windows itself at that point anyway.
  *
  * Both therefore fire in an ordinary session, which is why the repair
  * checks whether it is needed before restarting anything. Without that
@@ -662,33 +669,150 @@ int Repair(bool force) {
  * again and the session would have had no second screen, which is exactly
  * the complaint this whole mechanism exists to answer.
  *
- * So each trigger repeats every two minutes for the first fifteen, which
+ * So each clock trigger repeats every two minutes for the first fifteen,
+ * which
  * covers the startup window where this fault happens without watching for
  * ever. Repeating is only safe because the repair declines when the display
  * is healthy: that check is what makes this cheap rather than a display
  * that restarts itself every two minutes.
  *
+ * **Two further triggers watch the event log, and they are what makes this
+ * answer the fault rather than guess when it happens.** The clock based
+ * triggers above fire at fixed times whether anything is wrong or not,
+ * which means the earliest they can repair a boot where the framework's own
+ * retries all failed is a minute in. Windows says exactly when that
+ * happens, in the system log, and a task can be triggered by it:
+ *
+ *   - Kernel-PnP 219 naming this device: the load failure itself, logged one
+ *     to two seconds into every boot. Waited out rather than acted on
+ *     immediately, because the framework recovers this on its own about
+ *     fifteen seconds later on a healthy machine and a restart on top of
+ *     that would blank a display that was coming up anyway. The delay is
+ *     long enough for the framework to win; if it has, the repair finds the
+ *     driver running and declines.
+ *   - DriverFrameworks-UserMode 10110 or 10111 naming this device: the host
+ *     process died, which is the "started and then stopped" case. It can
+ *     happen at any point in a session, so the fifteen minute window of the
+ *     clock triggers misses it entirely once the session is older than
+ *     that. The framework restarts the device five times before giving up,
+ *     so this waits and then repeats for a few minutes, which is when the
+ *     devnode has settled into an error state the repair can see.
+ *
+ * Both subscriptions name the device instance, so another user mode driver
+ * failing to load at boot, of which there are usually several, does not
+ * wake this up. A deliberate disable also logs 10111; the repair declines
+ * for it, because a disabled device is excluded and the driver's log
+ * postdates the boot.
+ *
  * Registered through schtasks with an XML definition. The command line
- * form of schtasks cannot express a delayed boot trigger, and the COM
- * interface is a great deal of code for something the XML says in a line.
+ * form of schtasks cannot express a delayed boot trigger or an event
+ * trigger at all, and the COM interface is a great deal of code for
+ * something the XML says in a line.
  */
-bool InstallBootRepair(const std::wstring& self) {
-  wchar_t temp_dir[MAX_PATH] = {};
-  if (!GetTempPathW(MAX_PATH, temp_dir)) {
-    return false;
-  }
-  const std::wstring xml_path = std::wstring(temp_dir) + L"usbdisplaytask.xml";
 
+/* The query inside an event trigger is itself XML, carried as text inside
+ * the task's own XML, so every angle bracket and ampersand in it has to be
+ * escaped. Device instance ids contain backslashes and can contain
+ * ampersands, which is the case this exists for. */
+std::wstring EscapeXml(const std::wstring& text) {
+  std::wstring out;
+  for (const wchar_t c : text) {
+    switch (c) {
+      case L'&': out += L"&amp;"; break;
+      case L'<': out += L"&lt;"; break;
+      case L'>': out += L"&gt;"; break;
+      case L'"': out += L"&quot;"; break;
+      case L'\'': out += L"&apos;"; break;
+      default: out += c; break;
+    }
+  }
+  return out;
+}
+
+/* One event trigger, wrapping an XPath query over the system log.
+ *
+ * The subscription is a QueryList document escaped into a single element,
+ * which is why the escaping happens twice: once for the instance id inside
+ * the query, and once for the query inside the task. */
+std::wstring EventTrigger(const std::wstring& xpath, const wchar_t* delay,
+                          const wchar_t* repeat_interval,
+                          const wchar_t* repeat_duration) {
+  std::wstring subscription =
+      L"<QueryList><Query Id=\"0\" Path=\"System\"><Select Path=\"System\">";
+  subscription += xpath;
+  subscription += L"</Select></Query></QueryList>";
+
+  std::wstring trigger =
+      L"    <EventTrigger>\r\n"
+      L"      <Enabled>true</Enabled>\r\n"
+      L"      <Subscription>";
+  trigger += EscapeXml(subscription);
+  trigger +=
+      L"</Subscription>\r\n"
+      L"      <Delay>";
+  trigger += delay;
+  trigger += L"</Delay>\r\n";
+  if (repeat_interval) {
+    trigger += L"      <Repetition>\r\n        <Interval>";
+    trigger += repeat_interval;
+    trigger += L"</Interval>\r\n        <Duration>";
+    trigger += repeat_duration;
+    trigger +=
+        L"</Duration>\r\n"
+        L"        <StopAtDurationEnd>true</StopAtDurationEnd>\r\n"
+        L"      </Repetition>\r\n";
+  }
+  trigger += L"    </EventTrigger>\r\n";
+  return trigger;
+}
+
+/* The two event triggers, one per installed device node.
+ *
+ * Empty when no device is installed, which is not a failure: the task is
+ * still worth having with its clock triggers, and an install that created
+ * no node has already reported a bigger problem than this. */
+std::wstring EventTriggersFor(const std::vector<DeviceNode>& devices) {
+  std::wstring triggers;
+  for (const DeviceNode& device : devices) {
+    const std::wstring instance = EscapeXml(device.instance);
+
+    /* The load failure, one to two seconds into every boot. Waited out:
+     * the framework usually recovers by about fifteen seconds. */
+    std::wstring load_failed =
+        L"*[System[Provider[@Name='Microsoft-Windows-Kernel-PnP'] and "
+        L"(EventID=219)]] and *[EventData[Data[@Name='DriverName']='";
+    load_failed += instance;
+    load_failed += L"']]";
+    triggers += EventTrigger(load_failed, L"PT25S", nullptr, nullptr);
+
+    /* The host process dying, at any point in the session. The instance id
+     * lives in UserData here rather than EventData. */
+    std::wstring went_offline =
+        L"*[System[Provider[@Name='Microsoft-Windows-DriverFrameworks-"
+        L"UserMode'] and (EventID=10110 or EventID=10111)]] and "
+        L"*[UserData/UmdfDeviceOffline/InstanceId='";
+    went_offline += instance;
+    went_offline += L"']";
+    triggers += EventTrigger(went_offline, L"PT30S", L"PT1M", L"PT5M");
+  }
+  return triggers;
+}
+
+/* The task definition. Separate from registering it so that it can be
+ * inspected, and fed to the task scheduler's own parser, without having to
+ * install anything or be an administrator: see /taskxml. Every fault this
+ * has had so far was in the XML rather than in the registration. */
+std::wstring BuildBootRepairXml(const std::wstring& self) {
   std::wstring xml =
       L"<?xml version=\"1.0\" encoding=\"UTF-16\"?>\r\n"
       L"<Task version=\"1.2\" "
       L"xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\r\n"
       L"  <RegistrationInfo>\r\n"
       L"    <Description>Restarts the USB display device after startup, and "
-      L"again if it fails during the first few minutes of a session. Windows "
-      L"cannot load a user mode display driver during boot, so without this "
-      L"the monitor stays black until the device is re-enumerated by "
-      L"hand.</Description>\r\n"
+      L"whenever Windows reports that its driver failed to load or stopped. "
+      L"Windows cannot load a user mode display driver during boot, so "
+      L"without this the monitor can stay black until the device is "
+      L"re-enumerated by hand.</Description>\r\n"
       L"  </RegistrationInfo>\r\n"
       L"  <Triggers>\r\n"
       L"    <LogonTrigger>\r\n"
@@ -708,7 +832,9 @@ bool InstallBootRepair(const std::wstring& self) {
       L"        <Duration>PT15M</Duration>\r\n"
       L"        <StopAtDurationEnd>true</StopAtDurationEnd>\r\n"
       L"      </Repetition>\r\n"
-      L"    </BootTrigger>\r\n"
+      L"    </BootTrigger>\r\n";
+  xml += EventTriggersFor(FindOurDevices());
+  xml +=
       L"  </Triggers>\r\n"
       L"  <Principals>\r\n"
       L"    <Principal id=\"Author\">\r\n"
@@ -747,9 +873,12 @@ bool InstallBootRepair(const std::wstring& self) {
       L"    </Exec>\r\n"
       L"  </Actions>\r\n"
       L"</Task>\r\n";
+  return xml;
+}
 
-  /* UTF-16 with a byte order mark, which is what the schema declares and
-   * what schtasks refuses the file without. */
+/* UTF-16 with a byte order mark, which is what the schema declares and what
+ * schtasks refuses the file without. */
+bool WriteTaskXml(const std::wstring& xml_path, const std::wstring& xml) {
   HANDLE file = CreateFileW(xml_path.c_str(), GENERIC_WRITE, 0, nullptr,
                             CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
   if (file == INVALID_HANDLE_VALUE) {
@@ -762,6 +891,27 @@ bool InstallBootRepair(const std::wstring& self) {
             static_cast<DWORD>(xml.size() * sizeof(wchar_t)), &written,
             nullptr);
   CloseHandle(file);
+  return true;
+}
+
+/* Where the definition is written. In the temporary directory because
+ * schtasks reads it and nothing else needs it afterwards. */
+std::wstring TaskXmlPath() {
+  wchar_t temp_dir[MAX_PATH] = {};
+  if (!GetTempPathW(MAX_PATH, temp_dir)) {
+    return std::wstring();
+  }
+  return std::wstring(temp_dir) + L"usbdisplaytask.xml";
+}
+
+bool InstallBootRepair(const std::wstring& self) {
+  const std::wstring xml_path = TaskXmlPath();
+  if (xml_path.empty()) {
+    return false;
+  }
+  if (!WriteTaskXml(xml_path, BuildBootRepairXml(self))) {
+    return false;
+  }
 
   std::wstring command = L"schtasks.exe /Create /F /TN \"";
   command += kBootTaskName;
@@ -772,6 +922,26 @@ bool InstallBootRepair(const std::wstring& self) {
   const bool ok = RunQuietly(command);
   DeleteFileW(xml_path.c_str());
   return ok;
+}
+
+/* Writes the task definition and leaves it there, registering nothing.
+ *
+ * Undocumented in the usage text, like the console tool's investigation
+ * commands, because it exists to check the triggers after changing them:
+ * the event subscriptions are XML inside XML and a mistake in them is
+ * silent, producing a task that registers cleanly and never fires. Needs no
+ * administrator rights, which is the point. */
+int ShowTaskXml() {
+  wchar_t self[MAX_PATH] = {};
+  GetModuleFileNameW(nullptr, self, MAX_PATH);
+
+  const std::wstring xml_path = TaskXmlPath();
+  if (xml_path.empty() || !WriteTaskXml(xml_path, BuildBootRepairXml(self))) {
+    Say(L"Could not write the task definition.\n");
+    return 1;
+  }
+  Say(L"%s\n", xml_path.c_str());
+  return 0;
 }
 
 void RemoveBootRepair() {
@@ -1298,6 +1468,7 @@ int wmain(int argc, wchar_t** argv) {
   bool uninstall = false;
   bool repair = false;
   bool extend = false;
+  bool task_xml = false;
   bool force = false;
   bool wait = true;
   for (int i = 1; i < argc; ++i) {
@@ -1310,6 +1481,10 @@ int wmain(int argc, wchar_t** argv) {
     } else if (_wcsicmp(argv[i], L"/extend") == 0 ||
                _wcsicmp(argv[i], L"-extend") == 0) {
       extend = true;
+    } else if (_wcsicmp(argv[i], L"/taskxml") == 0 ||
+               _wcsicmp(argv[i], L"-taskxml") == 0) {
+      task_xml = true;
+      wait = false;
     } else if (_wcsicmp(argv[i], L"/force") == 0 ||
                _wcsicmp(argv[i], L"-force") == 0) {
       force = true;
@@ -1333,6 +1508,8 @@ int wmain(int argc, wchar_t** argv) {
     result = Repair(force);
   } else if (extend) {
     result = ExtendDesktop();
+  } else if (task_xml) {
+    result = ShowTaskXml();
   } else {
     result = Install();
   }

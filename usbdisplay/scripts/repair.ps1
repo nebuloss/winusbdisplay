@@ -1,31 +1,39 @@
 # SPDX-License-Identifier: GPL-2.0-only
 #
-# Restarts the display device, which is the whole of the cold boot fix.
+# Restarts the display device, which is how a failed start is recovered.
 #
 # Windows fails to load this driver during boot, every single time, and the
-# reason is structural rather than a bug in the driver. The device is root
-# enumerated, so it has no parent hardware whose arrival could start it
-# later; Plug and Play starts it during early boot device enumeration,
-# before the user mode driver framework is running. A user mode driver
-# cannot load that early, so the reflector fails with
-# STATUS_FAILED_DRIVER_ENTRY and Plug and Play does not retry. The device
-# sits in error for the rest of the session and there is no second monitor.
-#
-# Measured, six boots out of six, one to two seconds after each:
+# reason is neither a bug in the driver nor special to it. The user mode
+# reflector cannot reach the service control manager that early, so it fails
+# every user mode driver the machine has; measured on one boot, six devices
+# failed together, of which this was one and the others were a fingerprint
+# reader, an NFC radio and two Bluetooth interfaces. Windows says both halves
+# of it in the system log within the same second:
 #
 #     Driver \Driver\WUDFRd failed to load for the device ROOT\DISPLAY\0000.
-#     Status: 0xC0000365
+#     Status: 0xC0000365                                 (Kernel-PnP, 219)
+#
+#     The UMDF reflector is unable to connect to the service control manager.
+#     This is expected during boot, when it has not started yet. A retry will
+#     occur once it has.                                 (UMDF, 10118)
+#
+# So the failure is expected and is retried, and the driver comes up on its
+# own about fifteen seconds in. That retry is Microsoft's, and nothing in an
+# INF or a service start type moves it earlier: the floor is when the service
+# control manager is running. This script is insurance for the boot where
+# every retry fails, and the cure for a driver that loaded and then died.
 #
 # It is also why every reinstall appeared to cure the problem: reinstalling
 # re-enumerates the device, and by then the framework is up.
 #
-# install.ps1 registers this to run shortly after startup, on two triggers,
-# so it runs twice per session. It therefore has to decide whether a repair
-# is actually needed, and the device's own status cannot answer that: it read
-# OK at 46 s after a boot where the driver had definitively never loaded.
-# What does answer it is the driver's log, because only the driver writes it.
-# A log last written before this machine booted means the driver has not run
-# this session, which is exactly the fault. Use -Force to restart regardless.
+# install.ps1 registers this to run after startup and whenever Windows reports
+# that this device failed to load or went offline, so it runs several times
+# per session. It therefore has to decide whether a repair is actually
+# needed, and the device's own status cannot answer that: it read OK at 46 s
+# after a boot where the driver had definitively never loaded. What does
+# answer it is the driver's log, because only the driver writes it. A log
+# last written before this machine booted means the driver has not run this
+# session, which is exactly the fault. Use -Force to restart regardless.
 
 param([switch]$Force)
 

@@ -72,12 +72,21 @@ usbdisplay\scripts\repair.ps1             # re-enumerate a device that failed
                                           # not run this session; -Force to
                                           # restart regardless
 usbdisplay\scripts\purge.ps1              # remove everything
+usbdisplay\scripts\check-task.ps1         # the startup repair's triggers:
+                                          # parses the definition and runs
+                                          # each event query for real. Needs
+                                          # `driversetup /taskxml` first
 
 scripts\elev.ps1 -Start                # one UAC prompt per session
 scripts\elev.ps1 -Script <abs path>
 scripts\elev.ps1 -Command '<powershell>'
 scripts\elev.ps1 -Stop
 scripts\extend-desktop.ps1             # force the panel into the desktop
+scripts\usb-topology.ps1              # which controller and generation the
+                                       # adapter actually landed on
+scripts\ddc-probe.ps1                  # does any monitor answer the Windows
+                                       # monitor configuration API; run
+                                       # unelevated, from the real session
 ```
 
 On Linux, where the whole release is built:
@@ -102,6 +111,25 @@ usbdisplay\scripts\test.bat planner      # one group
 cd usbdisplay && make test                # same tests, no Windows needed
 cd usbdisplay && make build               # compile only
 ```
+
+The framework is `tests/testing.h`, eighty lines, deliberately dependency
+free so the suite builds with nothing but the build tools the driver already
+needs. `TEST(group, name)` registers at static initialisation; the filter
+argument matches the *group*, so the groups are the only names worth
+knowing: `rect`, `alignment`, `planner`, `rectset`, `tracker`, `refinement`,
+`costmodel`, `conversion`, `brightness`, `framing`, `protocol`, `health`,
+`cost`, `mute`, `memory`, `defaultmode`, `modeset`, `transfer`, `errors`,
+`cursor`, `portability`. A failing `CHECK` records and continues, so one run
+reports everything broken. Prefer `CHECK_EQ_BECAUSE` and `CHECK_BECAUSE`:
+the sentence is printed on failure and is how a broken test says which
+behaviour was lost. `make test` takes no filter; only `test.bat` does.
+
+**A new file under `src/core` or `src/render` has to be added to both
+`usbdisplay/Makefile` and `usbdisplay/scripts/test.bat`**, and
+`test_portable.cpp` fails if it is missing from the Makefile. The two lists
+are not identical and should not be: the portable build omits `usb.cpp` and
+`open_device.cpp`, which are the Windows ones, while the Windows test build
+compiles them and links `setupapi hid winusb`.
 
 `make` refuses to run on anything but 64-bit x86, and says why rather than
 failing later at a missing header: the conversion kernels are written against
@@ -227,6 +255,11 @@ usbdisplay/src/tools/ usbdisplayctl/   the hardware harness
                       brightnessprobe/ which brightness paths a monitor
                                        actually answers
 usbdisplay/tests/        runs without hardware
+usbdisplay/inf/       usbdisplaydd.inf      the root enumerated display driver
+                      usbdisplay_winusb.inf the pixel interface: MI_03 on the
+                                            composite parts, the whole device
+                                            on the others
+usbdisplay/installer/ usbdisplay.nsi        the single release executable
 ```
 
 **The two halves of the adapter live on different USB interfaces**, and
@@ -484,21 +517,41 @@ Each cost real investigation; the evidence is in `docs/protocol-notes.md`.
   format, which looks wrong and is right: the colour transform is a matrix,
   so it is linear.
 - **Windows fails to load this driver at boot, every single time, and then
-  retries and succeeds about fifteen seconds later.** The device is root
-  enumerated, so Plug and Play starts it during early boot device
-  enumeration, before the user mode driver framework exists, and the load
-  fails with `STATUS_FAILED_DRIVER_ENTRY` (`0xC0000365`, System event id
-  219). **The failure is not permanent**: measured on every boot whose log
-  survived, one failure at +2 s and `DriverEntry` at +16 s, with the repair
-  task declining because the driver was already running. The notes long said
-  Windows never retries; that was inferred from the event plus a black
-  screen plus a working display after reinstalling, and it is wrong. The
-  driver's log could not refute it at the time because it is truncated on
-  every load, which is why `usbdisplaydd.log.prev` exists.
+  retries and succeeds about fifteen seconds later.** The load fails with
+  `STATUS_FAILED_DRIVER_ENTRY` (`0xC0000365`, System event id 219) because
+  the user mode reflector cannot reach the service control manager that
+  early. **Windows says exactly that, in the same second, as event 10118:
+  "this is expected during boot ... a retry will occur once it has
+  started."** Being root enumerated is not what causes it: on one boot six
+  devices failed together, this display among a fingerprint reader, an NFC
+  radio and two Bluetooth interfaces, none of them root enumerated.
+  **So the start cannot be made earlier, and there is no INF directive,
+  service start type or load order group that moves it.** The floor is when
+  the service control manager is running. **The failure is not permanent**:
+  measured on every boot whose log survived, one failure at +2 s and
+  `DriverEntry` at +16 s, with the repair task declining because the driver
+  was already running. The notes long said Windows never retries; that was
+  inferred from the event plus a black screen plus a working display after
+  reinstalling, and it is wrong. The driver's log could not refute it at the
+  time because it is truncated on every load, which is why
+  `usbdisplaydd.log.prev` exists.
   Installation still registers a scheduled task that re-enumerates the
   device after startup, but it is **insurance, not the mechanism**: it
   covers a boot where all five framework retries fail, and a driver that
   starts and later dies. `repair.ps1` is the same thing by hand.
+  The task has four triggers: boot and logon, each **repeating every two
+  minutes for fifteen**, and **two event triggers on the failures
+  themselves**, 219 for this device delayed 25 s so the framework's own
+  retry wins first, and 10110/10111 for this device, which is the host
+  process dying and can happen at any point in a session, long after the
+  fifteen minute window has closed. Both subscriptions pin the device
+  instance id, because five other devices log the same event at the same
+  moment. It is defined by XML through `schtasks /Create /XML`, not by
+  command line flags, which can express neither a delayed boot trigger nor
+  an event trigger. **The subscription is XML inside XML and a mistake in it
+  is silent**, so check it with `driversetup /taskxml` and
+  `usbdisplay\scripts\check-task.ps1`, which runs each query against the
+  live event log.
 - **A device whose user mode driver failed to load still reports itself
   healthy.** `Get-PnpDevice` says `OK` / `CM_PROB_NONE` / "working
   properly", measured 44 seconds after a load failure and before anything
@@ -596,7 +649,14 @@ Each cost real investigation; the evidence is in `docs/protocol-notes.md`.
 - **Settings live in `HKLM\SOFTWARE\usbdisplay`, not `HKCU`.** The driver
   runs inside WUDFHost as LOCAL SERVICE and has no user hive to read. The
   installer widens the ACL on that one key so the brightness control can
-  write it without elevating every time a slider moves.
+  write it without elevating every time a slider moves. The values are
+  `Brightness` (0-100, default 100), `Contrast` (0-100 with 50 neutral),
+  `IdleRefresh` (default on, the keepalive) and `GpuThresholdPixels`, the
+  update area above which conversion goes to the shader rather than the
+  processor, where zero forces the processor path. All `REG_DWORD`, all read
+  through `driver/settings.cpp`, which clamps rather than rejects, and
+  **re-read from the frame loop every couple of seconds**, which is why a
+  brightness change takes effect without restarting the monitor.
 - **Brightness is the gamma ramp path, applied during conversion.** Windows
   has three mechanisms: DDC/CI cannot reach a display that is not on a
   graphics card's signalling hardware, and the WMI path needs a kernel
