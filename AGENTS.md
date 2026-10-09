@@ -483,18 +483,22 @@ Each cost real investigation; the evidence is in `docs/protocol-notes.md`.
   with copies. Blending happens after conversion, in the adapter's own
   format, which looks wrong and is right: the colour transform is a matrix,
   so it is linear.
-- **Windows fails to load this driver at boot, every single time, and that
-  is structural rather than a bug.** The device is root enumerated, so Plug
-  and Play starts it during early boot device enumeration, before the user
-  mode driver framework exists. The load fails with
-  `STATUS_FAILED_DRIVER_ENTRY` (`0xC0000365`, System event id 219) and
-  Windows never retries, so there is no second monitor for the rest of the
-  session. Six boots out of six on record. Installation registers a
-  scheduled task that re-enumerates the device at logon and again a minute
-  after boot; `repair.ps1` is the same thing by hand, and also recovers an
-  adapter that stopped for any other reason. This is why reinstalling always
-  appeared to cure a dark panel, and that coincidence sent this project
-  chasing faults in how the adapter is driven.
+- **Windows fails to load this driver at boot, every single time, and then
+  retries and succeeds about fifteen seconds later.** The device is root
+  enumerated, so Plug and Play starts it during early boot device
+  enumeration, before the user mode driver framework exists, and the load
+  fails with `STATUS_FAILED_DRIVER_ENTRY` (`0xC0000365`, System event id
+  219). **The failure is not permanent**: measured on every boot whose log
+  survived, one failure at +2 s and `DriverEntry` at +16 s, with the repair
+  task declining because the driver was already running. The notes long said
+  Windows never retries; that was inferred from the event plus a black
+  screen plus a working display after reinstalling, and it is wrong. The
+  driver's log could not refute it at the time because it is truncated on
+  every load, which is why `usbdisplaydd.log.prev` exists.
+  Installation still registers a scheduled task that re-enumerates the
+  device after startup, but it is **insurance, not the mechanism**: it
+  covers a boot where all five framework retries fail, and a driver that
+  starts and later dies. `repair.ps1` is the same thing by hand.
 - **A device whose user mode driver failed to load still reports itself
   healthy.** `Get-PnpDevice` says `OK` / `CM_PROB_NONE` / "working
   properly", measured 44 seconds after a load failure and before anything

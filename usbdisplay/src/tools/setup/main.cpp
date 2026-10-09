@@ -653,6 +653,21 @@ int Repair(bool force) {
  * Whichever trigger comes first does the work; the other finds the driver
  * running and does nothing, or finds it still absent and tries again.
  *
+ * **Each trigger then repeats, and that is not belt and braces.** Firing
+ * twice and stopping only covers a display that is already broken by the
+ * time the second one runs. Measured on the boot that prompted this: the
+ * driver started at 17 s, the repair ran at 45 s and found it healthy, the
+ * driver then died at 75 s, and the last scheduled run at 98 s caught it by
+ * 23 seconds. Had the driver died a minute later, nothing would have run
+ * again and the session would have had no second screen, which is exactly
+ * the complaint this whole mechanism exists to answer.
+ *
+ * So each trigger repeats every two minutes for the first fifteen, which
+ * covers the startup window where this fault happens without watching for
+ * ever. Repeating is only safe because the repair declines when the display
+ * is healthy: that check is what makes this cheap rather than a display
+ * that restarts itself every two minutes.
+ *
  * Registered through schtasks with an XML definition. The command line
  * form of schtasks cannot express a delayed boot trigger, and the COM
  * interface is a great deal of code for something the XML says in a line.
@@ -669,19 +684,30 @@ bool InstallBootRepair(const std::wstring& self) {
       L"<Task version=\"1.2\" "
       L"xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\r\n"
       L"  <RegistrationInfo>\r\n"
-      L"    <Description>Restarts the USB display device after startup. "
-      L"Windows cannot load a user mode display driver during boot, so "
-      L"without this the monitor stays black until the device is "
-      L"re-enumerated by hand.</Description>\r\n"
+      L"    <Description>Restarts the USB display device after startup, and "
+      L"again if it fails during the first few minutes of a session. Windows "
+      L"cannot load a user mode display driver during boot, so without this "
+      L"the monitor stays black until the device is re-enumerated by "
+      L"hand.</Description>\r\n"
       L"  </RegistrationInfo>\r\n"
       L"  <Triggers>\r\n"
       L"    <LogonTrigger>\r\n"
       L"      <Enabled>true</Enabled>\r\n"
       L"      <Delay>PT15S</Delay>\r\n"
+      L"      <Repetition>\r\n"
+      L"        <Interval>PT2M</Interval>\r\n"
+      L"        <Duration>PT15M</Duration>\r\n"
+      L"        <StopAtDurationEnd>true</StopAtDurationEnd>\r\n"
+      L"      </Repetition>\r\n"
       L"    </LogonTrigger>\r\n"
       L"    <BootTrigger>\r\n"
       L"      <Enabled>true</Enabled>\r\n"
       L"      <Delay>PT1M</Delay>\r\n"
+      L"      <Repetition>\r\n"
+      L"        <Interval>PT2M</Interval>\r\n"
+      L"        <Duration>PT15M</Duration>\r\n"
+      L"        <StopAtDurationEnd>true</StopAtDurationEnd>\r\n"
+      L"      </Repetition>\r\n"
       L"    </BootTrigger>\r\n"
       L"  </Triggers>\r\n"
       L"  <Principals>\r\n"

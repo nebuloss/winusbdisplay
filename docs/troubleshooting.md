@@ -735,6 +735,44 @@ usable. A user-mode driver cannot run that early. Windows does not retry a
 failed driver load, so the device sits in error until something
 re-enumerates it, which is exactly why every reinstall appears to fix it.
 
+**Correction: Windows does retry, and the driver comes up on its own about
+fifteen seconds after the failure.** The sentence above is the premise the
+whole repair mechanism was built on and it is wrong. Measured across every
+boot where the driver's log survived long enough to be read:
+
+| boot | load failed | driver actually started | repair's part |
+|---|---|---|---|
+| 08/10 11:13:40 | +2 s | **+16 s** | ran at +41 s, declined |
+| 09/10 09:08:58 | +2 s | **+17 s** | ran at +44 s, declined |
+
+One failure per boot, not a permanent one, and the driver was running before
+the repair task fired on either occasion. The framework says so itself in
+the event it logs for a different fault: *"Windows will try to restart the
+device 5 times."* That retry is what recovers the boot load.
+
+How the wrong conclusion was reached is worth keeping, because the mistake
+is an easy one to repeat. The reasoning was: event 219 at boot, plus a black
+screen in the morning, plus a working display after reinstalling, therefore
+the load failure is permanent. Every one of those observations is real. The
+step that does not follow is the last one, and **the driver's own log could
+not refute it, because it is truncated on every load**: by the time anyone
+looked, the boot session's log had been overwritten by the reinstall. The
+`.prev` generation, added later for exactly this reason, is what made the
+measurement above possible.
+
+**So what was the black screen every morning?** Not this. On the one morning
+captured in full, the boot load failed and recovered normally, and the
+display then died at +75 s from a driver hang, which is a separate defect
+with its own entry below. The load failure was a red herring that happened
+to be visible in the event log.
+
+**The repair task stays, demoted.** It is insurance rather than the
+mechanism: it covers a boot where all five retries fail, and a driver that
+starts and later dies, which is the case that actually happened. Since it
+now declines when the display is healthy it costs nothing to leave in place,
+and on both boots above it correctly did nothing at all.
+
+
 Being root enumerated is not a choice that can simply be reversed; see
 `AGENTS.md`, where binding to the USB interface instead is ruled out by the
 display stack's required upper filter.

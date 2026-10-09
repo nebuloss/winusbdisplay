@@ -445,15 +445,26 @@ Write-Host '=== 5. keeping it working after a reboot ==='
 # itself whether a restart is needed. Without that it blanked the panel twice
 # in the first two minutes of every session, the second time to cure a
 # display that was already working.
+#
+# Each trigger then repeats every two minutes for the first fifteen. Firing
+# twice and stopping only catches a display that is already broken by the
+# time the second run happens: measured on one boot, the driver died at 75 s
+# and the last scheduled run at 98 s caught it with 23 seconds to spare,
+# which is luck rather than design. Repeating is only safe because the repair
+# declines when the display is healthy.
 $taskName = 'usbdisplay repair after startup'
 $repairScript = Join-Path $PSScriptRoot 'repair.ps1'
 if (Test-Path $repairScript) {
     try {
         $action = New-ScheduledTaskAction -Execute 'powershell.exe' `
             -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$repairScript`""
-        $atLogon = New-ScheduledTaskTrigger -AtLogOn
+        $repeat = @{
+            RepetitionInterval = (New-TimeSpan -Minutes 2)
+            RepetitionDuration = (New-TimeSpan -Minutes 15)
+        }
+        $atLogon = New-ScheduledTaskTrigger -AtLogOn @repeat
         $atLogon.Delay = 'PT15S'
-        $atBoot = New-ScheduledTaskTrigger -AtStartup
+        $atBoot = New-ScheduledTaskTrigger -AtStartup @repeat
         $atBoot.Delay = 'PT1M'
         $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' `
             -LogonType ServiceAccount -RunLevel Highest
@@ -463,7 +474,8 @@ if (Test-Path $repairScript) {
         Register-ScheduledTask -TaskName $taskName -Action $action `
             -Trigger $atLogon, $atBoot -Principal $principal `
             -Settings $settings -Force | Out-Null
-        Write-Host '    the display will be restarted automatically after startup'
+        Write-Host '    the display will be restarted automatically after startup,'
+        Write-Host '    and again if it fails during the first 15 minutes'
     } catch {
         Write-Host '    WARNING: could not register the startup task'
         Write-Host "    $($_.Exception.Message)"
