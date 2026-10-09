@@ -150,6 +150,84 @@ So the driver is a root-enumerated software device and reaches the dongle
 through user-mode handles instead, which works because UMDF hosts are user
 mode processes. This also means both INF packages must be installed.
 
+### Corrected: binding to the USB interface is possible, and the vendor does it
+
+**The conclusion above was drawn too widely and stood for months. The right
+statement is narrower: IddCx is incompatible with the *WinUsb* dispatcher.
+It is perfectly happy bound to the USB interface with the *NativeUSB* one.**
+
+This is not reasoning. It is the vendor's own INF, read out of the Windows
+installer the dongle carries on its install disk, with
+`usbdisplay\scripts\extract-vendor-driver.ps1`:
+
+```
+[Standard.NTamd64]
+%DeviceName%=MyDevice_Install, USB\VID_345F&PID_9133&MI_03
+
+[MyDevice_HardwareDeviceSettings]
+HKR,, "UpperFilters",  %REG_MULTI_SZ%, "IndirectKmd"
+HKR, "WUDF", "DeviceGroupId", %REG_SZ%, "IddUsbDisplayDriverGroup"
+HKR,,Security,,"D:P(A;;GA;;;BA)(A;;GA;;;SY)(A;;GA;;;WD)(A;;GA;;;UD)"
+
+[MyDevice_Install.NT.Wdf]
+UmdfDispatcher=NativeUSB
+UmdfService=msusbdisplaydriver,msusbdisplaydriver_Install
+UmdfKernelModeClientPolicy = AllowKernelModeClients
+
+[msusbdisplaydriver_Install]
+UmdfLibraryVersion=2.15.0
+ServiceBinary=%12%\UMDF\msusbdisplaydriver.dll
+UmdfExtensions = IddCx0102
+```
+
+So the stock driver is a UMDF indirect display driver, the same shape as this
+one, bound to `MI_03` with `IndirectKmd` above it and no kernel binary
+anywhere in the package: the files are `msUsbDisplayDriver.inf`, a `.cat`,
+and one `.dll` per architecture, installed with
+`devcon dp_add ... USB\VID_345F&PID_9133&MI_03`.
+
+**What this does not buy, and the trap to avoid:** it is not a cure for the
+boot load failure. The same event log shows that very device,
+`USB\VID_345F&PID_9132&MI_03` and `&PID_9133&MI_03`, failing to load with
+`0xC0000365` on 53 boots while the stock driver was the installed one. See
+the boot entry below for the full table. A USB-bound UMDF driver fails at
+boot exactly as a root-enumerated one does, because what is late is the
+service control manager, not the bus.
+
+**What it would buy** is that the device node then belongs to the hardware:
+Plug and Play starts it when the dongle is plugged in and stops it when it is
+pulled out, which is work the watcher thread in `driver/device.*` currently
+does by polling once a second. And it would remove the need for two packages.
+
+**What it would cost** is the pixel path. `NativeUSB` means the driver talks
+to the dongle through the WDF USB target, so the display interface belongs to
+the driver and not to WinUSB, and `usbdisplayctl` could no longer open the
+bulk pipe at all. The console tool is this project's entire hardware harness,
+and every protocol fact in `docs/protocol-notes.md` was measured with it. So
+this is a real option with a real price, not an obvious improvement, and it
+should not be taken for the sake of the boot behaviour, which it does not
+change.
+
+### Getting at the dongle's install disk
+
+The dongle has a fifth interface, `MI_04`, a small mass storage device that
+reports itself as `MS UDISK` and carries the vendor's Windows installer. It
+is how a user with no driver gets one, and it is where the INF above came
+from.
+
+**It is only there for a while after the dongle is powered on, and software
+cannot bring it back.** Measured: the node exists in the Plug and Play
+database for the current session, so it was present early in the boot, and it
+is gone by the time anyone looks. Stopping the display device so nothing
+holds the dongle, then disabling and re-enabling the composite USB device,
+re-enumerates it and the disk does *not* return; the composite device refuses
+to be disabled at all while the driver holds its handles.
+
+So reading it needs a physical unplug and replug, and then a prompt look. The
+alternative, which needs no hardware at all, is to unpack the installer from
+`reference/` with `usbdisplay\scripts\extract-vendor-driver.ps1`; the file on
+the disk is the same installer.
+
 ## Known unresolved issue: IddCxMonitorArrival
 
 Current state: the device starts cleanly (problem 0), both transports open
@@ -805,6 +883,27 @@ interfaces. Nothing about those is root enumerated or peculiar to this
 project. They all came up afterwards, because they are all waiting on the
 same thing.
 
+Counted over the whole surviving event log, 400 of these events:
+
+| device | failures | what it is |
+|---|---|---|
+| `USB\VID_0A5C&PID_5834&MI_01` | 67 | Bluetooth, on a USB interface |
+| `PCI\VEN_8086&DEV_1903` | 67 | on the PCI bus |
+| `USB\VID_0A5C&PID_5834&MI_02` | 67 | Bluetooth, on a USB interface |
+| `BCMNFCUSB\NFC_PROVIDER` | 67 | NFC |
+| `CVUSBDRV\WBF_PROVIDER_TOUCH` | 67 | fingerprint reader |
+| **`USB\VID_345F&PID_9132&MI_03`** | **44** | **the vendor's own driver** |
+| **`USB\VID_345F&PID_9133&MI_03`** | **9** | **the vendor's own driver** |
+| `ROOT\DISPLAY\0000` | 10 | this driver |
+
+**Root, PCI and USB all fail identically, so the bus a driver sits on makes
+no difference, and the two rows that settle the question are the vendor's.**
+Those date from 15/06 to 25/09, which is before this project's device node
+existed on 28/09: that is the stock MacroSilicon driver, bound to the
+dongle's USB interface, failing to load on 53 separate boots. It worked
+anyway, for the same reason ours does, and this is the direct refutation of
+"the stock driver does not have this problem".
+
 **So the floor is when the service control manager is running, and nothing
 in a package moves it.** The reflector retries by itself at that point,
 which is the ~15 second recovery measured above. There is no supported way
@@ -812,9 +911,8 @@ to ask for an earlier start: `UmdfHostProcessSharing`,
 `UmdfKernelModeClientPolicy` and the rest control process and access
 policy, not timing; the reflector service is system managed and is not ours
 to re-sequence; and there is no delayed-start directive for a UMDF device.
-Enumerating under real hardware instead would change when the device
-appears, but that is ruled out independently, by the display stack's upper
-filter.
+**Binding to the USB interface instead is possible, and is covered in its own
+entry below, but the table above shows it would not change this at all.**
 
 What is left to improve is therefore the *recovery*, not the start, and the
 improvement is to stop guessing when the fault happens. Both events above
@@ -896,9 +994,52 @@ no startup repair whatsoever. The release path was unaffected: it builds
 the XML itself. Repetition is now set on the trigger object afterwards,
 through `MSFT_TaskRepetitionPattern`, and the registration is verified.
 
-Being root enumerated is not a choice that can simply be reversed; see
-`AGENTS.md`, where binding to the USB interface instead is ruled out by the
-display stack's required upper filter.
+### The release's repair kept no record, so "the repair did not work" could not be answered
+
+**A second defect, this one in the release path, and worse than the first
+because it destroyed the evidence rather than the mechanism.**
+
+`repair.ps1`, used by source builds, has always appended to
+`%TEMP%\usbdisplay-repair.log`, and the entries in it are what settled every
+earlier question about this mechanism. `driversetup /repair`, which replaced
+it in the release, wrote **nothing at all**. Its `Say` went to stdout, and
+`/quiet`, which is how the scheduled task runs it, discarded even that.
+
+So on a machine with the release installed:
+
+```
+task      : last run 11:00:38, result 0x0
+repair log: last written 10:20:04, which is before this machine booted
+```
+
+The task ran, reported success, and left no trace of what it decided or
+whether it did anything. There was no way to tell a repair that declined
+because the display was healthy from one that never found the device.
+
+Fixed: `/quiet` now silences the console and never the file, and the run is
+stamped with the machine's uptime, because without that there is no telling
+the scheduled run at startup from one somebody did by hand hours later.
+Verified by running it exactly as the task does:
+
+```
+repair log was 1536 bytes
+> driversetup.exe /repair /quiet          (no console output, correctly)
+repair log is now 1787 bytes
+  2026-10-09 11:42:54  repair starting, 3454 s after this machine booted
+  2026-10-09 11:42:54  The driver has already run this session, so nothing
+                       is being restarted: its log has been written since
+                       this machine booted. Use /force to restart it anyway.
+```
+
+**The general rule this is the third instance of: in this project a missing
+log is worse than a bad one.** The driver truncating its log on load cost a
+session, an empty driver log is itself a finding, and now a repair that
+reported success in silence cost another. Anything that runs unattended here
+writes down what it decided.
+
+Being root enumerated is a choice, not a constraint: see the corrected entry
+"binding to the USB interface is possible, and the vendor does it" above.
+What it is not is the cause of the boot load failure.
 
 **Do not go looking for this in the driver log.** Two traps, both of which
 have already wasted a session:

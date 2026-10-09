@@ -76,6 +76,8 @@ usbdisplay\scripts\check-task.ps1         # the startup repair's triggers:
                                           # parses the definition and runs
                                           # each event query for real. Needs
                                           # `driversetup /taskxml` first
+usbdisplay\scripts\extract-vendor-driver.ps1  # unpack the vendor's Windows
+                                          # installer and print its INF
 
 scripts\elev.ps1 -Start                # one UAC prompt per session
 scripts\elev.ps1 -Script <abs path>
@@ -269,11 +271,28 @@ interface-recipient control request to an interface it does not own, so both
 handles are always held. The bulk pipe is exclusive: the tool and the driver
 cannot both run.
 
-The driver is **root enumerated**, not bound to the USB interface, because the
-display stack's required upper filter is incompatible with the framework's
-WinUSB dispatcher. It reaches the hardware through user mode handles, which
-works because these drivers run in a user mode host process. Both packages
-must be installed.
+The driver is **root enumerated**, not bound to the USB interface, and the
+reason is narrower than it used to be stated. The display stack's required
+upper filter is incompatible with the framework's **WinUSB** dispatcher, and
+that is all: the vendor's own driver binds to `MI_03` with
+`UmdfDispatcher = NativeUSB` and `IndirectKmd` above it, read straight out of
+its INF with `usbdisplay\scripts\extract-vendor-driver.ps1`. **So binding to
+USB is possible and is not ruled out by anything.** It is not done here
+because `NativeUSB` means the driver owns the display interface through the
+WDF USB target, which takes the bulk pipe away from `usbdisplayctl`, and the
+console tool is the whole hardware harness. **It also fixes nothing about
+boot**: the same event log has the stock driver failing to load on 53 boots
+at that very interface. See `docs/troubleshooting.md`.
+
+As things stand the driver reaches the hardware through user mode handles,
+which works because these drivers run in a user mode host process. Both
+packages must be installed.
+
+The dongle has a fifth interface, `MI_04`, a small mass storage device
+carrying the vendor's Windows installer. **It is only present for a while
+after the dongle is powered on and no software can bring it back**, so
+reading it needs a physical replug; unpacking the copy in `reference/` is
+the way that needs no hardware.
 
 ## Continuous integration
 
@@ -522,10 +541,13 @@ Each cost real investigation; the evidence is in `docs/protocol-notes.md`.
   the user mode reflector cannot reach the service control manager that
   early. **Windows says exactly that, in the same second, as event 10118:
   "this is expected during boot ... a retry will occur once it has
-  started."** Being root enumerated is not what causes it: on one boot six
-  devices failed together, this display among a fingerprint reader, an NFC
-  radio and two Bluetooth interfaces, none of them root enumerated.
-  **So the start cannot be made earlier, and there is no INF directive,
+  started."** Being root enumerated is not what causes it, and neither is
+  the bus: over 400 of these events in one log, root, PCI and USB devices
+  fail identically, including **the vendor's own driver on 53 boots**, at
+  `USB\VID_345F&PID_9132&MI_03`, while it was the installed one. **So "the
+  stock driver does not have this problem" is measured false, and moving
+  this driver onto the USB interface would not change it.**
+  **The start cannot be made earlier, and there is no INF directive,
   service start type or load order group that moves it.** The floor is when
   the service control manager is running. **The failure is not permanent**:
   measured on every boot whose log survived, one failure at +2 s and
@@ -552,6 +574,13 @@ Each cost real investigation; the evidence is in `docs/protocol-notes.md`.
   is silent**, so check it with `driversetup /taskxml` and
   `usbdisplay\scripts\check-task.ps1`, which runs each query against the
   live event log.
+  **Anything that runs unattended here writes down what it decided.** The
+  release's `driversetup /repair` did not: `/quiet`, which is how the task
+  runs it, discarded its only output, so a task that had run and reported
+  success left no trace of whether it had done anything. That is the third
+  time a missing log has cost a session in this project, after the driver
+  truncating its own on every load and an empty driver log being mistaken
+  for no information. `/quiet` now silences the console and never the file.
 - **A device whose user mode driver failed to load still reports itself
   healthy.** `Get-PnpDevice` says `OK` / `CM_PROB_NONE` / "working
   properly", measured 44 seconds after a load failure and before anything

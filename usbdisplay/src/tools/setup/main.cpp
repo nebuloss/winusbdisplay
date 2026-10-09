@@ -87,14 +87,72 @@ const wchar_t* kFormerInfNames[] = {
 
 bool g_quiet = false;
 
+/* Whether to keep a record of what was said. Only the repair does, because
+ * the installer is watched by whoever started it and the log is there to
+ * answer "what did the unattended repair decide". */
+bool g_keep_log = false;
+
+/* Appends to the repair log as well as printing.
+ *
+ * This matters more than it looks. The repair's whole job is to decide
+ * whether the display needs restarting, and the scheduled task runs it with
+ * `/quiet` as SYSTEM, where nothing is watching stdout. So for the whole life
+ * of the release package the repair left **no record at all** of having run
+ * or of what it decided, and when the display failed after a boot there was
+ * nothing to read. The PowerShell repair used for source builds had always
+ * written this file; the program that replaced it did not, and the difference
+ * went unnoticed because both look silent from outside.
+ *
+ * `/quiet` therefore silences the console and never the file. In this project
+ * an empty log is already a finding; a missing one is not. */
+void LogLine(const wchar_t* text) {
+  if (!g_keep_log) {
+    return;
+  }
+  wchar_t directory[MAX_PATH] = {};
+  if (!GetTempPathW(MAX_PATH, directory)) {
+    return;
+  }
+  const std::wstring path = std::wstring(directory) + L"usbdisplay-repair.log";
+
+  SYSTEMTIME now = {};
+  GetLocalTime(&now);
+
+  FILE* file = nullptr;
+  if (_wfopen_s(&file, path.c_str(), L"a+, ccs=UTF-8") != 0 || !file) {
+    return;
+  }
+  /* Trailing newlines are stripped so that a message wrapped over several
+   * lines for the console still reads as one timestamped entry. */
+  std::wstring line(text);
+  while (!line.empty() && (line.back() == L'\n' || line.back() == L'\r')) {
+    line.pop_back();
+  }
+  for (wchar_t& c : line) {
+    if (c == L'\n' || c == L'\r') {
+      c = L' ';
+    }
+  }
+  if (!line.empty()) {
+    fwprintf(file, L"%04u-%02u-%02u %02u:%02u:%02u  %s\n", now.wYear,
+             now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond,
+             line.c_str());
+  }
+  fclose(file);
+}
+
 void Say(const wchar_t* format, ...) {
+  va_list args;
+  va_start(args, format);
+  wchar_t message[2048];
+  _vsnwprintf_s(message, _TRUNCATE, format, args);
+  va_end(args);
+
+  LogLine(message);
   if (g_quiet) {
     return;
   }
-  va_list args;
-  va_start(args, format);
-  vwprintf(format, args);
-  va_end(args);
+  fputws(message, stdout);
   fflush(stdout);
 }
 
@@ -106,6 +164,7 @@ void Fail(const wchar_t* format, ...) {
   va_end(args);
 
   fwprintf(stderr, L"\n%s\n", message);
+  LogLine(message);
   if (!g_quiet) {
     wprintf(L"\nNothing has been left half installed: run this again once the\n"
             L"problem above is dealt with.\n");
@@ -565,6 +624,12 @@ bool DeviceHasFailed(const std::vector<DeviceNode>& devices,
  * available by hand as `driversetup /repair`. `force` is `/force`, for a
  * user who wants the restart whatever this program thinks. */
 int Repair(bool force) {
+  /* The first thing in the log, and the one line that makes the rest of it
+   * readable: without the uptime there is no telling a run from the
+   * scheduled task at startup from one somebody did by hand hours later. */
+  Say(L"repair starting, %llu s after this machine booted%s\n",
+      GetTickCount64() / 1000ULL, force ? L", forced" : L"");
+
   const std::vector<DeviceNode> devices = FindOurDevices();
   if (devices.empty()) {
     Say(L"No display device is installed, so there is nothing to repair.\n");
@@ -1505,6 +1570,7 @@ int wmain(int argc, wchar_t** argv) {
   if (uninstall) {
     result = Uninstall();
   } else if (repair) {
+    g_keep_log = true;
     result = Repair(force);
   } else if (extend) {
     result = ExtendDesktop();
