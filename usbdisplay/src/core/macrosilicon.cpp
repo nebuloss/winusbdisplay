@@ -676,10 +676,26 @@ bool MacroSiliconDevice::SendTransfer(const uint8_t* data, size_t len) {
     /* Several failures in a row means the chip has stopped accepting data
      * rather than that one transfer was unlucky, and reprogramming is the
      * only way back. Without this the panel stays dark until the dongle is
-     * physically replugged. */
+     * physically replugged.
+     *
+     * **Only while the adapter is still attached, and that condition is
+     * the whole point.** Reprogramming is dozens of control exchanges, and
+     * against hardware that has been unplugged every one of them blocks
+     * until it times out, with this lock held. That is a user mode driver
+     * hang: the framework gives up waiting, takes the device offline with
+     * problem code 43, and the user has no second screen for the rest of
+     * the session. Measured on a cold boot, where the adapter dropped off
+     * the bus a minute in, the driver tried to reprogram it, and the
+     * teardown then waited on a thread that could not return.
+     *
+     * Asked of the link rather than of the hardware, because the question
+     * is answered from what the system already knows. Asking the adapter
+     * whether it is there is precisely the blocking call being avoided. */
     if (++consecutive_failures_ >= 3) {
       consecutive_failures_ = 0;
-      ResetLocked();
+      if (link_->StillPresent()) {
+        ResetLocked();
+      }
     }
     return FailLink("bulk write");
   }

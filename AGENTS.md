@@ -539,6 +539,18 @@ Each cost real investigation; the evidence is in `docs/protocol-notes.md`.
   `FrameSender`, and if no buffer is free, **drop** the region: the damage
   stays owed. Queueing builds unbounded latency and Windows declares the
   monitor hung.
+- **Never touch an adapter that is no longer there, and never join a thread
+  while holding a lock it needs.** Both produce a user mode driver hang,
+  which takes the display offline with problem code 43 for the rest of the
+  session. Measured on a cold boot: the adapter dropped off the bus, the
+  driver answered three failed transfers with a full mode reprogram of
+  absent hardware, every control exchange blocked on its timeout with the
+  device lock held, and `Detach` sat waiting to join that thread. Reset only
+  when `StillPresent()` agrees, and ask the system rather than the hardware,
+  because asking the hardware is the blocking call being avoided. **Event
+  10111 is the only signal for this**, and the driver's log ending with no
+  closing line is how to tell a real hang from the noise a forced disable
+  produces.
 - **A dropped region drops the rest of the frame.** Otherwise a later region
   arrives without the one that should have preceded it.
 - **Do not discard the record of what is on screen when dropping.** Nothing

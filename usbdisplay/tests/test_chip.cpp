@@ -781,6 +781,36 @@ TEST(transfer, repeated_failures_reprogram_the_adapter) {
                 "way, and before this the only recovery was unplugging it");
 }
 
+TEST(transfer, an_unplugged_adapter_is_never_reprogrammed) {
+  Harness harness;
+  CHECK(harness.chip->SetMode(Mode1080p60()));
+  const size_t after_mode = harness.link->controls.size();
+
+  /* The adapter has gone, and its transfers fail because of that. */
+  harness.link->fail_bulk = true;
+  harness.link->present = false;
+
+  const uint8_t frame[64] = {0xFF, 0x00};
+  for (int i = 0; i < 6; ++i) {
+    harness.chip->SendTransfer(frame, sizeof(frame));
+  }
+
+  int transfer_mode_commands = 0;
+  for (size_t i = after_mode; i < harness.link->controls.size(); ++i) {
+    const FakeLink::Control& command = harness.link->controls[i];
+    if (command.op() == kOpVideo && command.sub_op() == kVideoTransferMode) {
+      ++transfer_mode_commands;
+    }
+  }
+  CHECK_EQ_BECAUSE(
+      transfer_mode_commands, 0,
+      "reprogramming is dozens of control exchanges, and against hardware "
+      "that has been unplugged every one blocks until it times out while "
+      "the device lock is held; the framework then reports a user mode "
+      "driver hang and takes the display offline with problem code 43, "
+      "which is how a cold boot ended with no second screen");
+}
+
 TEST(errors, a_control_failure_is_reported_with_context) {
   Harness harness;
   harness.link->fail_control = true;

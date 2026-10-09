@@ -195,6 +195,25 @@ Teardown does cancel any USB transfer in flight rather than waiting for it, via
 `WinUsb_AbortPipe`. Without that, a full frame occupies the bus for over a
 hundred milliseconds and a stop request would genuinely block for that long.
 
+**Corrected: sometimes it really is our driver hanging, and dismissing this
+event cost a session.** The paragraph above is true of a forced disable on a
+healthy adapter, which is the case it was measured against, and false as a
+general rule. On a cold boot where the adapter dropped off the bus while the
+driver was running, event 10111 was the only signal that said what had
+actually happened, and it was accurate:
+
+```
+09:10:12  Microsoft-Windows-DriverFrameworks-UserMode, id 10111
+          "device offline due to a user-mode driver hang.
+           Windows will try to restart the device 5 times."
+```
+
+The driver's own log ends mid-teardown at that moment, with no closing line,
+which is what a hang looks like from inside. So: **treat 10111 as real when
+it coincides with the driver's log stopping, and as noise when it follows a
+deliberate disable.** The distinguishing question is whether the log has a
+closing line after it. See the cold boot hang entry below for the cause.
+
 ## Text shimmer: unresolved
 
 Small text, particularly in File Explorer, shimmers on the USB panel. The
@@ -1052,6 +1071,62 @@ extend**, and the tray stops watching after two minutes, so nothing corrects
 it later in a session. Not yet fixed, and not yet measured: enumerating the
 adapters from PowerShell fails because the struct marshalling is wrong
 there, so this needs a small C++ probe rather than a script.
+
+### Why the device ended up in code 43: the driver really did hang
+
+**This is the driver-side cause of the cold boot failure, and it is fixed.**
+Everything above about that boot describes the symptom and the repair's
+failure to react. This is what actually broke.
+
+Event 10111 named it: a user mode driver hang. The chain, from the driver's
+own log and the system log together:
+
+```
+09:10:11.967  transfers start failing, 0x16 ERROR_BAD_COMMAND
+              (the adapter has dropped off the bus)
+09:10:12.446  detach: adapter is gone, removing the monitor
+09:10:12.469  two more transfers fail, from the sender thread
+              ... log ends here, with no closing line ...
+09:10:12      event 10111, user mode driver hang
+              devnode -> Error / CM_PROB_FAILED_POST_START (43)
+```
+
+Two defects combined to produce it, and both are now fixed.
+
+**1. The driver reprogrammed hardware that was no longer there.**
+`SendTransfer` counts consecutive failures and, on the third, calls
+`ResetLocked()`, which is correct for a chip that is present but wedged and
+catastrophic for one that has been unplugged: a full mode program is dozens
+of HID control exchanges, each of which blocks until it times out, all with
+`device_lock_` held. Exactly three failures are visible in the log before it
+stops, which is the threshold.
+
+The fix is one condition. The reset only happens when `link_->StillPresent()`
+says the adapter is attached, and that is asked of the system rather than of
+the hardware, because asking the hardware is the blocking call being avoided.
+`tests/test_chip.cpp` covers both directions: a present adapter still gets
+reprogrammed after repeated failures, and an absent one never does.
+
+**2. `Detach()` joined threads while holding the lock.** It took `lock_` for
+its whole duration and then stopped the pipeline and the sender, which joins
+their threads. Any callback needing `lock_` during that window could not
+complete, and two of them run on those very threads. Even with defect 1
+fixed this is a deadlock waiting for the right timing. It now moves the
+pipeline, sender and device out under the lock, releases it, and tears them
+down outside, cancelling any transfer in flight first so nothing can hold
+the device lock for the length of a USB timeout while a join is waiting.
+
+**What is verified and what is not.** The unit tests prove the reset
+condition, and both were confirmed to fail when the fix is reverted, so they
+have teeth. **The hang itself has not been reproduced on hardware with the
+fix in place, because the bus drop cannot be induced from software**: both
+`Disable-PnpDevice` and `pnputil /disable-device` refuse the adapter and its
+pixel interface with a generic failure, since the driver holds the pipe
+exclusively. So the reasoning and the unit tests are the evidence, and the
+next cold boot that drops the adapter is the real test. If it happens again,
+the signature to look for is unchanged: the driver's log ending with no
+closing line, alongside event 10111.
+
 
 
 

@@ -247,24 +247,52 @@ bool IndirectDevice::TryAttach() {
 }
 
 void IndirectDevice::Detach() {
-  std::lock_guard<std::mutex> guard(lock_);
-  if (!device_) {
-    return;
+  /* Everything is moved out under the lock and torn down outside it.
+   *
+   * The lock is not held across the teardown, and that is deliberate.
+   * Stopping the pipeline and the sender joins their threads, so holding
+   * the lock while waiting means any callback that needs it cannot
+   * complete, and two of them run on those very threads. A teardown that
+   * cannot finish is reported by the framework as a user mode driver hang,
+   * which takes the device offline with problem code 43 and leaves the
+   * session with no second screen.
+   *
+   * Taking the pointers first also makes a second concurrent Detach a
+   * no-op, since it finds `device_` already null, rather than both of them
+   * tearing the same objects down.
+   *
+   * Order within the teardown still matters, as it did before. Take the
+   * monitor away from Windows first, so it moves the user's windows back
+   * to a real screen rather than leaving them on a display that no longer
+   * exists. Then stop producing, then stop sending: the other way round
+   * means waiting on a transfer to hardware that has been unplugged. */
+  std::unique_ptr<Pipeline> pipeline;
+  std::unique_ptr<FrameSender> sender;
+  std::unique_ptr<DisplayDevice> device;
+  {
+    std::lock_guard<std::mutex> guard(lock_);
+    if (!device_) {
+      return;
+    }
+    Log("detach: adapter is gone, removing the monitor");
+    RemoveMonitor();
+    pipeline = std::move(pipeline_);
+    sender = std::move(sender_);
+    device = std::move(device_);
   }
-  Log("detach: adapter is gone, removing the monitor");
 
-  /* Order matters. Take the monitor away from Windows first, so it moves
-   * the user's windows back to a real screen rather than leaving them on a
-   * display that no longer exists. Then stop producing, then stop sending:
-   * the other way round means waiting on a transfer to hardware that has
-   * been unplugged. */
-  RemoveMonitor();
-  pipeline_.reset();
-  if (sender_) {
-    sender_->Stop();
-    sender_.reset();
+  /* Outside the lock. Cancel first so a transfer in flight cannot hold the
+   * device lock for the length of a USB timeout while the threads are
+   * being joined. */
+  if (device) {
+    device->Cancel();
   }
-  device_.reset();
+  pipeline.reset();
+  if (sender) {
+    sender->Stop();
+    sender.reset();
+  }
+  device.reset();
 }
 
 void IndirectDevice::WatcherLoop() {
