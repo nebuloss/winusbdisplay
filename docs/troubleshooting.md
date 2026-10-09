@@ -1870,3 +1870,190 @@ fifty times a 1080p frame, which forces every update onto the processor path.
 That is not a cause of a dark panel, since the two paths are bit exact and
 the tests enforce it, but anyone comparing this machine against a default one
 should know the shader is not running here.
+
+## The vendor driver revives a chip ours left dark, and its sequence says why
+
+**This is the largest correction in this file. Two things it has asserted for
+a long time are measured false:**
+
+- **"A physical replug cures it and nothing in software does."** The vendor's
+  own Windows driver cured it, in the same session, on the same wedged chip,
+  with no power cycle.
+- **"One full frame from the tool lights it every time."** On that same
+  wedged chip the tool sent a full frame at 232 MB/s and the panel stayed
+  dark.
+
+The measurement, all within four minutes on 09/10, reading the chip over HID
+on MI_00 while whichever driver owned MI_03 was running:
+
+| time | who had the pixel interface | live register | panel |
+|---|---|---|---|
+| 12:49 | ours | `10 33 01 00` | dark |
+| 12:53 | the vendor's | `10 14 44 12` | **showing a picture** |
+| 13:00 | ours again | `10 66 01 00` | dark |
+
+Nothing was unplugged between those rows. The adapter had been powered
+continuously since the 10:45 boot.
+
+### How this was measured, because the method is reusable
+
+**The control plane is HID on MI_00 and the pixel plane is bulk on MI_03, and
+they are different USB interfaces.** Whichever driver owns the pixel plane,
+HID stays open, so `usbdisplayctl` can interrogate the chip while somebody
+else drives it, including the vendor's driver. That is what makes an A/B on
+one adapter possible at all.
+
+```
+usbdisplay\scripts\extract-vendor-driver.ps1   # read the vendor's INF
+usbdisplay\scripts\swap-driver.ps1 -To vendor  # hand over MI_03
+usbdisplay\scripts\dump-registers.ps1 -Label vendor-lit
+usbdisplay\scripts\swap-driver.ps1 -To ours
+```
+
+The swap disables our device node rather than removing it, and leaves both
+our packages in the driver store: what binds the hardware is the WinUSB
+package on MI_03, and the vendor's package replaces it on that one device.
+**Adding the vendor package to the store is not enough**, because both match
+the same hardware id exactly and Windows does not change its mind on its
+own; `devcon update` naming the package is what moves it.
+
+### What the vendor does that we did not
+
+From `ms9132_event_enable` in the vendor's Linux sources, which the Windows
+driver's behaviour matches:
+
+```
+set_trans_enable(0)
+set_video_enable(0)        <- we did not do this
+set_screen_enable(0)       <- we did not do this  (mutes, by register write)
+msleep(50)                 <- we did not do this
+set_power_enable(1)        <- we did not do this here
+msleep(50)                 <- we did not do this
+set_trans_mode(manual block)
+set_video_in_info(w, h, colour, 0)
+set_video_out_info(vic, colour, w, h)
+set_trans_enable(1)
+msleep(50)                 <- we did not do this
+set_video_enable(0)        <- and again, until the first frame lands
+set_screen_enable(0)
+```
+
+Ours stopped transfers and went straight on to reprogram, with no settle at
+any point. **So the geometry of a running video path was being changed
+underneath it.** That is a real defect against the vendor's own reference
+regardless of what it turns out to explain.
+
+A second, plainer bug fell out of the same comparison: **the power-on command
+was only ever sent by `Reset`**, so the ordinary attach path programmed a
+mode without it. It now sits where the vendor puts it, between the stop and
+the programming.
+
+Both are fixed in `SetModeLocked`, and `tests/test_chip.cpp` pins the new
+behaviour: programming must leave the transmitter muted, and must issue the
+video enable command only ever with zero.
+
+### What this does **not** establish, and do not let the next session forget it
+
+**The fix is unverified against the fault.** The honest state:
+
+- The chip recovered on its own, unobserved, between the poke experiment and
+  the attempt to A/B the fix. So the one trial that mattered was run on a
+  chip that was already lit, and proves nothing.
+- A device restart immediately afterwards, **with the unfixed release driver
+  still installed**, left the panel lit. By the standing description this
+  restart should have darkened it. It did not, which only confirms what this
+  file already says: the restart darkens it *and not every time*.
+- Therefore a single successful session is not evidence. **This needs several
+  restarts over several days before it can be called fixed**, and the thing
+  to watch is `usbdisplayctl health` after each.
+
+### Two candidate registers, raised and then refuted in the same session
+
+Worth recording so they are not raised a third time. Diffing the lit vendor
+state against two dark ones gave three addresses that differed consistently:
+
+```
+          vendor (lit)   tool (dark)   ours (dark)
+0xF536         22             3E            3E       <- 0x22 is UYVY
+0xF538         03             00            00       <- 0x03 is manual block
+0xD06C         11             31            31       <- 0x11 is RGB888
+```
+
+That looked conclusive: two of the three hold values this project already has
+names for. It is not.
+
+- **0xF536 and 0xF538 are read only.** Writing them is accepted and changes
+  nothing: `was 3E, wrote 22, now 3E`. They report chip state rather than
+  setting it.
+- **0xD06C takes a write and it changed nothing**: the panel stayed dark with
+  it set to 0x11.
+- **And the correlation itself is false.** Later in the same session the panel
+  was confirmed showing a picture under our own driver while 0xF536 still
+  read 0x3E and 0xF538 still read 0x00. So they track which driver programmed
+  the chip, or something else again, but not whether the panel is lit.
+
+**0xFB00 was a fourth candidate and went the same way.** It reads 0x01 under
+ours and 0x0D after the vendor has run, which looked like the whole answer
+until it stayed at 0x0D across the swap back while the panel darkened anyway.
+
+The one register that does track the panel remains the live indicator, the
+third byte at 0xFB1A, exactly as this file already says.
+
+### What the vendor's traffic looks like, which is a separate finding
+
+Captured with the xHCI driver's own tracing rather than a sniffer, because
+there is no packet capture on this machine and adding a kernel filter driver
+to a machine whose display driver is under investigation is a poor trade.
+`usbdisplay\scripts\capture-usb.ps1` enables the provider and
+`usbdisplay\scripts\redraw-load.ps1` supplies an identical stimulus to both
+drivers: a fixed 400x120 box of 9 point text, repainted ten times a second.
+
+Validated first against our own driver, where it reproduced the documented
+behaviour exactly, which is why it can be trusted on the vendor's:
+
+```
+ours  : 491536 bytes, then 491536 again 1.5 ms later, every ~512 ms
+        49 zero length packets in 12 s
+        17.6 transfers/s
+```
+
+The pairs 1.5 ms apart are the two internal buffers; the 491536 is a 128 row
+band; the zero length packets are the terminators. All as documented.
+
+The vendor, under the same load:
+
+```
+vendor: 101200, 101200, 62736, ... 10 to 20 ms apart
+        sizes from 17936 to 111584, about twenty distinct values
+        4147216 (a whole frame) every ~2.5 s when idle
+        2 zero length packets in 26 s
+        46.6 transfers/s, 61.9 MB in 26 s
+```
+
+Four differences, each worth its own investigation:
+
+- **It sends many small regions where we send fixed 128 row bands.** Twenty
+  distinct transfer sizes against our two.
+- **It does not appear to send each region twice back to back.** Consecutive
+  equal sizes are 10 to 20 ms apart, not 1.5 ms. This is the sharpest
+  challenge to a rule this project treats as settled, and it is not yet a
+  refutation: the sizes alone cannot show whether a region is being repeated
+  or whether two different regions happen to be the same size.
+- **It sends almost no zero length packets.** Two in 26 seconds against our
+  49 in 12. Probably because its transfer lengths are rarely an exact
+  multiple of the 1024 byte packet size, which is the only case where a
+  terminator is needed; ours are 491536, which is not a multiple either, so
+  **why we send one after every transfer deserves re-examination.**
+- **Its idle keepalive is a whole frame every 2.5 s**, not a walking band.
+
+None of that is implemented here. It is recorded because it is the first
+direct observation of the vendor driver this project has ever had, and
+because the shimmer hypothesis that remained -- that a whole screen update is
+visible as a sweep -- now has a concrete alternative: the vendor simply never
+sends a whole screen while text is redrawing.
+
+**What is still missing is payloads.** The xHCI provider's bus trace
+keywords exist and produce nothing on this build, so the control transfers
+are visible only as 8 byte lengths. Reading what the vendor actually writes
+needs USBPcap or similar, and that is the next step if the register
+comparison above is to be taken further.

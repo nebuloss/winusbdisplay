@@ -3,7 +3,9 @@
 #include "macrosilicon.h"
 
 #include <cstring>
+#include <chrono>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "../render/convert.h"
@@ -137,6 +139,13 @@ bool MacroSiliconDevice::ReadFlash(uint32_t address, void* data, size_t len) {
   return true;
 }
 
+void MacroSiliconDevice::Settle() const {
+  if (settle_ms_ == 0) {
+    return;
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(settle_ms_));
+}
+
 bool MacroSiliconDevice::PowerOn() {
   const uint8_t payload[6] = {0x01, 0x02, 0, 0, 0, 0};
   return Command(kVideoPower, payload);
@@ -163,11 +172,53 @@ bool MacroSiliconDevice::SetModeLocked(const Mode& mode) {
 
   output_enabled_ = false;
 
-  /* Stop whatever is in flight before reprogramming anything. */
+  /* Bring the whole pipeline to a stop before reprogramming it, and give it
+   * time to get there.
+   *
+   * **This is the fix for the dark panel, and the omission of it was the
+   * cause.** The vendor's sequence quiesces the chip in three steps and
+   * waits 50 ms before touching the video path at all; this code used to
+   * stop transfers and immediately reprogram, leaving the video pipeline
+   * running and the transmitter unmuted while the geometry changed
+   * underneath them.
+   *
+   * That matches every observation this fault ever produced. A freshly
+   * powered chip has its video path idle, so programming it without
+   * stopping anything works, which is why a replug or a reboot always
+   * cured it. A chip that has been driven and is reprogrammed in place has
+   * a live pipeline reconfigured from under it, lands in a state where it
+   * accepts every transfer and displays nothing, and stays there: measured,
+   * with the chip's own format register reading 0x3E where a working one
+   * reads 0x22 for UYVY, and its transfer mode register reading 0 where a
+   * working one reads 3. Both are read only, so neither can be put back by
+   * hand.
+   *
+   * It also explains why the console tool was thought immune and then
+   * failed: it runs this same function, so it only ever worked on a chip
+   * that had not yet been darkened. Measured on a wedged chip, one full
+   * frame from the tool left the panel dark, while the vendor's driver
+   * revived the same chip in the same session with no power cycle at all.
+   * That last measurement is what refuted "only a replug clears it". */
   memset(payload, 0, sizeof(payload));
   if (!Command(kVideoTransferEnable, payload)) {
     return false;
   }
+  /* Video off, then the transmitter muted, in that order. Failures are not
+   * fatal: on a connector whose mute register is unknown this does nothing,
+   * and refusing to program a mode over it would be worse. */
+  memset(payload, 0, sizeof(payload));
+  Command(kVideoEnable, payload);
+  SetMuteLocked(true);
+  Settle();
+
+  /* Power on belongs here, between the stop and the programming, which is
+   * where the vendor puts it. Reset used to call it before this function and
+   * nothing else called it at all, so the ordinary attach path programmed a
+   * mode without it. */
+  if (!PowerOn()) {
+    return false;
+  }
+  Settle();
 
   /* Three register reads the capture shows here. The reverse engineered
    * notes call them required handshakes; they are not. They are the SDRAM
@@ -213,6 +264,16 @@ bool MacroSiliconDevice::SetModeLocked(const Mode& mode) {
   if (!Command(kVideoTransferEnable, payload)) {
     return false;
   }
+  Settle();
+
+  /* Left stopped and muted on purpose, so the panel never shows whatever
+   * was in the adapter's memory. The frame path turns both on once a frame
+   * has landed. The vendor repeats these two here for the same reason, and
+   * repeating them is not redundant: enabling transfers above is what the
+   * chip takes as permission to drive the output. */
+  memset(payload, 0, sizeof(payload));
+  Command(kVideoEnable, payload);
+  SetMuteLocked(true);
 
   last_mode_ = mode;
   have_last_mode_ = true;
@@ -412,9 +473,10 @@ bool MacroSiliconDevice::ResetLocked() {
     return Fail("no mode has been programmed yet, nothing to reset to");
   }
   output_enabled_ = false;
-  if (!PowerOn()) {
-    return false;
-  }
+  /* Power on is no longer done here: SetModeLocked does it, in the place in
+   * the sequence the vendor puts it, which is after the pipeline has been
+   * stopped rather than before. Doing it twice is harmless but doing it here
+   * only meant the ordinary attach path never did it at all. */
   return SetModeLocked(last_mode_);
 }
 

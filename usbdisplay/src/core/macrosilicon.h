@@ -118,6 +118,16 @@ class MacroSiliconDevice : public DisplayDevice {
    * is physically unplugged. */
   bool Reset();
 
+  /* How long to let the chip settle at the three points in mode programming
+   * where the vendor driver waits. Fifty milliseconds each, from the vendor
+   * source, and the waits are the point rather than an accident: see
+   * SetModeLocked.
+   *
+   * Settable only so the tests can zero it. Fifteen of them program a mode,
+   * and three real sleeps each would add two seconds to a suite whose whole
+   * value is that it runs in under a second. */
+  void set_settle_ms(unsigned ms) { settle_ms_ = ms; }
+
   bool ReadDisplayStatus(uint8_t* status);
   bool ReadChipId(ChipId* id);
 
@@ -166,6 +176,12 @@ class MacroSiliconDevice : public DisplayDevice {
   bool identified_ = false;
 
   void RememberModel(ChipModel model);
+
+  /* Sleeps, when programming a mode calls for it. A plain wait rather than
+   * anything the Link knows about, because the chip needs time rather than
+   * traffic. */
+  void Settle() const;
+  unsigned settle_ms_ = 50;
 
   std::unique_ptr<Link> link_;
 

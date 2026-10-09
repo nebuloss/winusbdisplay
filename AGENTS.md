@@ -744,20 +744,48 @@ the protocol has now been reached, and what is left is a USB capture of the
 vendor driver while small text redraws.
 
 **The dark panel is reproducible on the MS9132 adapter and still
-unexplained.** One full frame from the tool lights it every time; starting
-the driver darkens it within seconds, with a clean log and every transfer
-succeeding. Measured away already: the brightness tray and its gamma
-repaint, the keepalive band walk, the band pattern itself including the
-double transmission, failing or cancelled transfers, and skipped mode
-programming. **Do not re-test those.**
+unexplained.** Starting the driver darkens it within seconds, with a clean
+log and every transfer succeeding. Measured away already: the brightness
+tray and its gamma repaint, the keepalive band walk, the band pattern itself
+including the double transmission, failing or cancelled transfers, and
+skipped mode programming. **Do not re-test those.**
 
-**A physical replug cures it and nothing in software does.** That is the
-shape of the fault: a wedge in the adapter that survives everything the
-host can send. A frame from the tool lights the panel while the chip is
-still wedged, and the driver re-darkens it, so **"a full frame revives a
-dark adapter" is too strong: it revives the picture, not the chip.** Every
-failed remedy in the history of this bug was applied to a chip that was
-still in that state.
+**Two claims this section used to make are now measured false, and the
+correction matters more than anything else in it.**
+
+- **"A physical replug cures it and nothing in software does."** Wrong. **The
+  vendor's own Windows driver revived the wedged chip**, in the same session,
+  with no power cycle: ours dark at 12:49, the vendor's showing a picture at
+  12:53, ours dark again at 13:00, nothing unplugged. So the fault is
+  software-clearable and the vendor knows how.
+- **"One full frame from the tool lights it every time."** Wrong. On that
+  same wedged chip the tool sent a whole frame at 232 MB/s and the panel
+  stayed dark. The tool runs the same `SetModeLocked`, so it was never
+  immune, only ever lucky in the order things were tried.
+
+**Comparing against the vendor's own enable sequence found two real defects,
+and they are fixed.** Our mode programming stopped transfers and went
+straight on to reprogram; the vendor stops transfers, stops video, mutes the
+transmitter, waits 50 ms, powers on, waits 50 ms, programs, and waits again.
+**So the geometry of a running video path was being changed underneath it.**
+And the power-on command was only ever sent by `Reset`, so the ordinary
+attach path never sent it at all. Both are now as the vendor has them.
+
+**That fix is not verified against the fault, and must not be written up as
+the cure.** The chip recovered on its own before it could be A/B tested, and
+a restart with the unfixed driver then left the panel lit, which only
+confirms that the restart darkens it *and not every time*. Several restarts
+over several days are needed. The sequence is right because the vendor's
+reference says so, not because the panel has been seen to stay lit.
+
+**Four registers have now been raised as the cause and refuted.** `0xF536`
+(reads 0x22 for UYVY under the vendor, 0x3E under ours) and `0xF538` (0x03
+for manual block against 0x00) are **read only**, so they report state
+rather than set it; `0xD06C` takes a write and changed nothing; `0xFB00`
+stayed at the vendor's value across the swap back while the panel darkened
+anyway. **And the correlation itself is false**: the panel was later
+confirmed lit under our driver with `0xF536` still reading 0x3E. The only
+register that tracks the panel is the live indicator at `0xFB1A`.
 
 **A real defect was found and fixed here, and it is not the cure.** A failed
 bulk transfer returned without sending the end-of-block packet, leaving the
@@ -765,18 +793,37 @@ chip waiting for the rest of a block. That is genuinely wrong, the vendor
 never does it, and it is fixed. **But the dark panel survives the fix**:
 with it installed and the adapter in a known good state, the first device
 restart darkened the panel again with zero failed transfers and a clean
-teardown. So the trigger is something in the stop sequence that is not a
-failed transfer.
+teardown.
 
 Three explanations are now **refuted, so do not revisit them**: that the
 attach path matters, which held for seven sessions and broke on the next
 two; that re-programming the mode on a live chip is what darkens it, which
 the tool disproves by doing exactly that four times with the panel lit; and
-that the missing terminator was the cause. The remaining untested suspect,
-with the reasoning, is in `docs/troubleshooting.md`: `Cancel` sends a bare
-terminator even when no transfer was in flight, which the vendor never
-does. **The restart is what darkens it, not the install**, and not every
-time.
+that the missing terminator was the cause. **The restart is what darkens it,
+not the install**, and not every time.
+
+**The vendor's driver can be run on this hardware and compared against,
+which is how all of the above was settled.** The control plane is HID on
+MI_00 and stays readable whoever owns the pixel plane, so `usbdisplayctl`
+can interrogate the chip while the vendor's driver drives it:
+
+```
+usbdisplay\scripts\extract-vendor-driver.ps1   # its INF, out of the installer
+usbdisplay\scripts\swap-driver.ps1 -To vendor  # hand MI_03 over, reversibly
+usbdisplay\scripts\dump-registers.ps1 -Label x # wide dump, for diffing
+usbdisplay\scripts\capture-usb.ps1 -Label x    # transfer sizes and timing
+usbdisplay\scripts\redraw-load.ps1             # identical stimulus for both
+usbdisplay\scripts\swap-driver.ps1 -To ours
+```
+
+**Its traffic differs from ours in four ways, none of them yet acted on**: it
+sends many small regions where we send fixed 128 row bands, about twenty
+distinct sizes against our two; consecutive equal sizes are 10 to 20 ms
+apart rather than 1.5 ms, which is the first evidence against the
+send-everything-twice rule and is *not* a refutation, because sizes alone
+cannot distinguish a repeat from two regions that happen to match; it sends
+two zero length packets in 26 s where we send 49 in 12; and its idle
+keepalive is a whole frame every 2.5 s rather than a walking band.
 
 ## Style
 

@@ -138,6 +138,9 @@ struct Harness {
     auto owned = std::unique_ptr<FakeLink>(new FakeLink());
     link = owned.get();
     chip.reset(new MacroSiliconDevice(std::move(owned)));
+    /* Mode programming waits three times for the chip to settle, which is
+     * load bearing against real hardware and pure delay against a fake. */
+    chip->set_settle_ms(0);
   }
 };
 
@@ -444,6 +447,20 @@ int WroteTo(const FakeLink& link, uint16_t address) {
   return -1;
 }
 
+/* The *last* value written to a register, which is the one the chip is left
+ * holding. Mode programming now mutes the output deliberately before
+ * reprogramming, so the first write to the mute register and the final state
+ * of it are different questions. */
+int LastWroteTo(const FakeLink& link, uint16_t address) {
+  int value = -1;
+  for (const FakeLink::Control& control : link.controls) {
+    if (control.op() == kOpWriteXdataByte && control.address() == address) {
+      value = control.bytes[3];
+    }
+  }
+  return value;
+}
+
 void BringUpHdmi(Harness& harness, uint16_t chip_register, uint8_t part,
                  uint8_t family, uint16_t mute_register, uint8_t mute_value) {
   harness.link->registers[chip_register] = part;
@@ -463,7 +480,7 @@ TEST(mute, a_usb3_chip_is_unmuted_at_its_own_register) {
   BringUpHdmi(harness, kRegChipId913x, kSignaturePart912A, kSignatureFamily913x,
               kRegHdmiMute913x, 0xFF);
   CHECK_BECAUSE(
-      WroteTo(*harness.link, kRegHdmiMute913x) == (0xFF & ~kHdmiMuteBit),
+      LastWroteTo(*harness.link, kRegHdmiMute913x) == (0xFF & ~kHdmiMuteBit),
       "the mute bit has to be cleared for a picture to leave the chip, and "
       "the USB 3 parts keep it at a different address from the USB 2 ones");
   CHECK_BECAUSE(WroteTo(*harness.link, kRegHdmiMute912x) == -1,
@@ -475,26 +492,55 @@ TEST(mute, a_usb2_chip_is_unmuted_at_its_own_register) {
   Harness harness;
   BringUpHdmi(harness, kRegChipId912x, kSignaturePart912C, kSignatureFamily912x,
               kRegHdmiMute912x, 0xFF);
-  CHECK_EQ(WroteTo(*harness.link, kRegHdmiMute912x), 0xFF & ~kHdmiMuteBit);
+  CHECK_EQ(LastWroteTo(*harness.link, kRegHdmiMute912x), 0xFF & ~kHdmiMuteBit);
   CHECK(WroteTo(*harness.link, kRegHdmiMute913x) == -1);
 }
 
-TEST(mute, an_already_unmuted_chip_is_left_alone) {
+TEST(mute, programming_a_mode_mutes_before_it_reprograms) {
+  Harness harness;
+  harness.link->registers[kRegChipId913x] = kSignaturePart912A;
+  harness.link->registers[kRegChipId913x + 1] = kSignatureFamily913x;
+  harness.link->registers[kRegChipId913x + 2] = kSignatureTail;
+  harness.link->registers[kRegVideoPort] = 0x05; /* HDMI */
+  harness.link->registers[kRegHdmiMute913x] = 0x00;
+
+  CHECK(harness.chip->SetMode(Mode1080p60()));
+
+  /* The whole of the dark panel fix is that the pipeline is brought to a
+   * stop before its geometry changes. Reprogramming a chip whose video path
+   * is still running and whose transmitter is still unmuted leaves it
+   * accepting every transfer and displaying nothing, and nothing but a power
+   * cycle or the vendor's own driver recovers it. */
+  CHECK_EQ_BECAUSE(
+      LastWroteTo(*harness.link, kRegHdmiMute913x), kHdmiMuteBit,
+      "mode programming must leave the transmitter muted, so the panel never "
+      "shows the adapter's leftover memory and the geometry never changes "
+      "under a live pipeline");
+}
+
+TEST(mute, an_already_unmuted_chip_is_not_rewritten_when_the_output_comes_up) {
   Harness harness;
   BringUpHdmi(harness, kRegChipId913x, kSignaturePart912A, kSignatureFamily913x,
               kRegHdmiMute913x, 0x00);
+  /* Programming has just muted it on purpose, so start counting from here.
+   * Enabling the output clears the bit; a second enable should find it
+   * already clear and write nothing. */
+  CHECK(harness.chip->EnableOutput(true));
+  harness.link->controls.clear();
+  CHECK(harness.chip->EnableOutput(true));
   CHECK_BECAUSE(WroteTo(*harness.link, kRegHdmiMute913x) == -1,
-                "an adapter that comes up showing a picture should not be "
-                "written to at all, so this costs a read and nothing more");
+                "an adapter already showing a picture should not be written "
+                "to at all, so this costs a read and nothing more");
 }
 
 TEST(mute, turning_the_output_off_mutes_it) {
   Harness harness;
   BringUpHdmi(harness, kRegChipId913x, kSignaturePart912A, kSignatureFamily913x,
               kRegHdmiMute913x, 0x00);
+  CHECK(harness.chip->EnableOutput(true));
   harness.link->controls.clear();
   CHECK(harness.chip->EnableOutput(false));
-  CHECK_EQ(WroteTo(*harness.link, kRegHdmiMute913x), kHdmiMuteBit);
+  CHECK_EQ(LastWroteTo(*harness.link, kRegHdmiMute913x), kHdmiMuteBit);
 }
 
 TEST(mute, a_connector_we_have_no_register_for_is_not_guessed_at) {
@@ -657,11 +703,29 @@ TEST(modeset, leaves_the_output_disabled) {
   Harness harness;
   CHECK(harness.chip->SetMode(Mode1080p60()));
 
-  CHECK_EQ_BECAUSE(
-      harness.link->IndexOfCommand(kVideoEnable), -1,
-      "the adapter's memory still holds the previous session's picture, so "
-      "lighting the panel before a frame has landed shows that instead of "
-      "the desktop");
+  /* The enable command is issued during programming now, and always with
+   * zero: twice to quiesce the pipeline before the geometry changes, which
+   * is the dark panel fix, and never to turn the output on. What must hold
+   * is that nothing enables it, because the adapter's memory still holds the
+   * previous session's picture and lighting the panel before a frame has
+   * landed shows that instead of the desktop. */
+  int enables = 0;
+  int disables = 0;
+  for (const FakeLink::Control& command : harness.link->controls) {
+    if (command.op() == kOpVideo && command.sub_op() == kVideoEnable) {
+      if (command.bytes[2] == 0) {
+        ++disables;
+      } else {
+        ++enables;
+      }
+    }
+  }
+  CHECK_EQ_BECAUSE(enables, 0,
+                   "programming a mode must never turn the output on, or the "
+                   "panel shows the adapter's leftover memory");
+  CHECK_BECAUSE(disables > 0,
+                "and it must turn it off, because reprogramming a running "
+                "video path is what leaves the chip dark for the session");
 }
 
 TEST(modeset, brackets_the_reprogramming_with_transfer_enable) {
