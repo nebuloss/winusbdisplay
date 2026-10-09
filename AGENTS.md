@@ -499,12 +499,18 @@ Each cost real investigation; the evidence is in `docs/protocol-notes.md`.
   healthy.** `Get-PnpDevice` says `OK` / `CM_PROB_NONE` / "working
   properly", measured 44 seconds after a load failure and before anything
   had restarted it. The kernel side started; only the host process did not.
-  So **never decide anything from the devnode status**: it reads identically
-  in the broken case and the working one. The usable signal is the driver's
-  log, because nothing else writes it. A log last written before the machine
-  booted means the driver has not run this session. The startup repair uses
-  exactly that, so the second trigger does not blank a display the first one
-  already fixed.
+  So **`OK` is not evidence of anything** and must never be used to decide
+  that a repair is unnecessary. The usable signal for that is the driver's
+  log, because nothing else writes it: a log last written before the machine
+  booted means the driver has not run this session.
+  **The converse is not symmetric, and getting that wrong cost a session.**
+  A status of *error* is Windows' own verdict that it has stopped the
+  device, a working display never reads that way, and it is the only signal
+  for a driver that loaded and then died. The repair therefore acts on
+  either "has not run this session" or "is in an error state", and declines
+  otherwise. **Problem codes meaning somebody switched it off
+  (`CM_PROB_DISABLED` and its neighbours) are excluded**, or the repair
+  turns a deliberately disabled device back on behind the user's back.
 - **A monitor arriving is not a screen appearing, and this failure is
   invisible from inside the driver.** Measured: driver loaded, monitor
   announced, swapchain assigned, 489 MB sent, nothing dropped, and *one*

@@ -52,15 +52,15 @@ if ($devices.Count -eq 0) {
 
 # Has the driver run at all since this machine booted?
 #
-# Deliberately not Get-PnpDevice's Status, which says OK for a device whose
-# user mode driver failed to load, and so cannot tell the broken case from
-# the working one. The log can: nothing but the driver writes it.
+# Deliberately not Get-PnpDevice's Status as evidence of *health*, which
+# says OK for a device whose user mode driver failed to load and so cannot
+# tell the broken case from the working one. The log can: nothing but the
+# driver writes it.
 #
-# This asks only whether the driver ever started this session, which is the
-# cold boot fault and nothing else. It does not try to spot a driver that
-# started and later stopped showing a picture. That is a different problem,
-# and automatic recovery for it was implemented, measured and withdrawn
-# because it blinked healthy displays; see docs/troubleshooting.md.
+# This question alone is not enough, though, and shipping it alone was a
+# mistake. It covers a driver that never loaded and nothing else, so a
+# driver that loaded, ran for a minute and then died was read as "already
+# run, nothing to do". See the error check below.
 $boot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
 $driverLog = Join-Path $env:WINDIR 'Temp\usbdisplaydd.log'
 $ranThisSession = $false
@@ -82,14 +82,61 @@ try {
     $because = "could not read $driverLog ($($_.Exception.Message))"
 }
 
-if ($ranThisSession -and -not $Force) {
-    Note "the driver has already run this session, so nothing is restarted: $because"
+# Has Windows stopped the device because it reported a problem?
+#
+# The other half of the decision, and it was missing. The two directions of
+# the devnode status are not symmetric, which is the point:
+#
+#   OK    proves nothing. It reads OK for a device whose user mode driver
+#         never loaded, so it cannot be used to decide a repair is needless.
+#   Error is Windows' own verdict that it has stopped the device. A working
+#         display never reads that way, so it can be used to decide a repair
+#         is needed.
+#
+# Measured on a cold boot: the driver loaded 17 s in, ran for a minute, then
+# its transfers failed, the adapter dropped off the bus and the devnode went
+# to CM_PROB_FAILED_POST_START. This script then ran twice and declined both
+# times, because the driver had indeed "already run". The user had one screen
+# for the rest of the session.
+#
+# This is not the automatic recovery that was withdrawn for blinking healthy
+# displays. That was driven by a chip register describing what the adapter
+# was transmitting, which has been wrong on a working panel. A Plug and Play
+# problem code cannot be a false alarm.
+#
+# A device somebody switched off is excluded, and from the restart below as
+# well. Being disabled is a problem code like any other, and turning it back
+# on behind the user's back would overrule a deliberate choice, which a
+# repair must never do.
+$deliberate = 'CM_PROB_DISABLED', 'CM_PROB_HARDWARE_DISABLED', 'CM_PROB_DISABLED_SERVICE'
+$switchedOff = @($devices | Where-Object { $deliberate -contains [string]$_.Problem })
+foreach ($d in $switchedOff) {
+    Note ("{0} is switched off, so it is left alone" -f $d.InstanceId)
+}
+
+# Only these are candidates for a restart.
+$devices = @($devices | Where-Object { $deliberate -notcontains [string]$_.Problem })
+if ($devices.Count -eq 0) {
+    Note 'every display device is switched off, so there is nothing to repair'
+    Note 'repair done'
+    exit 0
+}
+
+$failed = @($devices | Where-Object { $_.Status -ne 'OK' })
+
+if ($ranThisSession -and $failed.Count -eq 0 -and -not $Force) {
+    Note "the driver has already run this session and the device is healthy, so nothing is restarted: $because"
     Note 'repair done'
     exit 0
 }
 
 if ($Force) {
     Note 'restarting because -Force was given'
+} elseif ($failed.Count -gt 0) {
+    foreach ($d in $failed) {
+        Note ("the device has failed: {0} reports {1} / {2}" -f
+              $d.InstanceId, $d.Status, $d.Problem)
+    }
 } else {
     Note "the driver has not run this session: $because"
 }

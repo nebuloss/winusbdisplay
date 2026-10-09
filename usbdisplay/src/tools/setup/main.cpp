@@ -499,6 +499,61 @@ int ExtendDesktop() {
   return 1;
 }
 
+/* Has Windows stopped one of our devices because it reported a problem?
+ *
+ * This is the second half of the repair's decision, and it was missing.
+ * Asking only "has the driver run this session" covers a driver that never
+ * loaded and nothing else, so a driver that loaded, ran for a minute and
+ * then died left the repair declining to act on the grounds that it had
+ * already run. Measured on a cold boot: the devnode sat in
+ * CM_PROB_FAILED_POST_START, the repair ran twice and declined twice, and
+ * the user had no second screen for the rest of the session.
+ *
+ * **This does not contradict the rule that the devnode status is useless
+ * here. The two directions are not symmetric.** A status of OK proves
+ * nothing, because it reads OK for a device whose user mode driver never
+ * loaded, which is why it cannot be used to decide that a repair is
+ * unnecessary. A status of *error* is Windows' own verdict that it has
+ * stopped the device, and a working display never reads that way, so it can
+ * be used to decide that a repair is needed.
+ *
+ * Nor is this the automatic recovery that was withdrawn for blinking
+ * healthy displays. That was driven by a chip register that reports what
+ * the adapter is transmitting and has been wrong on a working panel. This
+ * is a Plug and Play problem code, which cannot be a false alarm. */
+bool DeviceHasFailed(const std::vector<DeviceNode>& devices,
+                     std::wstring* because) {
+  for (const DeviceNode& device : devices) {
+    DEVINST node = 0;
+    if (CM_Locate_DevNodeW(&node, const_cast<DEVINSTID_W>(
+                                      device.instance.c_str()),
+                           CM_LOCATE_DEVNODE_PHANTOM) != CR_SUCCESS) {
+      continue;
+    }
+    ULONG status = 0;
+    ULONG problem = 0;
+    if (CM_Get_DevNode_Status(&status, &problem, node, 0) != CR_SUCCESS) {
+      continue;
+    }
+    if ((status & DN_HAS_PROBLEM) != 0) {
+      /* Except when somebody turned it off on purpose. A disabled device
+       * has a problem code like any other, and re-enabling it behind the
+       * user's back would be this program overruling a deliberate choice,
+       * which is the one thing a repair must never do. */
+      if (problem == CM_PROB_DISABLED || problem == CM_PROB_HARDWARE_DISABLED ||
+          problem == CM_PROB_DISABLED_SERVICE) {
+        continue;
+      }
+      wchar_t text[160] = {};
+      swprintf_s(text, L"Windows has stopped it with problem code %lu",
+                 problem);
+      *because = text;
+      return true;
+    }
+  }
+  return false;
+}
+
 /* The repair itself, as run after startup by the scheduled task below and
  * available by hand as `driversetup /repair`. `force` is `/force`, for a
  * user who wants the restart whatever this program thinks. */
@@ -510,14 +565,18 @@ int Repair(bool force) {
   }
 
   std::wstring because;
-  if (DriverRanThisSession(&because) && !force) {
+  std::wstring failure;
+  const bool failed = DeviceHasFailed(devices, &failure);
+  if (DriverRanThisSession(&because) && !failed && !force) {
     Say(L"The driver has already run this session, so nothing is being\n"
         L"restarted: %s.\n"
         L"Use /force to restart it anyway.\n",
         because.c_str());
     return 0;
   }
-  if (!force) {
+  if (failed && !force) {
+    Say(L"The display device has failed: %s.\n", failure.c_str());
+  } else if (!force) {
     Say(L"The driver has not run this session: %s.\n", because.c_str());
   }
 

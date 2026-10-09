@@ -984,6 +984,76 @@ What this confirms, and what it does not:
   rather than the tray having applied it. A boot with the arrangement
   deliberately cleared first would separate those.
 
+### The repair missed a driver that started and then died
+
+**A hole in the repair shipped in v0.3.0, found on the next cold boot, and
+reported as "not working after power off and power on".** The boot was a
+genuine cold boot, `BootType=0`, with Fast Startup off, so none of that is
+involved.
+
+```
+09:08:57  booted
+09:08:59  WUDFRd failed to load, 0xC0000365        (known, worked around)
+09:09:14  DriverEntry, 17 s in                     (something re-enumerated it)
+09:09:14..09:10:11  running normally, 202 regions, 108 MB, failed=0
+09:10:11  transfers fail: WinUsb_WritePipe, 0x16 ERROR_BAD_COMMAND
+09:10:12  detach: adapter is gone, removing the monitor
+          devnode -> Error / CM_PROB_FAILED_POST_START (code 43)
+09:09:42  repair ran: declined, "the driver has already run this session"
+09:10:35  repair ran again: declined, the same
+```
+
+The driver loaded, ran for a minute, and then the adapter dropped off the
+bus and Windows stopped the device. **The repair declined twice, correctly
+by its own test and uselessly in fact**, because it asked only whether the
+driver had ever run this session. It had. The user was left with one screen
+for the rest of the session and no automatic recovery.
+
+This was a documented limitation, written here as deliberate, justified by
+the withdrawn automatic recovery that blinked healthy displays. That
+justification does not apply, and the distinction is the lesson:
+
+| signal | what it is | usable for |
+|---|---|---|
+| devnode `OK` | reads OK even when the driver never loaded | **nothing** |
+| devnode `Error` | Windows' own verdict that it stopped the device | deciding a repair **is needed** |
+| chip live register | what the adapter is transmitting; has been wrong on a working panel | logging only |
+
+The withdrawn recovery was driven by the third row. The repair now uses the
+second, which cannot be a false alarm: a working display is never in an
+error state.
+
+**Fixed.** The repair acts when the driver has not run this session **or**
+the device is in an error state, and declines otherwise.
+
+**With one exclusion that is not optional.** Being switched off is a problem
+code like any other (`CM_PROB_DISABLED`, code 22), so the first version
+turned a deliberately disabled device straight back on. Caught by testing
+the exclusion rather than assuming it. Deliberate codes are now skipped, in
+both the decision and the restart loop.
+
+That accident also demonstrated the positive path end to end: before the
+exclusion existed, `DeviceHasFailed` detected the problem code, the repair
+restarted the device and the driver came back. **Code 43 itself has not
+been reproduced on demand**, so what is proved is the mechanism, not that
+particular code.
+
+**A second fault is visible in the same evidence and is not fixed.** After
+the forced repair the driver was healthy, the monitor announced and frames
+flowing, yet `AllScreens` reported one screen and
+`SetDisplayConfig(SDC_TOPOLOGY_EXTEND)` returned success while changing
+nothing. `driversetup /extend` reported the display as already attached, so
+its check and the screen count disagree. The likely reason is that the
+adapter was in clone rather than extend, which satisfies
+`DISPLAY_DEVICE_ATTACHED_TO_DESKTOP` while producing no second screen, and
+there may also be stale `\\.\DISPLAYn` entries from earlier sessions
+carrying that flag. **`MonitorIsOnTheDesktop` cannot tell clone from
+extend**, and the tray stops watching after two minutes, so nothing corrects
+it later in a session. Not yet fixed, and not yet measured: enumerating the
+adapters from PowerShell fails because the struct marshalling is wrong
+there, so this needs a small C++ probe rather than a script.
+
+
 
 One encouraging measurement: restarting the device with
 `driversetup /repair /force` **keeps** the extended desktop, even though the
