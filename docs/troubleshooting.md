@@ -1789,3 +1789,84 @@ variable left standing is whether the adapter had lost power recently.
 
 
 
+
+### Occurrence 09/10, and the one new thing it adds
+
+**The panel was black for most of a working day while the driver reported
+perfect health.** Recorded because the numbers are the most extreme yet and
+because it rules in a trigger that had only been suspected.
+
+The state, measured while the user had a black screen:
+
+```
+driver     : running, DriverEntry 11:29:02, log written 5 s ago
+device     : OK / CM_PROB_NONE
+desktop    : two screens, DISPLAY1 + DISPLAY5, both 1920x1080
+pipeline   : sent=15768 skipped=63 dropped=0 failed=0, 6944 MB total
+chip       : DARK (10 33 01 00)
+```
+
+**Nearly seven gigabytes delivered, not one failed or dropped transfer, over
+sixty-seven minutes, onto a panel that showed nothing.** Every signal inside
+the driver and every signal Windows offers says this display is working. Only
+the chip register and the user disagree, and they are the two that matter.
+
+This also disposes of the remaining doubt about which of the three failure
+shapes was in play. The driver had loaded, the monitor was on the desktop,
+and the panel was dark: so it was neither the boot load failure nor the
+missing topology, and no amount of work on the startup repair could ever have
+addressed it. **That is worth stating because the repair had just been
+improved twice and the display was still black, which invites the conclusion
+that the repair is broken. It was not; it was the wrong mechanism.**
+
+**The new fact: an involuntary host process death is a trigger.** The
+sequence, from the log of the generation that died and the one that replaced
+it:
+
+```
+11:28:14  pipeline: acquire returned 0x887A0026, stopping     (ACCESS_LOST)
+11:28:14  pipeline: stopped, sent=10206 skipped=80
+11:28:14  ReleaseHardware: stopping ... done in 15 ms         (clean, closing line)
+11:28:14  System: UMDF 10111 and 10120, host process stopped
+11:29:02  DriverEntry, 48 s later                             (framework retry)
+          mode programmed, full frame 1, and dark ever since
+```
+
+Previous records of this fault all followed a deliberate restart: an install,
+a disable and enable, a repair. This one followed a crash nobody asked for,
+and the adapter had been powered continuously since the 10:45 boot. It fits
+the standing explanation exactly, that what matters is whether the adapter
+has lost power recently rather than how the driver came to restart, and it is
+the first sample where the restart was involuntary.
+
+Note also that the teardown was clean and had its closing line, while
+events 10111 and 10120 were logged in the same second. By the rule recorded
+earlier in this file, a closing line means the driver did not hang, so 10111
+here is the framework reporting a host that was stopped rather than one that
+was stuck. **10120 is the event that says a user mode driver had a problem
+and the host was stopped, and it deserves watching**: it is the signal for
+this shape of failure, and nothing in the driver's own log says the host is
+about to die.
+
+**A logging defect found while reading this, and fixed.** The clean teardown
+above printed:
+
+```
+detach: adapter is gone, removing the monitor
+```
+
+The adapter was not gone. All four of its USB interfaces were `OK` at that
+moment and still are. `Detach` is one function, called both from the watcher
+when the hardware really has been unplugged and from `ReleaseHardware` on an
+ordinary stop, and it claimed the former in both cases. **That line reads
+exactly like the one fault it is most important to recognise**, the cold boot
+hang where the adapter drops off the bus, and it misled this very session. It
+now says why it is detaching: `the adapter is gone`, or `the driver is
+stopping`.
+
+**And one setting worth noticing on this machine**, left over from an
+experiment rather than shipped: `GpuThresholdPixels` is 100000000, about
+fifty times a 1080p frame, which forces every update onto the processor path.
+That is not a cause of a dark panel, since the two paths are bit exact and
+the tests enforce it, but anyone comparing this machine against a default one
+should know the shader is not running here.

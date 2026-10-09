@@ -246,7 +246,7 @@ bool IndirectDevice::TryAttach() {
   return true;
 }
 
-void IndirectDevice::Detach() {
+void IndirectDevice::Detach(const char* why) {
   /* Everything is moved out under the lock and torn down outside it.
    *
    * The lock is not held across the teardown, and that is deliberate.
@@ -274,7 +274,7 @@ void IndirectDevice::Detach() {
     if (!device_) {
       return;
     }
-    Log("detach: adapter is gone, removing the monitor");
+    Log("detach: %s, removing the monitor", why);
     RemoveMonitor();
     pipeline = std::move(pipeline_);
     sender = std::move(sender_);
@@ -318,7 +318,7 @@ void IndirectDevice::WatcherLoop() {
     if (!attached) {
       TryAttach();
     } else if (!still_present) {
-      Detach();
+      Detach("the adapter is gone");
     }
   }
 }
@@ -334,7 +334,7 @@ void IndirectDevice::ReleaseHardware() {
     watcher_.join();
   }
 
-  Detach();
+  Detach("the driver is stopping");
 
   if (watcher_stop_) {
     CloseHandle(watcher_stop_);

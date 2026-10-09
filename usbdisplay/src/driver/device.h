@@ -91,7 +91,14 @@ class IndirectDevice {
   /* Opens the adapter and brings the monitor up. Returns false when the
    * hardware is not there, which is an ordinary state and not an error. */
   bool TryAttach();
-  void Detach();
+
+  /* Takes the monitor away and closes the adapter. `why` is logged, and is
+   * not decoration: this runs both when the hardware has been unplugged and
+   * on an ordinary stop, and a single message covering both claimed the
+   * adapter had vanished every time the driver was shut down. That reads in
+   * the log exactly like the one fault it is most important to recognise,
+   * and it has already sent an investigation the wrong way. */
+  void Detach(const char* why);
 
   void WatcherLoop();
 
