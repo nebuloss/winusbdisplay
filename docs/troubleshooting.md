@@ -2057,3 +2057,80 @@ keywords exist and produce nothing on this build, so the control transfers
 are visible only as 8 byte lengths. Reading what the vendor actually writes
 needs USBPcap or similar, and that is the next step if the register
 comparison above is to be taken further.
+
+### The mode-setting fix has now been through a boot, and the display came up
+
+**First evidence for the fix rather than for the sequence being right in
+principle.** Boot of 12/10, with the corrected `SetModeLocked` installed:
+
+```
+09:49:03  booted
+09:49:07  WUDFRd failed to load for ROOT\DISPLAY\0000, 0xC0000365
+          (and UMDF 10118 in the same second, as always)
+09:49:26  DriverEntry, 22 s after this machine started
+09:49:33  mode programmed, monitor announced, pipeline running
+10:11:38  sent=6468 skipped=99 dropped=24 failed=0, 2156 MB
+          health: showing a picture (10 01 44 12)
+          desktop: two screens
+```
+
+Twenty-two minutes of continuous use with the panel lit, and the repair task
+declining on every run because there was nothing wrong. **One boot is not a
+verification**, and the fault was always intermittent, so this is a data
+point and not a conclusion. What it does rule out is the fix having broken
+the ordinary path, which was the real risk in changing mode programming.
+
+The 24 dropped regions are expected and not a fault: a drop means the sender
+had no free buffer and the damage stays owed. `failed=0` is the number that
+would matter.
+
+### The four-trigger repair task survives a boot
+
+Also first measured here. All four triggers registered and the task ran
+repeatedly through the first fifteen minutes, declining every time:
+
+```
+state Ready, 4 triggers
+  MSFT_TaskLogonTrigger  delay=PT15S
+  MSFT_TaskBootTrigger   delay=PT1M
+  MSFT_TaskEventTrigger  delay=PT25S     (Kernel-PnP 219)
+  MSFT_TaskEventTrigger  delay=PT30S     (UMDF 10110/10111)
+last run 10:04:28, result 0x0
+
+10:00:31  the driver has already run this session and the device is
+          healthy, so nothing is restarted
+```
+
+**The event trigger for 219 did not fire into a repair**, which is the
+correct outcome: it is delayed 25 s precisely so the framework's own retry
+wins first, and the retry landed at 22 s. So the delay is doing its job on
+real hardware and not only in the XML.
+
+And the repair now leaves a record, which is the whole point of the earlier
+fix: every decision above is quoted from `usbdisplay-repair.log`, a file
+that would have been empty in the release before this one.
+
+### Correction: the traffic comparison was not like for like
+
+The table of transfer sizes above compares **our driver idle** against **the
+vendor's under the text load**, because the capture of ours was taken before
+the load script existed. That invalidates the first of the four differences
+it claims: "it sends many small regions where we send fixed 128 row bands"
+is comparing a keepalive band walk against real damage, and proves nothing.
+
+What survives the correction:
+
+- **The idle keepalive genuinely differs**, and both sides of that were
+  measured idle: ours walks a 128 row band every ~512 ms, the vendor sends a
+  whole frame every ~2.5 s.
+- **The zero length packet counts differ**, 2 in 26 s against 49 in 12 s,
+  and that is worth examining on its own terms.
+
+What is not established and needs a matched capture:
+
+- whether the vendor sends each region twice,
+- whether it uses many small regions where we would use bands.
+
+`usbdisplay\scripts\redraw-load.ps1` exists now, so the matched capture is
+one command on each side. **Do not quote the four differences until it has
+been taken.**

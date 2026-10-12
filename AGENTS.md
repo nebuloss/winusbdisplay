@@ -774,7 +774,10 @@ attach path never sent it at all. Both are now as the vendor has them.
 **That fix is not verified against the fault, and must not be written up as
 the cure.** The chip recovered on its own before it could be A/B tested, and
 a restart with the unfixed driver then left the panel lit, which only
-confirms that the restart darkens it *and not every time*. Several restarts
+confirms that the restart darkens it *and not every time*. **One boot with
+the fix installed has since come up with the panel lit and held it for
+twenty-two minutes**, which rules out the change having broken the ordinary
+path but is a single sample of an intermittent fault. Several more restarts
 over several days are needed. The sequence is right because the vendor's
 reference says so, not because the panel has been seen to stay lit.
 
@@ -816,14 +819,14 @@ usbdisplay\scripts\redraw-load.ps1             # identical stimulus for both
 usbdisplay\scripts\swap-driver.ps1 -To ours
 ```
 
-**Its traffic differs from ours in four ways, none of them yet acted on**: it
-sends many small regions where we send fixed 128 row bands, about twenty
-distinct sizes against our two; consecutive equal sizes are 10 to 20 ms
-apart rather than 1.5 ms, which is the first evidence against the
-send-everything-twice rule and is *not* a refutation, because sizes alone
-cannot distinguish a repeat from two regions that happen to match; it sends
-two zero length packets in 26 s where we send 49 in 12; and its idle
-keepalive is a whole frame every 2.5 s rather than a walking band.
+**Its traffic differs from ours in two measured ways and two unmeasured
+ones.** Established, both sides captured idle: its keepalive is a whole frame
+every 2.5 s rather than a walking band, and it sends two zero length packets
+in 26 s where we send 49 in 12. **Not established, because the first capture
+compared ours idle against the vendor's under load**: whether it sends each
+region twice, and whether it uses many small regions where we use fixed 128
+row bands. `redraw-load.ps1` gives both sides the same stimulus, so take the
+matched capture before quoting either.
 
 ## Style
 
