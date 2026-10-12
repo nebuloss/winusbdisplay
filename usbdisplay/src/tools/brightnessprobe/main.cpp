@@ -64,6 +64,44 @@ BOOL CALLBACK OnMonitor(HMONITOR handle, HDC, LPRECT, LPARAM) {
   return TRUE;
 }
 
+/* Does writing the brightness actually change anything?
+ *
+ * Asked separately from reading, because a monitor can answer every read and
+ * ignore every write. Measured on an iiyama PLE2483H: it advertises DDC/CI,
+ * lists the brightness feature, reports 100 of 100, accepts a write with a
+ * success return, and does not move. A probe that only reads calls that
+ * monitor controllable and sends whoever reads it down the wrong path.
+ *
+ * Restores the original value whether or not the test succeeded. */
+bool DdcCiWriteIsHonoured(HANDLE physical, DWORD original, DWORD minimum,
+                          DWORD maximum) {
+  if (maximum <= minimum) {
+    return false;
+  }
+  const DWORD span = maximum - minimum;
+  /* Away from whichever end it is nearest, so a monitor already at its
+   * maximum or minimum can still be tested. */
+  const DWORD probe = (original - minimum) * 2 > span
+                          ? original - span / 10
+                          : original + span / 10;
+  if (!SetMonitorBrightness(physical, probe)) {
+    return false;
+  }
+
+  bool moved = false;
+  for (int attempt = 0; attempt < 5 && !moved; ++attempt) {
+    Sleep(50);
+    DWORD low = 0, seen = 0, high = 0;
+    if (GetMonitorBrightness(physical, &low, &seen, &high) &&
+        seen != original) {
+      moved = true;
+    }
+  }
+
+  SetMonitorBrightness(physical, original);
+  return moved;
+}
+
 /* DDC/CI, the path an external monitor answers. */
 void ProbeDdcCi(const MonitorInfo& monitor) {
   DWORD count = 0;
@@ -84,8 +122,19 @@ void ProbeDdcCi(const MonitorInfo& monitor) {
     DWORD minimum = 0, current = 0, maximum = 0;
     if (GetMonitorBrightness(physical[i].hPhysicalMonitor, &minimum, &current,
                              &maximum)) {
-      printf("    DDC/CI      WORKS, brightness %lu (%lu..%lu)\n", current,
-             minimum, maximum);
+      if (DdcCiWriteIsHonoured(physical[i].hPhysicalMonitor, current, minimum,
+                               maximum)) {
+        printf("    DDC/CI      WORKS, brightness %lu (%lu..%lu)\n", current,
+               minimum, maximum);
+      } else {
+        printf("    DDC/CI      READS ONLY: reports %lu (%lu..%lu) and\n"
+               "                accepts a write, but the value never moves.\n"
+               "                Some monitors lock brightness in an eco or\n"
+               "                preset picture mode; check the monitor's own\n"
+               "                menu. Until then only the image path can dim\n"
+               "                this screen.\n",
+               current, minimum, maximum);
+      }
     } else {
       const DWORD code = GetLastError();
       printf("    DDC/CI      no (error %lu%s)\n", code,

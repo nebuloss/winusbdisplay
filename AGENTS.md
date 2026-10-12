@@ -691,6 +691,22 @@ Each cost real investigation; the evidence is in `docs/protocol-notes.md`.
   graphics card's signalling hardware, and the WMI path needs a kernel
   driver this project does not have and could not test. `brightnessprobe`
   reports which paths a given monitor answers.
+- **The tray also drives ordinary monitors, and two assumptions about them
+  were wrong.** It picks per monitor between our own path, DDC/CI and the
+  gamma ramp, so a directly connected screen is its business too.
+  **A monitor that answers a DDC/CI read may still ignore every write**: an
+  iiyama PLE2483H advertises the feature, reports 100 of 100, returns success
+  from a write and never moves, so a read-only probe chose it and the slider
+  did nothing. The probe now writes, checks the value moved, restores it, and
+  caches the answer per monitor, because the monitor list is rebuilt every
+  four seconds and the test costs a flicker. A false "cannot write" only
+  costs image dimming; a false "can write" costs all control.
+  **And a gamma ramp outlives the process that set it**, so starting up with
+  `applied_ = 100` on a screen left at 72% made the top of the slider a
+  no-op, since `Set` returns early when asked for the value it thinks is
+  already applied. It now reads the ramp and adopts it, but only when the
+  table is a straight line, because a colour profile leaves a curve that no
+  single percentage describes.
 - **Create the Direct3D device once, not per swapchain.** The first creation
   in a process loads the graphics driver and takes hundreds of
   milliseconds, by which time a swapchain handed to a callback has gone

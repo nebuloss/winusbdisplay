@@ -7,6 +7,8 @@
 #include <physicalmonitorenumerationapi.h>
 
 #include <algorithm>
+#include <map>
+#include <string>
 
 namespace usbdisplay {
 namespace {
@@ -14,6 +16,14 @@ namespace {
 int Clamp(int value, int low, int high) {
   return value < low ? low : (value > high ? high : value);
 }
+
+/* Whether a monitor's backlight actually responded to being written to, kept
+ * for the life of the process and keyed by the monitor's identity.
+ *
+ * The test behind this costs a brief change of brightness, so it must happen
+ * once per monitor and not on every rescan, and the monitor list is rebuilt
+ * every four seconds. */
+std::map<std::wstring, bool> g_ddc_writable;
 
 /* Brightness over the display cable, adjusting the monitor's own backlight.
  *
@@ -71,14 +81,74 @@ class DdcCiControl : public BrightnessControl {
   }
 
   /* True only if the monitor answered at least once, so a monitor that is
-   * merely switched off is not mistaken for one that cannot be controlled. */
-  bool Probe() {
-    int ignored = 0;
-    return Get(&ignored);
+   * merely switched off is not mistaken for one that cannot be controlled.
+   *
+   * **Answering a read is not enough, and believing it was cost a session.**
+   * An iiyama PLE2483H advertises DDC/CI, lists the brightness feature in
+   * its capabilities string, returns 100 of 100 when read, accepts a write
+   * with a success return, and then ignores it: the value reads back
+   * unchanged and the backlight does not move. With a read-only probe that
+   * monitor won the selection below and the user got a slider that did
+   * nothing, when the gamma path underneath it would have worked.
+   *
+   * So the probe writes as well, and checks the monitor noticed. The cost of
+   * being wrong is asymmetric, which is what settles the design: a false
+   * "cannot write" drops to adjusting the image, which always works and is
+   * merely poorer at the dark end, while a false "can write" leaves the user
+   * with no brightness control at all and no clue why.
+   *
+   * The result is cached per monitor for the life of the process, because
+   * this costs a visible flicker and the monitor list is rebuilt every few
+   * seconds. */
+  bool Probe(const std::wstring& identity) {
+    int current = 0;
+    if (!Get(&current)) {
+      return false;
+    }
+
+    const auto cached = g_ddc_writable.find(identity);
+    if (cached != g_ddc_writable.end()) {
+      return cached->second;
+    }
+
+    const bool writable = WriteIsHonoured(current);
+    g_ddc_writable[identity] = writable;
+    return writable;
   }
 
  private:
   static constexpr BYTE kBrightnessCode = 0x10;
+
+  /* Nudges the brightness, checks it moved, and puts it back.
+   *
+   * Nudged away from whichever end it is nearest, so a monitor sitting at
+   * 100 or at 0 can still be tested. Ten percent, because some monitors
+   * quantise coarsely and a single step can round away to nothing.
+   *
+   * The read back is retried: a monitor may take a moment to report its new
+   * value, and calling that a failure would send a perfectly good display
+   * down the gamma path. */
+  bool WriteIsHonoured(int original) {
+    const int probe = original > 50 ? original - 10 : original + 10;
+    if (!Set(probe)) {
+      return false;
+    }
+
+    bool moved = false;
+    for (int attempt = 0; attempt < 5 && !moved; ++attempt) {
+      Sleep(50);
+      int seen = 0;
+      if (Get(&seen) && seen != original) {
+        moved = true;
+      }
+    }
+
+    /* Always restore, including when the test failed: the monitor may have
+     * moved its backlight without reporting it, and leaving the user's
+     * screen dimmed by a diagnostic would be inexcusable. */
+    Set(original);
+    return moved;
+  }
 
   HANDLE monitor_ = nullptr;
   DWORD minimum_ = 0;
@@ -173,10 +243,49 @@ class GammaControl : public BrightnessControl {
     WORD table[3][256];
     const bool ok = GetDeviceGammaRamp(dc, table) != FALSE;
     DeleteDC(dc);
+    if (ok) {
+      AdoptExistingRamp(table[0]);
+    }
     return ok;
   }
 
  private:
+  /* Works out what dimming is already in force, so the slider starts where
+   * the screen actually is.
+   *
+   * **Assuming 100 here left the user unable to reach full brightness, which
+   * reads as the slider being broken.** A gamma ramp outlives the process
+   * that set it, so a tray starting up inherits whatever the last one left,
+   * and this one began by believing the screen was undimmed. Set() returns
+   * early when the value asked for equals the value it thinks is applied, so
+   * dragging to 100 on a screen left at 72 did nothing at all.
+   *
+   * Only adopted when the table looks like one of ours, which is a straight
+   * line through the origin. A colour profile or calibration tool leaves a
+   * curve, and reading a percentage off that would be meaningless, so in
+   * that case the old assumption is kept and the first move of the slider
+   * takes the screen over. */
+  void AdoptExistingRamp(const WORD* red) {
+    /* Three points rather than one: a single sample cannot tell a dimmed
+     * straight line from the middle of a curve. */
+    const int samples[] = {64, 128, 192};
+    int percent = -1;
+    for (const int at : samples) {
+      const int identity = at * 257;
+      const int found = (red[at] * 100 + identity / 2) / identity;
+      if (percent < 0) {
+        percent = found;
+      } else if (found < percent - 2 || found > percent + 2) {
+        return; /* not a straight line, so not ours to interpret */
+      }
+    }
+    if (percent < kMinimumPercent || percent > 100) {
+      return;
+    }
+    applied_ = percent;
+    wanted_ = percent;
+  }
+
   /* Below roughly a third, Windows starts refusing the table outright, so
    * the slider stops there rather than appearing to do nothing. */
   static constexpr int kMinimumPercent = 30;
@@ -458,7 +567,8 @@ BOOL CALLBACK OnMonitor(HMONITOR handle, HDC, LPRECT, LPARAM) {
 }
 
 /* Opens the display-cable control for a monitor, if it answers. */
-std::unique_ptr<BrightnessControl> TryDdcCi(HMONITOR handle) {
+std::unique_ptr<BrightnessControl> TryDdcCi(HMONITOR handle,
+                                           const std::wstring& identity) {
   DWORD count = 0;
   if (!GetNumberOfPhysicalMonitorsFromHMONITOR(handle, &count) || count == 0) {
     return nullptr;
@@ -477,7 +587,7 @@ std::unique_ptr<BrightnessControl> TryDdcCi(HMONITOR handle) {
     DestroyPhysicalMonitor(physical[i].hPhysicalMonitor);
   }
 
-  if (!control->Probe()) {
+  if (!control->Probe(identity)) {
     return nullptr;
   }
   return control;
@@ -509,7 +619,7 @@ std::vector<Monitor> FindMonitors() {
       }
     }
     if (!monitor.control) {
-      monitor.control = TryDdcCi(candidate.handle);
+      monitor.control = TryDdcCi(candidate.handle, candidate.identity);
     }
     if (!monitor.control) {
       std::unique_ptr<GammaControl> gamma(new GammaControl(candidate.device));
